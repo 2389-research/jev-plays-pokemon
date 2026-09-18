@@ -81,11 +81,11 @@ Return ONLY JSON: {"path": "(x,y)->(x,y)->...", "x": <int>, "y": <int>, "reason"
 STRATEGIST_SYSTEM = """You are the STRATEGIC planner (tier 2) for an agent playing Pokémon Red,
 working toward the first gym (Brock, in Pewter City, north). The fast navigator is BLOCKED and
 cannot proceed on its own — usually a STORY GATE (an NPC who won't move, a locked path, a
-required item/errand). Use your knowledge of Pokémon Red to work out the SEQUENCE of steps that
-unblocks progress.
+required item/errand). Work out the SEQUENCE of steps that unblocks progress.
 
-You are given: WHY_BLOCKED, CURRENT_MAP (id + name), PARTY, ITEMS, BADGES, and MAPS (an
-id→name table for reference — use these exact ids).
+You are given: WHY_BLOCKED, CURRENT_MAP (id + name), PARTY, ITEMS, BADGES, MAPS (an id→name
+table — use these exact ids), and REFERENCE_KNOWLEDGE (retrieved walkthrough/guide passages
+from the knowledge base — TRUST these over your own memory when they conflict).
 
 Reason about what the game requires here (e.g. fetch an item from a shop and deliver it, talk to
 a specific person, enter a building), then output an ORDERED list of steps. Each step is a MAP to
@@ -98,13 +98,14 @@ Return ONLY JSON:
 
 class Planner:
     def __init__(self, *, goal_map: int | None = None, level_target: int = 0,
-                 heal_hp: float = 0.80, reflector=None, provider=None, strategist=None):
+                 heal_hp: float = 0.80, reflector=None, provider=None, strategist=None, knowledge=None):
         self.goal_map = goal_map
         self.level_target = level_target
         self.heal_hp = heal_hp
         self.reflector = reflector      # optional generative strategist (maintains AgentPlan)
         self.provider = provider        # tier-1 chat_json provider (LunaRoute-fast) for targets
         self.strategist = strategist    # tier-2 chat_json provider (LunaRoute-strong) for quests
+        self.knowledge = knowledge      # optional Orrery KnowledgeBase for retrieval-grounded quests
 
     def strategize(self, emu, memory=None, *, why: str = "") -> list[Directive]:
         """Tier-2 problem solving: given a blocked situation, return an ORDERED quest of
@@ -115,6 +116,11 @@ class Planner:
             return []
         cur = emu.read_memory(WCURMAP)
         try:
+            # retrieval-grounded planning: pull relevant guide passages from the knowledge base
+            reference = []
+            if self.knowledge is not None:
+                q = f"{why}. In {map_name(cur)}, playing Pokemon Red toward the first gym — what should I do?"
+                reference = self.knowledge.query_texts(q, top_k=5)
             state = {
                 "why_blocked": why,
                 "current_map": {"id": cur, "name": map_name(cur)},
@@ -122,6 +128,7 @@ class Planner:
                 "party": [f"{p['species']} L{p['level']}" for p in read_party(emu)],
                 "items": [it["item"] for it in read_items(emu)],
                 "badges": read_badges(emu)["count"],
+                "reference_knowledge": reference,
                 "maps": {str(mid): name for mid, name in MAP_NAMES_RAW.items()},
             }
             content, _, _ = prov.chat_json(STRATEGIST_SYSTEM, state)

@@ -106,6 +106,9 @@ def main() -> None:
     ap.add_argument("--planner-model", default="glm-5.3-vision", help="vision model for reflection")
     ap.add_argument("--strategist-model", default="glm-5.3",
                     help="strong text model for tier-2 quest planning when the path is story-gated")
+    ap.add_argument("--orrery-workspace", default=None,
+                    help="Orrery noosphere workspace id for the knowledge base (or env ORRERY_WORKSPACE_ID)")
+    ap.add_argument("--orrery-url", default=None, help="Orrery base URL (default env or http://localhost:8100)")
     ap.add_argument("--goal", default="Leave the current area")
     ap.add_argument("--steps", type=int, default=30)
     ap.add_argument("--speed", type=int, default=None,
@@ -208,6 +211,12 @@ def main() -> None:
             reasoner = Reasoner(vprov)
         low_conf_reflect = None if (low_conf_reflect is not None and low_conf_reflect <= 0) else low_conf_reflect
 
+        # Orrery knowledge base (optional): retrieval-grounded quest planning
+        from pokemon_agent.agent.knowledge import KnowledgeBase
+        knowledge = KnowledgeBase.from_env(args.orrery_url, args.orrery_workspace)
+        if knowledge is not None:
+            print(f"knowledge base: Orrery {knowledge.base_url} workspace={knowledge.workspace_id}")
+
         # --- persistent memory + checkpointing (P0) ---
         from pokemon_agent.agent.memory import AgentMemory
         ckpt_dir = Path(args.checkpoint_dir) if args.checkpoint_dir else (states_dir.parent / "runs" / "ckpt")
@@ -228,7 +237,8 @@ def main() -> None:
                              checkpoint_every=args.checkpoint_every,
                              checkpoint_dir=(ckpt_dir if args.checkpoint_every else None),
                              goal_map=args.goal_map, level_target=args.level_target,
-                             strategist_provider=strategist_provider, on_event=on_event_r)
+                             strategist_provider=strategist_provider, knowledge=knowledge,
+                             on_event=on_event_r)
         print(f"running REASON mode decider={args.decider} model={rmodel} vision={use_vision} goal={args.goal!r}")
         try:
             loop.run(max_steps=args.steps)

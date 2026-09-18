@@ -86,6 +86,7 @@ class ReasoningLoop:
         goal_map: int | None = None,
         level_target: int = 0,
         strategist_provider=None,
+        knowledge=None,
         on_event: Optional[Callable[[str, dict], None]] = None,
     ):
         self.builder = builder
@@ -126,7 +127,7 @@ class ReasoningLoop:
             self.arbiter = NeedsArbiter(goal_map=goal_map, level_target=level_target)
             self.planner = Planner(goal_map=goal_map, level_target=level_target,
                                    reflector=reasoner, provider=prov,
-                                   strategist=strategist_provider or prov)
+                                   strategist=strategist_provider or prov, knowledge=knowledge)
         # executive state (the single source of truth + its suspension stack + quest queue)
         self._directive: Directive | None = None
         self._dstack: list[Directive] = []

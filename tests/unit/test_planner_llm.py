@@ -128,3 +128,21 @@ def test_strategize_builds_quest_from_llm_steps():
 
 def test_strategize_empty_without_provider():
     assert Planner(goal_map=2).strategize(FakeEmulator(map_id=1), _mem(), why="x") == []
+
+
+class FakeKB:
+    def __init__(self, texts):
+        self.texts = texts
+
+    def query_texts(self, q, top_k=5):
+        self.last_q = q
+        return list(self.texts)
+
+
+def test_strategize_includes_retrieved_knowledge():
+    strat = FakeProvider('{"plan":"deliver parcel","steps":[{"map":42,"talk":true,"why":"get parcel"}]}')
+    kb = FakeKB(["Oak's Parcel gate: get the parcel from the Viridian Mart clerk"])
+    p = Planner(goal_map=2, strategist=strat, knowledge=kb)
+    p.strategize(FakeEmulator(map_id=1), _mem(), why="blocked by old man north of Viridian")
+    assert strat.state["reference_knowledge"] == ["Oak's Parcel gate: get the parcel from the Viridian Mart clerk"]
+    assert "old man" in kb.last_q  # the block reason drives the retrieval query

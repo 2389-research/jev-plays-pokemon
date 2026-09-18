@@ -63,6 +63,10 @@ def test_bot_chooses_a_move_slot():
     assert client.state["your_moves"] == {"0": "Tackle", "1": "Tail Whip"}
     # out-of-range choice is clamped to a valid slot
     assert battle_agent.choose_move(FakeClient("9"), emu)[0] == 1
+    # retrieved type-effectiveness knowledge is injected into Jev's decision state
+    c2 = FakeClient("0")
+    battle_agent.choose_move(c2, emu, type_knowledge=["Water is super effective vs Rock"])
+    assert c2.state["type_knowledge"] == ["Water is super effective vs Rock"]
 
 
 @pytest.mark.skipif(not (ROM.exists() and FIXTURE.exists()),

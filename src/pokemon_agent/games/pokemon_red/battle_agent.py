@@ -13,11 +13,12 @@ from .game_state import read_battle
 
 CHOOSE_MOVE_INSTRUCTIONS = (
     "You are choosing the best move in a Pokémon Red battle. You are given both "
-    "Pokémon's species, level, HP and status, and your available moves. Pick the move "
-    "that best progresses toward winning THIS battle: usually the move that deals the "
-    "most damage given the type match-up, but consider status/setup moves when they "
-    "help (e.g. lowering the foe's stats, or when you can safely set up). Prefer a "
-    "damaging move when the foe is low on HP and you can knock it out."
+    "Pokémon's species, level, HP and status, your available moves, and TYPE_KNOWLEDGE "
+    "(retrieved type-effectiveness guidance — use it to judge which of your moves is "
+    "super effective against the opponent). Pick the move that best progresses toward "
+    "winning THIS battle: usually the SUPER-EFFECTIVE / highest-damage move for the "
+    "type match-up, but consider status/setup moves when they help. Prefer a damaging "
+    "move when the foe is low on HP and you can knock it out."
 )
 
 
@@ -30,8 +31,19 @@ def battle_state_summary(emu: Emulator) -> dict:
     }
 
 
-def choose_move(client, emu: Emulator) -> tuple[int, float]:
-    """Ask the TypeSafe client which move slot to use. Returns (slot, confidence)."""
+def battle_lookup_query(emu: Emulator) -> str:
+    """The knowledge-base query for the current match-up (enemy + your move options)."""
+    b = read_battle(emu) or {}
+    enemy = (b.get("enemy") or {}).get("species", "the opponent")
+    moves = ", ".join(battle.active_moves(emu)) or "my moves"
+    return (f"Pokemon Red type effectiveness: which move types are super effective against "
+            f"{enemy}? Which of these moves is best: {moves}?")
+
+
+def choose_move(client, emu: Emulator, *, type_knowledge: list[str] | None = None) -> tuple[int, float]:
+    """Ask the TypeSafe client which move slot to use. ``type_knowledge`` is optional retrieved
+    type-effectiveness guidance (from the knowledge base) injected into Jev's decision state.
+    Returns (slot, confidence)."""
     from typesafe_sdk import Choice
 
     moves = battle.active_moves(emu)
@@ -39,6 +51,8 @@ def choose_move(client, emu: Emulator) -> tuple[int, float]:
         return 0, 0.0
     criteria = {str(i): f"Use {m}." for i, m in enumerate(moves)}
     state = battle_state_summary(emu)
+    if type_knowledge:
+        state["type_knowledge"] = type_knowledge
     resp = client.system_one(
         state=state, questions={"move": Choice(instructions=CHOOSE_MOVE_INSTRUCTIONS, criteria=criteria)}
     )

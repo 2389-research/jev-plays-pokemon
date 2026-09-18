@@ -112,6 +112,8 @@ class ReasoningLoop:
         self.checkpoint_every = checkpoint_every
         self.checkpoint_dir = Path(checkpoint_dir) if checkpoint_dir else None
         self.goal_map = goal_map
+        self.knowledge = knowledge           # Orrery KB (also used for battle type lookups)
+        self._battle_kb: dict[str, list[str]] = {}  # cache: enemy species -> type knowledge
         # needs arbiter + planner: the two-tier control. The arbiter sets the INTENT; the
         # planner computes the concrete directive. Active only when a goal/level is set —
         # otherwise the loop runs the plain executor path (legacy vertical-slice behavior).
@@ -761,7 +763,8 @@ class ReasoningLoop:
         client = getattr(self.reasoner, "client", None)
         conf = 0.0
         if client is not None:
-            slot, conf = battle_agent.choose_move(client, emu)
+            slot, conf = battle_agent.choose_move(client, emu,
+                                                  type_knowledge=self._battle_type_knowledge(emu))
         else:
             slot = 0
         r = battle.use_move(emu, slot)
@@ -775,6 +778,22 @@ class ReasoningLoop:
                            reasoning=f"battle move {slot} ({r.get('move')}) conf {conf:.2f}",
                            action=MenuSelectAction(index=slot, label=f"move:{r.get('move')}"))
         return rstep, 0, {"confidence": conf}, result
+
+    def _battle_type_knowledge(self, emu) -> list[str] | None:
+        """Retrieve type-effectiveness guidance for the current enemy from the KB (once per
+        enemy species, cached — battles have many turns). None when no KB is configured."""
+        if self.knowledge is None:
+            return None
+        from ..games.pokemon_red.game_state import read_battle
+        enemy = ((read_battle(emu) or {}).get("enemy") or {}).get("species", "")
+        if enemy not in self._battle_kb:
+            from ..games.pokemon_red.battle_agent import battle_lookup_query
+            kt = self.knowledge.query_texts(battle_lookup_query(emu), top_k=3)
+            self._battle_kb[enemy] = kt
+            if kt:
+                self.on_event("kb_search", {"step": self.session.step,
+                                            "query": f"battle vs {enemy}", "results": len(kt)})
+        return self._battle_kb.get(enemy) or None
 
     def _objective_distance(self, player) -> int | None:
         """Graph-distance (map hops) from the player's map to the active directive's target

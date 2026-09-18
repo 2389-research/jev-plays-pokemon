@@ -216,80 +216,73 @@ class ReasoningLoop:
         if ctx_kind == "dialog":
             return self._advance_dialog(obs, shot)
 
-        # --- directive management (only when the planner is active) ---
-        directive = self._manage_directive(obs) if self.planner is not None else None
-        # blocked_dirs = known walls + one-way ledges + OFF-ROUTE building doors (so neither
-        # the servo nor the executor wanders into a house/lab that isn't the next hop).
-        allowed_next = self._next_hop_map(obs, directive)
-        blocked_dirs = self._blocked_dirs(obs, allowed_next)
-        if self.planner is not None and directive is not None:
-            # deterministic SERVO: route toward the directive's target with no model call
-            if directive is not None and directive.target_bearing and ctx_kind == "overworld":
-                servo = self._servo_step(directive, obs, blocked_dirs)
-                if servo is not None:
-                    self._servo_fail = 0
-                    return self._act_servo(obs, directive, servo, shot)
-                self._servo_fail += 1
-            else:
+        # --- menu is a mode: Jev operates it (a bounded 1-of-N calibrated choice) ---
+        if ctx_kind == "menu":
+            return self._jev_turn(obs, player_desc, self._blocked_dirs(obs, None), None, shot)
+
+        # --- overworld: LunaRoute sets the target, deterministic BFS routes to it. Jev is NOT a
+        # navigator — when there's no clean route the DECISION goes up to LunaRoute (re-plan /
+        # strategize), never to a heuristic fallback or Jev. (No planner -> legacy Jev path.) ---
+        if self.planner is None:
+            self._maybe_reflect(obs, player_desc)
+            return self._jev_turn(obs, player_desc, self._blocked_dirs(obs, None), None, shot)
+
+        directive = self._manage_directive(obs)
+        blocked_dirs = self._blocked_dirs(obs, self._next_hop_map(obs, directive))
+        self._maybe_reflect(obs, player_desc)
+        if directive is not None and directive.target_bearing:
+            servo = self._servo_step(directive, obs, blocked_dirs)
+            if servo is not None:
                 self._servo_fail = 0
+                return self._act_servo(obs, directive, servo, shot)
+            self._servo_fail += 1     # no clean route -> escalate to LunaRoute (see _manage_directive)
+            self._replan_next = True
+        # awaiting a fresh target/plan from LunaRoute -> a brief wait; the next step re-plans.
+        from ..core.models import WaitAction
+        rstep = ReasonStep(location="await-plan",
+                           objective=(directive.reason if directive else "awaiting plan"),
+                           reasoning="no clean route; deferring the decision to LunaRoute",
+                           action=WaitAction(frames=6))
+        self._prev = rstep
+        self._emit_reason(rstep, 0)
+        return self._finish(obs, rstep, self.controller.execute(rstep.action), 0, {}, shot)
 
-        # --- reflection (periodic / forced): maintains the strategic AgentPlan ---
-        if self.session.step % self.reflect_every == 0 or self._force_reflect:
-            self._force_reflect = False
-            self._last_reflect_step = self.session.step
-            self._plan, rlat, _ = self.reasoner.reflect(
-                primary_goal=self.session.goal.primary,
-                player_desc=str(player_desc),
-                map_view=obs.map_view,
-                map_history=self._map_history[-12:],
-                social_memory=self.interactions.summary(),
-                game_state=obs.game_state,
-                recent=list(self._recent),
-                previous=self._plan,
-            )
-            self.on_event("reflect", {"step": self.session.step, "latency_ms": rlat,
-                                      "plan": self._plan.model_dump()})
+    def _maybe_reflect(self, obs, player_desc) -> None:
+        """Periodic/forced strategic reflection (maintains the AgentPlan) — LunaRoute."""
+        if not (self.session.step % self.reflect_every == 0 or self._force_reflect):
+            return
+        self._force_reflect = False
+        self._last_reflect_step = self.session.step
+        self._plan, rlat, _ = self.reasoner.reflect(
+            primary_goal=self.session.goal.primary, player_desc=str(player_desc),
+            map_view=obs.map_view, map_history=self._map_history[-12:],
+            social_memory=self.interactions.summary(), game_state=obs.game_state,
+            recent=list(self._recent), previous=self._plan)
+        self.on_event("reflect", {"step": self.session.step, "latency_ms": rlat,
+                                  "plan": self._plan.model_dump()})
 
-        # --- executor (Jev): the residual decision, its Choice masked+biased by the directive ---
+    def _jev_turn(self, obs, player_desc, blocked_dirs, directive, shot) -> ActionResult:
+        """Jev drives one step: menu operation, or (no-planner legacy) overworld choice."""
+        ctx_kind = ((obs.game_state or {}).get("context") or {}).get("kind")
         targets = build_targets(obs.game_state, obs.exits)
-        # under a travel/grind directive, don't offer the executor a building exit that isn't
-        # the next hop — otherwise, when the servo has no step, it wanders into a house/mart.
-        if directive is not None and directive.intent in (Intent.TRAVEL, Intent.GRIND):
-            allowed_next = self._next_hop_map(obs, directive)
-            targets = [t for t in targets
-                       if t.get("interact", True) or t.get("dest_map") == allowed_next]
-        # doing a TASK on the current map (talk/grab/heal/shop) -> never offer a building exit,
-        # or it wanders back out instead of reaching the NPC/object (the Mart-clerk failure).
-        elif directive is not None and directive.intent in (
-                Intent.TALK_TO, Intent.GRAB_ITEM, Intent.HEAL, Intent.SHOP):
-            targets = [t for t in targets if t.get("interact", True)]
         rstep, latency, usage = self.reasoner.step(
             primary_goal=self.session.goal.primary,
-            image=shot if self.vision else None,
-            local_map=obs.walkability,
-            map_view=obs.map_view,
-            player_desc=str(player_desc),
-            exits=obs.exits,
-            game_state=obs.game_state,
-            social_memory=self.interactions.summary(),
-            map_history=self._map_history[-12:],
-            recent=list(self._recent),
-            previous=self._prev,
-            plan=self._plan,
-            targets=targets,
-            route_hint=None,
-            blocked_dirs=blocked_dirs,
-            directive=directive,
-        )
+            image=shot if self.vision else None, local_map=obs.walkability,
+            map_view=obs.map_view, player_desc=str(player_desc), exits=obs.exits,
+            game_state=obs.game_state, social_memory=self.interactions.summary(),
+            map_history=self._map_history[-12:], recent=list(self._recent),
+            previous=self._prev, plan=self._plan, targets=targets,
+            route_hint=None, blocked_dirs=blocked_dirs, directive=directive)
         self._prev = rstep
-        # confidence-driven control: unsure -> re-plan next step (reflect + directive replan)
+        self._emit_reason(rstep, latency)
+        # sustained low confidence from the calibrated decider -> force a strategic reflection on
+        # the NEXT step (throttled by the cooldown), instead of thrashing the same choice.
         conf = (usage or {}).get("confidence")
         if (self.low_conf_reflect is not None and conf is not None
                 and conf < self.low_conf_reflect
                 and self.session.step - self._last_reflect_step >= self.reflect_cooldown):
             self._force_reflect = True
             self._replan_next = True
-        self._emit_reason(rstep, latency)
         result = self._dispatch(rstep, obs, blocked_dirs, ctx_kind)
         return self._finish(obs, rstep, result, latency, usage, shot)
 
@@ -350,13 +343,22 @@ class ReasoningLoop:
         # --- replan? ---
         if self._directive is None or self._should_replan(intent):
             why = self._replan_reason(intent)
-            # BLOCKED and it smells like a story gate -> tier-2 quest (Jev escalation router).
-            if ("impossible" in why or "stuck" in why) and self._try_quest(obs, why):
+            blocked = "impossible" in why or "stuck" in why
+            # ESCALATION LADDER. On a genuine block, JEV ROUTES the recovery (the user's "use Jev
+            # to route between parts of the loop"): is this a STORY GATE needing a sub-quest, or
+            # just a navigation deadlock to reroute around? `_try_quest` consults that calibrated
+            # router. tier-1 = LunaRoute picks a reroute target/coordinate (planner.plan with
+            # context, below); tier-2 = the strategist derives a quest. If a tier-1 WAYPOINT
+            # reroute ITSELF got stuck (persistent), force the strategist — the LLM reroute
+            # already failed, so recovery shouldn't hinge on a borderline router score.
+            persistent = blocked and (self._directive.target or {}).get("kind") == "waypoint" \
+                if self._directive is not None else False
+            if blocked and self._try_quest(obs, why, force=persistent):
                 self._directive = self._quest.popleft()
                 self._in_quest = True
-                self._commit_directive("quest start")
+                self._commit_directive("re-strategized (story gate / waypoint reroute failed)")
                 return self._directive
-            # otherwise: normal replan (with suspension + LLM waypoint on stuck).
+            # normal replan: LunaRoute sets the target (tier-1 waypoint on a block, via context).
             new_prio = _INTENT_PRIORITY.get(intent, 0)
             cur_prio = _INTENT_PRIORITY.get(self._directive.intent, 0) if self._directive else -1
             if self._directive is not None and new_prio > cur_prio:
@@ -541,35 +543,27 @@ class ReasoningLoop:
             return self._bfs_move(player, (int(door["x"]), int(door["y"])), interact=False,
                                   blocked_dirs=blocked_dirs, occupied=occupied)
 
-        # else a map-EDGE connection (walk off the edge into next_map): BFS across the
-        # accumulated collision map to the boundary edge in the connection direction, routing
-        # AROUND off-route doors. This is real pathfinding, not a greedy compass walk — it's
-        # what stops the drift into houses/labs when the direct bearing is blocked.
+        # else a map-EDGE connection (walk off the edge into next_map): BFS across the known
+        # collision map to the boundary edge in the connection direction, routing around
+        # off-route doors and NPCs. PURE GEOMETRY: if BFS finds a clean route we take it; if it
+        # can't (blocked, gated, unknown), we return None and hand the DECISION up to the LLM —
+        # no greedy compass/lateral improvising (that just oscillated at gates).
         d = next_direction(self.memory.graph, player.map_id, tmap)
         if d is None:
             return None
         edge = self._edge_goals(obs.map_dims, d)
-        if edge:
-            nav = Navigator(self.world)
-            # route around off-route doors AND NPCs (pressing into an NPC talks to it instead
-            # of moving — the infinite "advance_dialog" bump loop at Viridian's Gambler).
-            off_route = {(int(e["x"]), int(e["y"])) for e in exits if e.get("dest_map") != next_map}
-            off_route |= occupied
-            step = nav._bfs_first_step(player.map_id, (player.x, player.y), edge, off_route)
-            if step is not None and step.value not in blocked_dirs:
-                return MoveAction(direction=step)
-            # BFS returned None because we're ALREADY on the boundary edge -> take the final
-            # step OFF the edge in the connection direction to actually cross the seam (the
-            # servo used to stop here and hand a confused executor the crossing).
-            if step is None and (player.x, player.y) in edge and d not in blocked_dirs:
-                return MoveAction(direction=Direction(d))
-        # fallback (edge unknown / no BFS path yet): greedy compass with door + NPC avoidance
-        if self._can_step(player, d, next_map, exits, blocked_dirs, occupied):
+        if not edge:
+            return None
+        nav = Navigator(self.world)
+        off_route = {(int(e["x"]), int(e["y"])) for e in exits if e.get("dest_map") != next_map}
+        off_route |= occupied
+        step = nav._bfs_first_step(player.map_id, (player.x, player.y), edge, off_route)
+        if step is not None and step.value not in blocked_dirs:
+            return MoveAction(direction=step)
+        # already ON the boundary edge -> take the final step OFF it to cross the connection.
+        if step is None and (player.x, player.y) in edge and d not in blocked_dirs:
             return MoveAction(direction=Direction(d))
-        for alt in _lateral(d):
-            if self._can_step(player, alt, next_map, exits, blocked_dirs, occupied):
-                return MoveAction(direction=Direction(alt))
-        return None
+        return None  # no clean route -> escalate (LLM), don't improvise
 
     @staticmethod
     def _edge_goals(map_dims, d: str) -> set[tuple[int, int]]:
@@ -587,20 +581,6 @@ class ReasoningLoop:
         if d == "east":
             return {(w - 1, y) for y in range(h)}
         return set()
-
-    def _can_step(self, player, d: str, next_map: int, exits, blocked_dirs: set[str],
-                  occupied: set | None = None) -> bool:
-        """True if stepping `d` is safe: not a known wall/ledge, not an NPC (bumping talks
-        to it), and not a warp door that leads somewhere other than the intended next hop."""
-        if d in blocked_dirs or self._confirmed_wall(Direction(d)):
-            return False
-        ax, ay = _tile_ahead(player, d)
-        if occupied and (ax, ay) in occupied:
-            return False  # an NPC stands there — stepping in talks to it, doesn't move
-        for e in exits:
-            if (int(e["x"]), int(e["y"])) == (ax, ay) and e.get("dest_map") != next_map:
-                return False  # a door to an off-route map (e.g. Blue's House) — don't enter
-        return True
 
     def _bfs_move(self, player, xy, *, interact: bool, blocked_dirs: set[str], occupied=None):
         """One BFS step toward tile ``xy`` over the learned map (routing around ``occupied``
@@ -950,18 +930,6 @@ class ReasoningLoop:
             if not self.session.running:
                 break
             self.step_once()
-
-
-def _tile_ahead(player, d: str) -> tuple[int, int]:
-    dx, dy = DELTA[Direction(d)]
-    return player.x + dx, player.y + dy
-
-
-def _lateral(d: str) -> list[str]:
-    """The two directions perpendicular to `d` (to route around an obstacle/door)."""
-    if d in ("north", "south"):
-        return ["east", "west"]
-    return ["north", "south"]
 
 
 def _desc(action) -> str:

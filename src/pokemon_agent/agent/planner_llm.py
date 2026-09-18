@@ -54,7 +54,11 @@ You are given: MISSION, GOAL_MAP, CURRENT_MAP, ROUTE (map ids from here to the g
 NEIGHBORS (adjacent maps you can walk to now, with direction), MAP_HISTORY (recent maps —
 if it alternates between two ids you are oscillating), TRIED_FAILED, and WHY_REPLAN.
 
-Return ONLY a JSON object:
+TOOL — knowledge base: you may look things up in a Pokémon Red guide before choosing. To
+search, reply with ONLY {"search": ["query1", "query2"]} (1-3 queries); results come back in
+KNOWLEDGE_GATHERED and you can search again or finalize. SEARCH_ROUNDS_LEFT limits searches.
+
+Return ONLY a JSON object (when ready):
 {"target_map": <int map id to head toward next>, "reason": "one sentence why"}
 target_map MUST be a real map id from ROUTE or NEIGHBORS (a reachable map), never the
 current map."""
@@ -114,10 +118,12 @@ class Planner:
         self.knowledge = knowledge      # optional Orrery KnowledgeBase for retrieval-grounded quests
         self.on_search = None           # optional callback(query, n_results) for logging KB tool-calls
 
-    def _llm_with_search(self, provider, system: str, state: dict, *, max_rounds: int = 3) -> dict:
+    def _llm_with_search(self, provider, system: str, state: dict, *, final_key: str,
+                         max_rounds: int = 3) -> dict:
         """Run an LLM call where the model MAY use the knowledge base as a tool: each round it
-        returns either {"search": [...]} (we run the queries, feed results back) or its final
-        JSON object. The model decides when and what to look up. Returns the final parsed dict."""
+        returns either {"search": [...]} (we run the queries, feed results back as
+        KNOWLEDGE_GATHERED) or its final JSON object (which contains ``final_key``). The model
+        decides when and what to look up. Returns the final parsed dict."""
         gathered: list[dict] = []
         data: dict = {}
         for round_i in range(max_rounds + 1):
@@ -129,7 +135,7 @@ class Planner:
                 return data
             queries = data.get("search")
             is_search = (isinstance(queries, list) and queries and self.knowledge is not None
-                         and "steps" not in data and round_i < max_rounds)
+                         and final_key not in data and round_i < max_rounds)
             if not is_search:
                 return data
             for q in [str(x) for x in queries][:3]:
@@ -158,7 +164,7 @@ class Planner:
                 "maps": {str(mid): name for mid, name in MAP_NAMES_RAW.items()},
             }
             # the strategist MAY search the knowledge base as a tool before finalizing the quest
-            data = self._llm_with_search(prov, STRATEGIST_SYSTEM, state, max_rounds=3)
+            data = self._llm_with_search(prov, STRATEGIST_SYSTEM, state, final_key="steps", max_rounds=3)
             plan_note = str(data.get("plan") or "quest").strip()
             quest: list[Directive] = []
             for step in data.get("steps", []):
@@ -277,8 +283,8 @@ class Planner:
                 "tried_failed": list(getattr(memory, "tried_failed", []) or []),
                 "why_replan": why or "starting a new travel directive",
             }
-            content, _, _ = self.provider.chat_json(PLANNER_SYSTEM, state)
-            data = json.loads(strip_fences(content))
+            # the tier-1 planner MAY search the KB as a tool before choosing the reroute target
+            data = self._llm_with_search(self.provider, PLANNER_SYSTEM, state, final_key="target_map")
             tm = int(data.get("target_map"))
             reason = str(data.get("reason") or "").strip() or default_reason
             # validate: must be reachable and not the current map

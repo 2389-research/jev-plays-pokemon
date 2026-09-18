@@ -248,6 +248,11 @@ class ReasoningLoop:
             allowed_next = self._next_hop_map(obs, directive)
             targets = [t for t in targets
                        if t.get("interact", True) or t.get("dest_map") == allowed_next]
+        # doing a TASK on the current map (talk/grab/heal/shop) -> never offer a building exit,
+        # or it wanders back out instead of reaching the NPC/object (the Mart-clerk failure).
+        elif directive is not None and directive.intent in (
+                Intent.TALK_TO, Intent.GRAB_ITEM, Intent.HEAL, Intent.SHOP):
+            targets = [t for t in targets if t.get("interact", True)]
         rstep, latency, usage = self.reasoner.step(
             primary_goal=self.session.goal.primary,
             image=shot if self.vision else None,

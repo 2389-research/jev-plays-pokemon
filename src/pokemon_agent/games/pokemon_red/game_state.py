@@ -210,9 +210,19 @@ def read_screen_text(emu: Emulator) -> tuple[str, bool]:
         return "", False
 
 
+def _sprite_kind(name: str) -> str:
+    """'item' = a pickup you press A to grab (Poké Ball / item on the ground); else 'person'
+    (an NPC you talk to). Lets the executor route grab_item vs talk_to correctly."""
+    low = name.lower()
+    if "ball" in low or low in ("item", "boulder"):
+        return "item"
+    return "person"
+
+
 def read_npcs(emu: Emulator) -> list[dict]:
-    """NPCs/objects on the current map as {x, y, facing, sprite, sprite_id}, from
-    RAM map coordinates (correct even when off-screen)."""
+    """NPCs/objects on the current map as {x, y, facing, sprite, sprite_id, kind}, from
+    RAM map coordinates (correct even when off-screen). ``kind`` is 'item' (a pickup) or
+    'person' (an NPC to talk to)."""
     out: list[dict] = []
     try:
         for i in range(1, 16):  # slot 0 is the player
@@ -220,16 +230,48 @@ def read_npcs(emu: Emulator) -> list[dict]:
             if pic == 0:
                 continue
             b2 = WSPRITE2 + i * 16
+            name = SPRITES.get(pic, f"sprite#{pic}")
             out.append({
                 "x": emu.read_memory(b2 + 5) - SPRITE_COORD_OFFSET,
                 "y": emu.read_memory(b2 + 4) - SPRITE_COORD_OFFSET,
                 "facing": _FACING.get(emu.read_memory(WSPRITE1 + i * 16 + 9), "?"),
-                "sprite": SPRITES.get(pic, f"sprite#{pic}"),
+                "sprite": name,
                 "sprite_id": pic,
+                "kind": _sprite_kind(name),
             })
     except Exception:
         pass
     return out
+
+
+WXCOORD = 0xD362
+WYCOORD = 0xD361
+WPLAYERFACING = 0xC109
+
+
+def read_facing(emu: Emulator, npcs: list[dict] | None = None) -> dict:
+    """What the player is currently facing / would interact with by pressing A: the front tile
+    and any sprite there, PLUS the tile one beyond (a sprite there is talkable across a counter).
+    Grounds 'is an interaction available right now'."""
+    try:
+        x, y = emu.read_memory(WXCOORD), emu.read_memory(WYCOORD)
+        face = _FACING.get(emu.read_memory(WPLAYERFACING))
+        if face is None:
+            return {}
+        dx, dy = {"north": (0, -1), "south": (0, 1), "west": (-1, 0), "east": (1, 0)}[face]
+        npcs = npcs if npcs is not None else read_npcs(emu)
+        by_xy = {(n["x"], n["y"]): n for n in npcs}
+        front = (x + dx, y + dy)              # distance 1
+        beyond = (x + 2 * dx, y + 2 * dy)     # distance 2 (across a counter)
+        facing_sprite = by_xy.get(front) or by_xy.get(beyond)
+        return {
+            "direction": face,
+            "front_tile": list(front),
+            "facing_sprite": facing_sprite,
+            "can_interact": facing_sprite is not None,
+        }
+    except Exception:
+        return {}
 
 
 # --- interaction CONTEXT: "what kind of moment is this?" ------------------
@@ -299,11 +341,13 @@ def read_context(emu: Emulator) -> dict:
 def read_game_state(emu: Emulator) -> dict:
     """One rich state block, fed alongside the map/exits/trajectory."""
     text, dialog_active = read_screen_text(emu)
+    npcs = read_npcs(emu)
     return {
         "context": read_context(emu),
         "party": read_party(emu),
         "battle": read_battle(emu),
-        "npcs": read_npcs(emu),
+        "npcs": npcs,
+        "facing": read_facing(emu, npcs),
         "badges": read_badges(emu),
         "money": read_money(emu),
         "items": read_items(emu),

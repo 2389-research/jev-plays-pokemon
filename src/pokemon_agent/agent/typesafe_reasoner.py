@@ -1,0 +1,322 @@
+"""A TypeSafe-backed decider — a drop-in for `Reasoner` (see reasoner.py).
+
+Where `Reasoner` asks a generative LLM to *emit* a JSON action, this poses the
+same per-step decision as a TypeSafe `Choice`: pick ONE of an enumerated set of
+mutually-exclusive actions and get a *calibrated confidence* back. That buys us:
+
+  * no JSON-parse failures / cold-start empties / reasoning-eats-the-budget,
+  * ~$0.0002 per decision, fast enough to call every step,
+  * confidence as a first-class control signal: exposed in `usage["confidence"]`
+    so the loop can trigger an off-cycle reflection when the actor is unsure,
+    instead of blindly `wait`-ing (the old confidence->wait gate is opt-in only,
+    see `wait_on_low_confidence`, and off by default).
+
+It exposes the SAME `.step()` / `.reflect()` signatures as `Reasoner`, so
+`ReasoningLoop` can drive it unchanged. TypeSafe only *classifies* among options
+it is given — it cannot write a plan — so `reflect()` is delegated to an optional
+generative `Reasoner` (LunaRoute); without one it passes the previous plan through.
+
+The client reads TYPESAFE_API_KEY / TYPESAFE_BASE_URL from the environment.
+"""
+from __future__ import annotations
+
+import time
+from typing import Protocol
+
+from ..core.models import (
+    AdvanceDialogAction,
+    Direction,
+    GoToAction,
+    InteractAction,
+    MenuSelectAction,
+    MoveAction,
+    PressAction,
+    WaitAction,
+)
+from ..emulator.interface import GameButton, ImageObservation
+from .plan import Directive, Intent
+from .reasoner import ReasonStep, ReflectionPlan
+
+# key -> how to build the concrete AgentAction. The keys ARE the Choice criteria.
+_KIND_TO_ACTION = {
+    "move_north": lambda: MoveAction(direction=Direction.NORTH),
+    "move_south": lambda: MoveAction(direction=Direction.SOUTH),
+    "move_east": lambda: MoveAction(direction=Direction.EAST),
+    "move_west": lambda: MoveAction(direction=Direction.WEST),
+    "interact": lambda: InteractAction(),
+    "advance_dialog": lambda: AdvanceDialogAction(),
+    "wait": lambda: WaitAction(frames=30),
+    "press_start": lambda: PressAction(button=GameButton.START),
+    "press_b": lambda: PressAction(button=GameButton.B),
+}
+
+_KIND_CRITERIA = {
+    "move_north": "Step one tile NORTH (y decreases). Toward exits/NPCs/goal that are above you.",
+    "move_south": "Step one tile SOUTH (y increases). Toward exits/NPCs/goal below you.",
+    "move_east": "Step one tile EAST (x increases). Toward things to your right.",
+    "move_west": "Step one tile WEST (x decreases). Toward things to your left.",
+    "interact": "Press A on the person/sign/object you are FACING and standing next to "
+                "(use when adjacent to and facing an NPC you want to talk to).",
+    "advance_dialog": "Continue/close the open text box or accept a menu prompt. "
+                      "Use ONLY when DIALOG_ACTIVE is true.",
+    "wait": "Do nothing this step. Use when a cutscene / forced movement is playing and "
+            "your input is being ignored, or the screen is still loading.",
+    "press_start": "Open the START menu.",
+    "press_b": "Press B to cancel / back out of a menu or dialog.",
+}
+
+_KIND_INSTRUCTIONS = (
+    "You are driving Pokémon Red one button-press at a time toward PRIMARY_GOAL, "
+    "following CURRENT_PLAN.next_objective. Choose the ONE action that makes the most "
+    "progress right now, grounded in the structured state (trust PLAYER x/y, EXITS, and "
+    "GAME_STATE over any guess). Rules: "
+    "(a) If GAME_STATE.dialog_active is true, do NOT walk away — advance_dialog, or press "
+    "A/B / move the cursor to answer. "
+    "(b) To reach an EXIT tile, move so PLAYER x,y approaches that exit's x,y; x increases "
+    "EAST, y increases SOUTH; route around '#' walls in MAP_VIEW. "
+    "(c) To talk to someone, be on a tile ADJACENT to the NPC and facing it, then interact. "
+    "(d) Do NOT repeat a move that RECENT shows was just blocked, and if MAP_HISTORY "
+    "alternates between two maps you are oscillating — take a different exit. "
+    "(e) If nothing you press is changing the screen (a cutscene is moving you), wait. "
+    "(f) PREFER a 'goto_*' option to reach a specific person, Poké Ball, object, or exit: "
+    "it walks there and (for objects/people) presses A for you, routing around walls — "
+    "use the raw move_* directions only for open-ended exploration. "
+    "(g) ROUTE_HINT (when present in the state) is the compass direction toward your "
+    "current destination map — when you are just traveling/exploring with no better "
+    "target, strongly prefer move_<ROUTE_HINT> to head that way (walk to the map's edge)."
+)
+
+
+def _apply_directive(criteria: dict, target_map: dict, directive: Directive) -> dict:
+    """Shape the executor's Choice set FROM the directive (spec §5).
+
+    * Inject the directive's concrete target (if it has a tile) as a first-class
+      ``goto_directive_target`` option, so "pursue the directive" is a button, not a hope.
+    * Mask raw ``move_*`` for reach-a-thing intents (talk_to / grab_item / enter) — but
+      ONLY when a target/goto option actually exists, so the model can still explore to
+      find a path when the deterministic servo found none (the BFS-impossible residual).
+    * Honor ``allowed_options`` as an explicit whitelist (never leaving zero options).
+    """
+    crit = dict(criteria)
+    xy = directive.target_xy
+    if xy is not None:
+        interact = directive.intent in (Intent.TALK_TO, Intent.GRAB_ITEM)
+        key = "goto_directive_target"
+        label = (directive.target or {}).get("kind") or "directive target"
+        desc = (f"Go to the directive target at ({xy[0]},{xy[1]})"
+                + (" and press A." if interact else " (step onto it)."))
+        target_map[key] = {"key": key, "label": label, "desc": desc,
+                           "x": xy[0], "y": xy[1], "interact": interact}
+        crit[key] = desc
+
+    has_goto = any(k.startswith("goto_") for k in crit)
+    if directive.intent in (Intent.TALK_TO, Intent.GRAB_ITEM, Intent.ENTER) and has_goto:
+        for d in ("north", "south", "east", "west"):
+            crit.pop(f"move_{d}", None)
+
+    if directive.allowed_options is not None:
+        whitelisted = {k: v for k, v in crit.items() if k in directive.allowed_options}
+        if whitelisted:  # never hand the model an empty Choice set
+            crit = whitelisted
+    return crit
+
+
+class GenerativeReasoner(Protocol):
+    def reflect(self, **kwargs) -> tuple[ReflectionPlan, int, dict]: ...
+
+
+class TypeSafeReasoner:
+    def __init__(
+        self,
+        *,
+        client=None,
+        model: str | None = None,
+        reflector: GenerativeReasoner | None = None,
+        min_confidence: float = 0.45,
+        wait_on_low_confidence: bool = False,
+        max_consecutive_waits: int = 2,
+    ):
+        if client is None:
+            from typesafe_sdk import TypeSafeClient
+
+            client = TypeSafeClient(model=model)
+        self.client = client
+        self.reflector = reflector
+        self.min_confidence = min_confidence
+        self.wait_on_low_confidence = wait_on_low_confidence
+        self.max_consecutive_waits = max_consecutive_waits
+        self._low_conf_waits = 0
+
+    # --- reflection is generative: delegate or pass through --------------------
+    def reflect(self, **kwargs) -> tuple[ReflectionPlan, int, dict]:
+        if self.reflector is not None:
+            return self.reflector.reflect(**kwargs)
+        previous = kwargs.get("previous")
+        return (previous or ReflectionPlan(next_objective="explore toward the goal"), 0, {})
+
+    # --- the per-step decision, as a constrained Choice ------------------------
+    def step(
+        self,
+        *,
+        primary_goal: str,
+        image: ImageObservation | None = None,  # ignored: TypeSafe takes structured state
+        local_map: list[str] | None = None,
+        map_view: list[str] | None = None,
+        player_desc: str = "",
+        exits: list[dict] | None = None,
+        game_state: dict | None = None,
+        social_memory: dict | None = None,
+        map_history: list[int] | None = None,
+        recent: list[str] | None = None,
+        previous: ReasonStep | None = None,
+        plan: ReflectionPlan | None = None,
+        targets: list[dict] | None = None,
+        route_hint: str | None = None,
+        blocked_dirs: set[str] | None = None,
+        directive: Directive | None = None,
+    ) -> tuple[ReasonStep, int, dict]:
+        from typesafe_sdk import Choice
+
+        dialog_active = bool(game_state and game_state.get("dialog_active"))
+        target_map = {t["key"]: t for t in (targets or [])}
+        blocked_dirs = blocked_dirs or set()
+        state = {
+            "primary_goal": primary_goal,
+            "current_plan": plan.model_dump() if plan else None,
+            "player": player_desc,
+            "game_state": game_state,
+            "social_memory": social_memory,
+            "map_history": map_history or [],
+            "exits": exits or [],
+            "local_map": local_map,
+            "map_view": map_view,
+            "recent": recent or [],
+            "previous_notes": (
+                {"objective": previous.objective, "tried": previous.tried} if previous else None
+            ),
+        }
+        # --- a selectable menu is open: choose an OPTION, not an overworld action ---
+        menu = ((game_state or {}).get("context") or {}).get("menu") or {}
+        if menu.get("open"):
+            return self._menu_step(menu, state, previous)
+
+        criteria = {**_KIND_CRITERIA, **{k: t["desc"] for k, t in target_map.items()}}
+        # DIRECTIVE TEETH (spec §5): the executor's Choice is derived FROM the active
+        # directive — inject its target as a first-class option, mask intent-illegal actions,
+        # and honor an explicit whitelist. Generalizes the blocked_dirs wall-masking below.
+        if directive is not None:
+            criteria = _apply_directive(criteria, target_map, directive)
+            state["directive"] = {
+                "intent": directive.intent.value, "target": directive.target,
+                "success": directive.success, "reason": directive.reason,
+            }
+        # mask out moves into known walls (dead-end ledger) so the model can't re-bash them
+        for d in blocked_dirs:
+            criteria.pop(f"move_{d}", None)
+        state["blocked_directions"] = sorted(blocked_dirs)
+        state["available_targets"] = [
+            {"option": t["key"], "label": t["label"], "x": t["x"], "y": t["y"]}
+            for t in (targets or [])
+        ]
+        state["route_hint"] = route_hint
+        questions = {"action": Choice(instructions=_KIND_INSTRUCTIONS, criteria=criteria)}
+
+        t = time.time()
+        resp = self.client.system_one(state=state, questions=questions)
+        latency = int((time.time() - t) * 1000)
+        ans = resp.answers["action"]
+        choice, confidence = ans.choice, float(getattr(ans, "confidence", 0.0) or 0.0)
+
+        # SAYCAN bias (spec §5): argmax over model-probability × affordance prior. Only
+        # when the directive names biased options AND we have a probability distribution —
+        # so it can only re-rank among still-legal options, never invent one.
+        probs = getattr(ans, "probabilities", None)
+        if directive is not None and directive.option_bias and isinstance(probs, dict) and probs:
+            boost = {k: float(p) * (2.0 if k in directive.option_bias else 1.0) for k, p in probs.items()}
+            best = max(boost, key=boost.get)
+            if best in criteria:
+                choice = best
+
+        if choice in target_map:
+            tgt = target_map[choice]
+            action = GoToAction(x=tgt["x"], y=tgt["y"], interact=tgt["interact"], label=tgt["label"])
+        else:
+            action = _KIND_TO_ACTION.get(choice, lambda: WaitAction(frames=15))()
+        note = f"typesafe: {choice} (conf {confidence:.2f})"
+
+        # confidence gate: a low-confidence MOVE during (likely) a cutscene thrashes;
+        # wait instead — but bounded, so we never stall forever if it's just uncertain.
+        if (
+            self.wait_on_low_confidence
+            and confidence < self.min_confidence
+            and isinstance(action, MoveAction)
+            and not dialog_active
+            and self._low_conf_waits < self.max_consecutive_waits
+        ):
+            self._low_conf_waits += 1
+            action = WaitAction(frames=20)
+            note = f"typesafe: {choice} @ {confidence:.2f} < {self.min_confidence} -> wait ({self._low_conf_waits})"
+        else:
+            self._low_conf_waits = 0
+
+        usage = {}
+        if getattr(resp, "usage", None) is not None:
+            usage = {"input_tokens": resp.usage.input_tokens, "output_tokens": resp.usage.output_tokens}
+        usage["confidence"] = confidence
+        usage["probabilities"] = getattr(ans, "probabilities", None)
+
+        step = ReasonStep(
+            location=(player_desc or "")[:80],
+            objective=(plan.next_objective if plan else primary_goal),
+            tried=(previous.tried if previous else ""),
+            reasoning=note,
+            action=action,
+        )
+        return step, latency, usage
+
+    # --- menu handling: choose an option in an open list/yes-no menu ---------
+    def _menu_step(self, menu: dict, state: dict, previous):
+        from typesafe_sdk import Choice
+
+        opts = menu.get("options") or []
+        n = max(int(menu.get("num_options") or 0), len(opts), 1)
+        criteria = {str(i): (opts[i] if i < len(opts) else f"option {i}") for i in range(n)}
+        instr = (
+            "A selectable MENU is open (SCREEN_TEXT shows the prompt). Choose the option that "
+            "best advances PRIMARY_GOAL — pick YES to accept/confirm what you want and NO to "
+            "decline; otherwise pick the item/Pokémon/action you intend. Options are indexed 0=top."
+        )
+        t = time.time()
+        resp = self.client.system_one(state=state, questions={"opt": Choice(instructions=instr, criteria=criteria)})
+        latency = int((time.time() - t) * 1000)
+        ans = resp.answers["opt"]
+        conf = float(getattr(ans, "confidence", 0.0) or 0.0)
+        try:
+            idx = int(ans.choice)
+        except (TypeError, ValueError):
+            idx = 0
+        label = opts[idx] if idx < len(opts) else None
+        step = ReasonStep(
+            location="menu", objective="operate the open menu",
+            tried=(previous.tried if previous else ""),
+            reasoning=f"menu: pick {idx} ({label}) conf {conf:.2f}",
+            action=MenuSelectAction(index=idx, label=label),
+        )
+        usage = {}
+        if getattr(resp, "usage", None) is not None:
+            usage = {"input_tokens": resp.usage.input_tokens, "output_tokens": resp.usage.output_tokens}
+        usage["confidence"] = conf
+        return step, latency, usage
+
+    # --- a reusable verification primitive (Noul): "did X happen / is X true?" --
+    def judge(self, question: str, state: dict) -> float:
+        """Calibrated 0-1 probability for a yes/no question about the game state.
+
+        Handy for grounding events without heuristics, e.g.
+          judge("Did the party just gain a starter Pokémon?", {...})
+          judge("Is the player stuck oscillating without progress?", {...})
+        """
+        from typesafe_sdk import Noul
+
+        resp = self.client.system_one(state=state, questions={"q": Noul(instructions=question)})
+        return float(resp.answers["q"].noul)

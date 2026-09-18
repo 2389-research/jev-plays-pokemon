@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+*.egg-info/
+
+# Secrets
+.env
+
+# ROMs (never commit copyrighted ROMs)
+*.gb
+*.gbc
+*.gba
+
+# Save states
+*.state
+*.state.*
+
+# Local fixtures
+.local-fixtures/
+
+# episode logs + screenshots
+runs/
+
+# save-state fixtures (never commit game states)
+states/*.state

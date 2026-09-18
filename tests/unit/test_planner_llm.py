@@ -1,0 +1,92 @@
+"""Planner: arbiter intent -> concrete Directive (target + machine-checkable success)."""
+from types import SimpleNamespace
+
+from pokemon_agent.agent.planner_llm import Planner, intent_for_need
+from pokemon_agent.agent.plan import Intent
+from pokemon_agent.agent.world_graph import full_kanto_graph
+from pokemon_agent.emulator.fake_emulator import FakeEmulator
+
+
+def _mem():
+    return SimpleNamespace(graph=full_kanto_graph())
+
+
+def test_need_to_intent_mapping():
+    assert intent_for_need("survive") == Intent.HEAL
+    assert intent_for_need("readiness") == Intent.GRIND
+    assert intent_for_need("progress") == Intent.TRAVEL
+    assert intent_for_need("battle") == Intent.BATTLE
+
+
+def test_travel_directive_has_goal_map_success():
+    p = Planner(goal_map=2, level_target=12)
+    emu = FakeEmulator(map_id=0)  # Pallet Town
+    d = p.plan(Intent.TRAVEL, emu, _mem())
+    assert d.intent == Intent.TRAVEL
+    assert d.success == {"on_map": 2}
+    assert d.target and d.target["map"] == 2
+    assert "next_map" in d.target  # the graph knows the next hop toward Pewter
+
+
+def test_travel_when_already_at_goal_is_not_trivially_complete():
+    p = Planner(goal_map=2)
+    emu = FakeEmulator(map_id=2)  # already at Pewter
+    d = p.plan(Intent.TRAVEL, emu, _mem())
+    # success keys off on_map == goal; at the goal the executive will detect completion
+    assert d.success.get("on_map") == 2
+
+
+def test_grind_directive_targets_level_and_heads_toward_goal():
+    p = Planner(goal_map=2, level_target=12)
+    d = p.plan(Intent.GRIND, FakeEmulator(map_id=0), _mem())
+    assert d.intent == Intent.GRIND
+    assert d.success == {"level": ">=12"}          # completes on level, not arrival
+    assert d.target and d.target["map"] == 2       # but heads toward the goal (grass en route)
+    assert d.target_bearing                         # so the servo walks it
+
+
+def test_heal_directive_targets_hp():
+    p = Planner(goal_map=2, heal_hp=0.8)
+    d = p.plan(Intent.HEAL, FakeEmulator(map_id=1), _mem())
+    assert d.intent == Intent.HEAL
+    assert d.success == {"hp_frac": ">=0.8"}
+
+
+def test_battle_directive_completes_when_battle_ends():
+    d = Planner().plan(Intent.BATTLE, FakeEmulator(), _mem())
+    assert d.intent == Intent.BATTLE and d.success == {"in_battle": 0}
+
+
+class FakeProvider:
+    """Returns a scripted planner JSON and records the state it was given."""
+
+    def __init__(self, content):
+        self.content = content
+
+    def chat_json(self, system_prompt, user, image=None):
+        self.state = user
+        return self.content, 5, {}
+
+
+def test_llm_reroute_picks_intermediate_reachable_map():
+    # provider reroutes to Viridian City (1) instead of the final goal Pewter (2)
+    prov = FakeProvider('{"target_map": 1, "reason": "route 2 is blocked north, go via Viridian"}')
+    p = Planner(goal_map=2, provider=prov)
+    d = p.plan(Intent.TRAVEL, FakeEmulator(map_id=0), _mem(), why="stuck heading north")
+    assert d.target["map"] == 1                # honored the LLM's reroute
+    assert d.success == {"on_map": 1}          # success keys off the chosen subgoal
+    assert "blocked" in d.reason
+    assert prov.state["why_replan"] == "stuck heading north"  # Inner Monologue passed through
+
+
+def test_llm_unreachable_or_bad_target_falls_back_to_goal():
+    prov = FakeProvider('{"target_map": 999, "reason": "nonsense"}')  # 999 is unreachable
+    p = Planner(goal_map=2, provider=prov)
+    d = p.plan(Intent.TRAVEL, FakeEmulator(map_id=0), _mem())
+    assert d.target["map"] == 2 and d.success == {"on_map": 2}  # fell back to the goal
+
+
+def test_llm_garbage_json_falls_back_to_goal():
+    p = Planner(goal_map=2, provider=FakeProvider("not json at all"))
+    d = p.plan(Intent.TRAVEL, FakeEmulator(map_id=0), _mem())
+    assert d.target["map"] == 2  # deterministic fallback on parse failure

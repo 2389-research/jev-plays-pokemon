@@ -97,12 +97,42 @@ class Navigator:
                 return InteractAction(), True
             return MoveAction(direction=face), False  # turn in place (blocked move just faces)
 
-        # approach only from a neighbor the player can actually STAND on (not another
-        # object/NPC, not a wall) — otherwise it tries to walk onto the thing beside it.
+        # COUNTER TALK: an NPC behind a real COUNTER tile is reached from 2 tiles away in a
+        # straight line (talk over the counter). Only over actual counter cells (from RAM's
+        # tileset talk-over tiles) — never a generic wall.
+        cface = self._counter_face(player, tx, ty)
+        if cface is not None:
+            if player.facing == cface.value:
+                return InteractAction(), True
+            return MoveAction(direction=cface), False
+
+        # approach set: distance-1 walkable neighbors, PLUS distance-2 tiles across a counter.
         approach = {
             (tx + dx, ty + dy)
             for dx, dy in DELTA.values()
             if self._passable(m, (tx + dx, ty + dy), blk)
         }
+        for dx, dy in DELTA.values():
+            mid, far = (tx + dx, ty + dy), (tx + 2 * dx, ty + 2 * dy)
+            if mid in self._counters(m) and self._passable(m, far, blk):
+                approach.add(far)
         d = self._bfs_first_step(m, here, approach, blk)
         return (MoveAction(direction=d), False) if d else (None, False)
+
+    def _counters(self, map_id: int) -> set:
+        return getattr(self.world, "counters", {}).get(map_id, set())
+
+    def _counter_face(self, player: PlayerState, tx: int, ty: int):
+        """Direction to face to talk to (tx,ty) ACROSS a counter: target exactly 2 tiles away
+        in a straight line with a real COUNTER cell between. Else None."""
+        dx, dy = tx - player.x, ty - player.y
+        if (abs(dx), dy) == (2, 0):
+            step = (1 if dx > 0 else -1, 0)
+        elif (dx, abs(dy)) == (0, 2):
+            step = (0, 1 if dy > 0 else -1)
+        else:
+            return None
+        mid = (player.x + step[0], player.y + step[1])
+        if mid not in self._counters(player.map_id):
+            return None
+        return _DELTA_TO_DIR.get(step)

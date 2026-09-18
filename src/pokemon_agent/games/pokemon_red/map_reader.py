@@ -27,6 +27,7 @@ WCURMAPWIDTH = 0xD369   # blocks
 WTILESETBANK = 0xD52B
 WTILESETBLOCKSPTR = 0xD52C
 WTILESETCOLLISIONPTR = 0xD530
+WTILESETTALKINGOVERTILES = 0xD532  # up to 3 "talk-over" (counter) tile ids, 0xFF-terminated
 BORDER = 3  # wOverworldMap's connection border, in blocks, on every side
 
 
@@ -51,9 +52,17 @@ def read_collision_map(emu) -> dict | None:
             collset.add(v)
         if not collset:
             return None
+        # counter / "talk-over" tiles for this tileset (you can talk to an NPC across one)
+        counter_ids: set[int] = set()
+        for i in range(3):
+            v = m(WTILESETTALKINGOVERTILES + i)
+            if v == 0xFF:
+                break
+            counter_ids.add(v)
 
         stride = wb + 2 * BORDER
         walkable: set[tuple[int, int]] = set()
+        counters: set[tuple[int, int]] = set()
         block_tiles: dict[int, list[int]] = {}
         for by in range(hb):
             for bx in range(wb):
@@ -64,8 +73,13 @@ def read_collision_map(emu) -> dict | None:
                     block_tiles[bid] = tiles
                 for cr in (0, 1):
                     for cc in (0, 1):
-                        if tiles[(cr * 2 + 1) * 4 + (cc * 2)] in collset:
-                            walkable.add((bx * 2 + cc, by * 2 + cr))
-        return {"map_id": m(WCURMAP), "width": wb * 2, "height": hb * 2, "walkable": walkable}
+                        t = tiles[(cr * 2 + 1) * 4 + (cc * 2)]
+                        cell = (bx * 2 + cc, by * 2 + cr)
+                        if t in collset:
+                            walkable.add(cell)
+                        if t in counter_ids:
+                            counters.add(cell)
+        return {"map_id": m(WCURMAP), "width": wb * 2, "height": hb * 2,
+                "walkable": walkable, "counters": counters}
     except Exception:
         return None

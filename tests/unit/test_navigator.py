@@ -68,3 +68,30 @@ def test_no_route_when_target_walled_off():
     walls = [(5, 0), (5, 2), (4, 1), (6, 1)]  # every approach tile blocked
     nav = Navigator(world(floors=[(5, 5)], walls=walls))
     assert nav.step_toward(player(5, 5), {"x": 5, "y": 1, "interact": True}) == (None, False)
+
+
+def test_counter_talk_routes_across_counter():
+    """An NPC behind a real counter tile is talked to from 2 tiles away in a straight line."""
+    from pokemon_agent.agent.world_map import WorldMap, WALL, FLOOR
+    from pokemon_agent.agent.navigator import Navigator
+    from pokemon_agent.core.models import Direction, InteractAction, MoveAction, PlayerState
+
+    w = WorldMap()
+    # clerk at (0,5); counter WALL at (1,5); walkable floor at (2,5),(3,5)
+    w.tiles[42].update({(0, 5): FLOOR, (1, 5): WALL, (2, 5): FLOOR, (3, 5): FLOOR})
+    w.bounds[42] = (8, 8)
+    w.counters[42] = {(1, 5)}
+    nav = Navigator(w)
+    # standing at (2,5) facing away -> should turn WEST to face the clerk across the counter
+    act, arrived = nav.step_toward(PlayerState(x=2, y=5, map_id=42, facing="south"),
+                                   {"x": 0, "y": 5, "interact": True})
+    assert isinstance(act, MoveAction) and act.direction == Direction.WEST and not arrived
+    # now facing west across the counter -> interact
+    act, arrived = nav.step_toward(PlayerState(x=2, y=5, map_id=42, facing="west"),
+                                   {"x": 0, "y": 5, "interact": True})
+    assert isinstance(act, InteractAction) and arrived
+    # a generic WALL (not a counter) must NOT be treated as talk-over
+    w.counters[42] = set()
+    act, arrived = nav.step_toward(PlayerState(x=2, y=5, map_id=42, facing="west"),
+                                   {"x": 0, "y": 5, "interact": True})
+    assert not (isinstance(act, InteractAction) and arrived)

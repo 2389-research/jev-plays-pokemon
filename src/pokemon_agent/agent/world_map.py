@@ -35,18 +35,22 @@ class WorldMap:
         self.visits: dict[int, dict[tuple[int, int], int]] = defaultdict(lambda: defaultdict(int))
         # known map extents (width, height) from a full-collision ingest, for bounds-aware BFS
         self.bounds: dict[int, tuple[int, int]] = {}
+        # counter / "talk-over" cells per map (talk to an NPC across one), from the ingest
+        self.counters: dict[int, set[tuple[int, int]]] = {}
 
     # --- updates ----------------------------------------------------------
     def ingest_collision(self, map_id: int, width: int, height: int,
-                         walkable: set[tuple[int, int]]) -> None:
+                         walkable: set[tuple[int, int]], counters: set[tuple[int, int]] | None = None) -> None:
         """Load a full-map collision grid (from RAM's wOverworldMap) as ground truth: every
         cell in bounds becomes FLOOR or WALL. This gives the navigator the whole map up front
-        so it can route around buildings instead of guessing over unseen tiles."""
+        so it can route around buildings instead of guessing over unseen tiles. ``counters`` are
+        talk-over cells (an NPC can be talked to across one)."""
         m = self.tiles[map_id]
         for y in range(height):
             for x in range(width):
                 m[(x, y)] = FLOOR if (x, y) in walkable else WALL
         self.bounds[map_id] = (width, height)  # so bounds-aware BFS can't leak off the map edge
+        self.counters[map_id] = set(counters or ())
 
     def observe(self, player: PlayerState | None, local_ascii: list[str] | None) -> None:
         if player is None:

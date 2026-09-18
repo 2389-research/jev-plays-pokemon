@@ -168,7 +168,8 @@ class ReasoningLoop:
                 cm = read_collision_map(self.controller.emu)
                 if (cm is not None and cm["map_id"] == mid
                         and (obs.player.x, obs.player.y) in cm["walkable"]):  # reject stale reads
-                    self.world.ingest_collision(cm["map_id"], cm["width"], cm["height"], cm["walkable"])
+                    self.world.ingest_collision(cm["map_id"], cm["width"], cm["height"],
+                                                cm["walkable"], cm.get("counters"))
                     self._collision_seen.add(mid)
                     # re-apply learned obstacles (signs / bump-blocked tiles) so a fresh ingest
                     # doesn't wipe what we discovered by bumping — they'd read as walkable again.

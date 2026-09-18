@@ -20,7 +20,7 @@ import json
 
 from ..games.pokemon_red import needs
 from ..games.pokemon_red.constants import MAP_NAMES_RAW
-from ..games.pokemon_red.game_state import read_badges, read_items, read_party
+from ..games.pokemon_red.game_state import read_badges, read_items, read_party, resolve_item_id
 from ..games.pokemon_red.maps import map_name
 from ..games.pokemon_red.needs import WCURMAP
 from ..providers.parsing import strip_fences
@@ -102,8 +102,18 @@ a specific person, enter a building), then output an ORDERED list of steps. Each
 go to, optionally talking to an NPC once there. The LAST step should continue toward the gym once
 unblocked.
 
+For EACH step give an ACCEPTANCE CRITERION (done_when) — the checkable condition that PROVES the
+step is complete (like a quest objective), so a step can't be marked done prematurely. Choose:
+  "on_map"            — arrived on that map (default for pure travel).
+  "has_item:<name>"   — that item is now in the bag (talk to the Mart clerk -> has_item:Oak's Parcel).
+  "no_item:<name>"    — that item is gone (delivered/used: give parcel to Oak -> no_item:Oak's Parcel).
+  "level>=<N>"        — party reached level N.   "badges>=<N>" — earned N badges.
+  "talked"            — had a conversation on that map (only when nothing more specific fits).
+  "verify:<yes/no question>" — a verifier judges it from game state, when none of the above fit.
+
 Return ONLY JSON:
-{"plan": "one-line summary", "steps": [{"map": <int map id>, "talk": <true|false>, "why": "<short>"}]}"""
+{"plan": "one-line summary",
+ "steps": [{"map": <int map id>, "talk": <true|false>, "done_when": "<criterion>", "why": "<short>"}]}"""
 
 
 class Planner:
@@ -170,12 +180,15 @@ class Planner:
             for step in data.get("steps", []):
                 mp = int(step["map"])
                 why_s = str(step.get("why") or plan_note)[:80]
+                done = self._parse_done_when(step.get("done_when"), mp)
                 quest.append(Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": mp},
                                        success={"on_map": mp}, reason=f"quest: go to {map_name(mp)} — {why_s}"))
                 if step.get("talk"):
+                    # the talk step's acceptance is the MODEL-authored criterion (e.g. has_item:parcel)
+                    # so it can't complete on a random dialog; default to talked_on_map only if unset.
                     quest.append(Directive(intent=Intent.TALK_TO, target={"kind": "npc", "map": mp},
-                                           success={"talked_on_map": mp},
-                                           reason=f"quest: talk to someone in {map_name(mp)} — {why_s}"))
+                                           success=(done or {"talked_on_map": mp}),
+                                           reason=f"quest: talk in {map_name(mp)} [{step.get('done_when') or 'talked'}] — {why_s}"))
             return quest
         except Exception:
             return []
@@ -216,6 +229,30 @@ class Planner:
             return Directive(intent=Intent.BATTLE, target=None, success={"in_battle": 0},
                              reason="win/flee the current battle")
         return self._travel(emu, memory, why)
+
+    @staticmethod
+    def _parse_done_when(done_when, map_id: int) -> dict | None:
+        """Turn a model-authored acceptance criterion string into a checkable predicate dict.
+        Returns None for an unrecognized/empty criterion (caller supplies a default)."""
+        if not done_when or not isinstance(done_when, str):
+            return None
+        s = done_when.strip()
+        low = s.lower()
+        if low == "on_map":
+            return {"on_map": map_id}
+        if low == "talked":
+            return {"talked_on_map": map_id}
+        for pre, key in (("has_item:", "has_item"), ("no_item:", "no_item")):
+            if low.startswith(pre):
+                iid = resolve_item_id(s[len(pre):])
+                return {key: iid} if iid is not None else None
+        for pre, key in (("level>=", "level"), ("badges>=", "badges")):
+            if low.startswith(pre):
+                num = s[len(pre):].strip()
+                return {key: f">={num}"} if num.isdigit() else None
+        if low.startswith("verify:"):
+            return {"verify": s[len("verify:"):].strip()}  # judged by the verifier (not RAM)
+        return None
 
     def _waypoint(self, emu, context: dict) -> tuple[int, int, str] | None:
         """Ask LunaRoute for a concrete walkable tile on the CURRENT map to route toward, to

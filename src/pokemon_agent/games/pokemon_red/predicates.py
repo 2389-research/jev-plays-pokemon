@@ -91,6 +91,12 @@ def _clause(key: str, spec, emu: Emulator, memory=None) -> bool:
             return int(spec) in _bag_item_ids(emu)
         except (TypeError, ValueError):
             return False
+    if key == "no_item":
+        # spec = item id: true when the item is NOT in the bag (e.g. delivered/consumed).
+        try:
+            return int(spec) not in _bag_item_ids(emu)
+        except (TypeError, ValueError):
+            return False
     if key == "talked_on_map":
         # spec = map id: true once we've had a real dialog with an NPC on that map (from
         # interaction memory) — the machine-checkable "did the talk_to step happen" signal.

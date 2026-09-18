@@ -121,6 +121,19 @@ def read_money(emu: Emulator) -> int:
         return 0
 
 
+_ITEM_ID_BY_NAME = {
+    "".join(ch for ch in name.lower() if ch.isalnum()): iid for iid, name in ITEMS.items()
+}
+
+
+def resolve_item_id(name: str) -> int | None:
+    """Fuzzy item name -> id (e.g. "Oak's Parcel" -> 70). Case/punctuation-insensitive."""
+    key = "".join(ch for ch in str(name).lower() if ch.isalnum())
+    if key in _ITEM_ID_BY_NAME:
+        return _ITEM_ID_BY_NAME[key]
+    return next((iid for k, iid in _ITEM_ID_BY_NAME.items() if key and (key in k or k in key)), None)
+
+
 def read_items(emu: Emulator) -> list[dict]:
     out: list[dict] = []
     try:

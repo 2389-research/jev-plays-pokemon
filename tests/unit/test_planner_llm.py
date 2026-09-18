@@ -173,3 +173,27 @@ def test_strategist_can_skip_search_and_plan_directly():
     p = Planner(goal_map=2, strategist=prov, knowledge=FakeKB(["unused"]))
     quest = p.strategize(FakeEmulator(map_id=1), _mem(), why="blocked")
     assert len(quest) == 1 and len(prov.states) == 1  # no search round
+
+
+def test_done_when_criteria_map_to_predicates():
+    p = Planner(goal_map=2)
+    assert p._parse_done_when("on_map", 42) == {"on_map": 42}
+    assert p._parse_done_when("has_item:Oak's Parcel", 42) == {"has_item": 70}
+    assert p._parse_done_when("no_item:Oaks Parcel", 42) == {"no_item": 70}
+    assert p._parse_done_when("level>=12", 42) == {"level": ">=12"}
+    assert p._parse_done_when("badges>=1", 42) == {"badges": ">=1"}
+    assert p._parse_done_when("talked", 42) == {"talked_on_map": 42}
+    assert p._parse_done_when("verify:did I get the pokedex?", 42) == {"verify": "did I get the pokedex?"}
+    assert p._parse_done_when("nonsense", 42) is None
+
+
+def test_strategize_uses_model_acceptance_criteria():
+    # the clerk step's acceptance is has_item(parcel), NOT a loose "talked" — no premature done
+    strat = FakeProvider('{"plan":"parcel","steps":['
+                         '{"map":42,"talk":true,"done_when":"has_item:Oak\'s Parcel","why":"get parcel"},'
+                         '{"map":40,"talk":true,"done_when":"no_item:Oak\'s Parcel","why":"deliver"}]}')
+    p = Planner(goal_map=2, strategist=strat)
+    quest = p.strategize(FakeEmulator(map_id=1), _mem(), why="blocked")
+    talk_successes = [d.success for d in quest if d.intent.value == "talk_to"]
+    assert talk_successes[0] == {"has_item": 70}   # get-parcel step
+    assert talk_successes[1] == {"no_item": 70}    # delivered step

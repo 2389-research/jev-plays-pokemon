@@ -48,6 +48,7 @@ from .world_map import DELTA, WALL
 MAX_GOTO_STEPS = 18  # safety bound on one navigation macro
 SERVO_FAIL_LIMIT = 6  # consecutive servo no-route steps before the directive is deemed impossible
 REPLAN_COOLDOWN = 8   # min steps between soft replans (stuck/low-conf) — enforces bold commitment
+QUEST_STEP_BUDGET = 60  # steps to keep working one quest step before re-strategizing (anti-churn)
 WARP_BACK = 0xFF     # a warp's dest_map of 0xFF means "return to the map you came from" (wLastMap)
 
 # priority of each intent, for preemption/suspension (higher preempts lower).
@@ -138,6 +139,7 @@ class ReasoningLoop:
         self._dstack: list[Directive] = []
         self._quest: deque[Directive] = deque()   # tier-2 quest steps, executed in order (FIFO)
         self._in_quest = False                      # holding a quest step (overrides arbiter intent)
+        self._quest_step_age = 0                     # steps spent on the current quest step (wedge budget)
         self._replan_next = False       # a trigger (stuck / low-conf) asked for a replan
         self._servo_fail = 0            # consecutive servo no-route steps (impossibility)
         self._steps_since_replan = REPLAN_COOLDOWN  # cooldown counter (bold commitment)
@@ -286,8 +288,8 @@ class ReasoningLoop:
         intent = self.arbiter.intent(emu)
         self._steps_since_replan += 1
 
-        # --- termination: did the active directive succeed? ---
-        if self._directive is not None and predicates.evaluate(self._directive.success, emu, memory=self.memory):
+        # --- termination: did the active directive succeed? (VERIFY its acceptance criterion) ---
+        if self._directive is not None and self._directive_satisfied(self._directive):
             self.on_event("directive_done", {"step": self.session.step,
                                              "intent": self._directive.intent.value,
                                              "reason": self._directive.reason})
@@ -304,12 +306,17 @@ class ReasoningLoop:
             else:
                 self._directive = self._dstack.pop() if self._dstack else None
 
-        # --- holding a quest step: it overrides the arbiter's intent; only drop it if the step
-        # is impossible (re-strategize) or a SURVIVE emergency preempts. ---
+        # --- holding a quest step: it overrides the arbiter's intent. DON'T abandon it on a
+        # transient stall (that caused re-quest churn) — keep working it (servo/waypoint/executor)
+        # until its acceptance criterion is met, a SURVIVE emergency preempts, or it's been wedged
+        # far too long (then re-strategize with the progress so far as feedback). ---
         if self._in_quest and self._directive is not None:
-            if self._servo_fail >= SERVO_FAIL_LIMIT:
+            self._quest_step_age += 1
+            if self._quest_step_age > QUEST_STEP_BUDGET:
+                self.on_event("quest_step_wedged", {"step": self.session.step,
+                                                    "reason": self._directive.reason})
                 self._in_quest = False
-                self._quest.clear()  # this quest step can't be reached — fall through to re-plan
+                self._quest.clear()  # wedged too long — fall through to re-strategize
             elif intent == Intent.HEAL and self._directive.intent != Intent.HEAL:
                 self._in_quest = False  # emergency heal preempts; re-derive the quest later
             else:
@@ -337,10 +344,33 @@ class ReasoningLoop:
             self._commit_directive(self._directive.reason)
         return self._carry_plan()
 
+    def _directive_satisfied(self, directive) -> bool:
+        """VERIFY a directive's acceptance criterion. RAM-checkable criteria (has_item, on_map,
+        level, ...) are read deterministically; a model-authored ``verify:`` criterion (a fact
+        not in RAM) is judged by the calibrated verifier over assembled game-state evidence —
+        this is the "when it thinks it's done, check the criteria" step."""
+        success = directive.success or {}
+        if "verify" in success:
+            judge = getattr(self.reasoner, "judge", None)
+            # throttle the model check (it's an LLM/Jev call): only every few steps of the step
+            if judge is None or (self._quest_step_age % 4 != 0):
+                return False
+            try:
+                from ..games.pokemon_red.game_state import read_game_state
+                gs = read_game_state(self.controller.emu)
+                evidence = {"party": gs.get("party"), "items": gs.get("items"),
+                            "badges": gs.get("badges"), "screen_text": gs.get("screen_text"),
+                            "map_id": self.controller.emu.read_memory(0xD35E)}
+                return float(judge(success["verify"], evidence)) >= 0.6
+            except Exception:
+                return False
+        return predicates.evaluate(success, self.controller.emu, memory=self.memory)
+
     def _commit_directive(self, note: str) -> None:
         self._replan_next = False
         self._servo_fail = 0
         self._steps_since_replan = 0
+        self._quest_step_age = 0
         self.on_event("directive", {"step": self.session.step, "intent": self._directive.intent.value,
                                     "target": self._directive.target, "success": self._directive.success,
                                     "reason": self._directive.reason})

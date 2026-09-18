@@ -376,6 +376,11 @@ class ReasoningLoop:
             step = nav._bfs_first_step(player.map_id, (player.x, player.y), edge, off_route_doors)
             if step is not None and step.value not in blocked_dirs:
                 return MoveAction(direction=step)
+            # BFS returned None because we're ALREADY on the boundary edge -> take the final
+            # step OFF the edge in the connection direction to actually cross the seam (the
+            # servo used to stop here and hand a confused executor the crossing).
+            if step is None and (player.x, player.y) in edge and d not in blocked_dirs:
+                return MoveAction(direction=Direction(d))
         # fallback (edge unknown / no BFS path yet): greedy compass with door avoidance
         if self._can_step(player, d, next_map, exits, blocked_dirs):
             return MoveAction(direction=Direction(d))

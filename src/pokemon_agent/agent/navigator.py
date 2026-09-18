@@ -32,6 +32,13 @@ class Navigator:
     def _passable(self, map_id: int, xy: tuple[int, int], blocked: frozenset | set | None = None) -> bool:
         if blocked and xy in blocked:
             return False  # an object/NPC stands here — can't walk onto or through it
+        # When the full map extent is known (a collision ingest), out-of-bounds cells are NOT
+        # passable — otherwise BFS routes off the map edge through unmarked border cells.
+        bounds = getattr(self.world, "bounds", {}).get(map_id)
+        if bounds is not None:
+            w, h = bounds
+            if not (0 <= xy[0] < w and 0 <= xy[1] < h):
+                return False
         return self.world.tiles[map_id].get(xy) != WALL
 
     def _bfs_first_step(

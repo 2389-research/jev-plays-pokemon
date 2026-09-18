@@ -33,6 +33,8 @@ class WorldMap:
     def __init__(self) -> None:
         self.tiles: dict[int, dict[tuple[int, int], str]] = defaultdict(dict)
         self.visits: dict[int, dict[tuple[int, int], int]] = defaultdict(lambda: defaultdict(int))
+        # known map extents (width, height) from a full-collision ingest, for bounds-aware BFS
+        self.bounds: dict[int, tuple[int, int]] = {}
 
     # --- updates ----------------------------------------------------------
     def ingest_collision(self, map_id: int, width: int, height: int,
@@ -44,6 +46,7 @@ class WorldMap:
         for y in range(height):
             for x in range(width):
                 m[(x, y)] = FLOOR if (x, y) in walkable else WALL
+        self.bounds[map_id] = (width, height)  # so bounds-aware BFS can't leak off the map edge
 
     def observe(self, player: PlayerState | None, local_ascii: list[str] | None) -> None:
         if player is None:

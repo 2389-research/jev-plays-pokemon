@@ -58,6 +58,23 @@ target_map MUST be a real map id from ROUTE or NEIGHBORS (a reachable map), neve
 current map."""
 
 
+WAYPOINT_SYSTEM = """You are the NAVIGATOR for an agent playing Pokémon Red. The deterministic
+pathfinder is STUCK — it keeps oscillating and can't make progress on its own. Your job:
+look at the map and pick ONE concrete tile to walk to next that breaks the deadlock and heads
+the right way.
+
+You are given: the goal (GOAL_DIR — the compass direction toward the next area, and why),
+PLAYER (your exact x,y), a MAP_VIEW ascii grid in map coordinates with a coordinate ruler
+('@'=you, 'E'=exit tile, '.'=walkable, '#'=wall, '?'=unexplored), EXITS (x,y + where they
+lead), and WHY_STUCK. Read tile coordinates straight off the grid.
+
+Pick a WALKABLE ('.') tile that (a) is reachable, (b) is NOT where you're stuck, and (c)
+moves you toward GOAL_DIR (usually into the open corridor that leads to the goal edge/exit).
+Prefer a tile several steps away in the goal direction, not an adjacent one.
+
+Return ONLY JSON: {"x": <int>, "y": <int>, "reason": "one sentence"}"""
+
+
 class Planner:
     def __init__(self, *, goal_map: int | None = None, level_target: int = 0,
                  heal_hp: float = 0.80, reflector=None, provider=None):
@@ -67,9 +84,22 @@ class Planner:
         self.reflector = reflector      # optional generative strategist (maintains AgentPlan)
         self.provider = provider        # optional chat_json provider (LunaRoute) for target selection
 
-    def plan(self, intent: Intent, emu, memory=None, *, why: str = "") -> Directive:
+    def plan(self, intent: Intent, emu, memory=None, *, why: str = "", context: dict | None = None) -> Directive:
         """Compute the concrete directive for ``intent``. ``why`` explains the replan
-        (fed to the LLM as Inner Monologue) so it never re-issues a failed directive."""
+        (fed to the LLM as Inner Monologue) so it never re-issues a failed directive.
+
+        When the replan is because we're STUCK/impossible on a target-bearing intent, and a
+        map view + provider are available, ask LunaRoute for a concrete WAYPOINT tile on the
+        current map and route there (the LLM's spatial reasoning gets teeth — BFS alone can't
+        un-stick itself)."""
+        stuck = context is not None and ("stuck" in why or "impossible" in why)
+        if stuck and intent in (Intent.TRAVEL, Intent.GRIND):
+            wp = self._waypoint(emu, context)
+            if wp is not None:
+                cur = emu.read_memory(WCURMAP)
+                x, y, reason = wp
+                return Directive(intent=intent, target={"kind": "waypoint", "map": cur, "x": x, "y": y},
+                                 success={"at_xy": [cur, x, y]}, reason=f"unstuck waypoint: {reason}")
         if intent == Intent.TRAVEL:
             return self._travel(emu, memory, why)
         if intent == Intent.GRIND:
@@ -90,6 +120,30 @@ class Planner:
             return Directive(intent=Intent.BATTLE, target=None, success={"in_battle": 0},
                              reason="win/flee the current battle")
         return self._travel(emu, memory, why)
+
+    def _waypoint(self, emu, context: dict) -> tuple[int, int, str] | None:
+        """Ask LunaRoute for a concrete walkable tile on the CURRENT map to route toward, to
+        break a deterministic-pathfinder deadlock. Returns (x, y, reason) or None."""
+        if self.provider is None:
+            return None
+        try:
+            state = {
+                "goal_dir": context.get("goal_dir"),
+                "player": context.get("player"),
+                "map_view": context.get("map_view"),
+                "exits": context.get("exits"),
+                "why_stuck": context.get("why", "the pathfinder is oscillating without progress"),
+            }
+            content, _, _ = self.provider.chat_json(WAYPOINT_SYSTEM, state)
+            data = json.loads(strip_fences(content))
+            x, y = int(data["x"]), int(data["y"])
+            reason = str(data.get("reason") or "").strip() or "head toward the goal corridor"
+            player = context.get("player") or {}
+            if (x, y) == (player.get("x"), player.get("y")):  # must not be where we already are
+                return None
+            return x, y, reason
+        except Exception:
+            return None
 
     # --- travel: LLM picks the target map; graph does the geometry + fallback --
     def _travel(self, emu, memory, why: str) -> Directive:

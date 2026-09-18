@@ -30,6 +30,9 @@ from . import needs
 from .game_state import WPARTYCOUNT, read_badges, read_money
 from .needs import WCURMAP, WISINBATTLE
 
+WPLAYERX = 0xD362
+WPLAYERY = 0xD361
+
 _OPS = {">=": operator.ge, "<=": operator.le, ">": operator.gt,
         "<": operator.lt, "==": operator.eq, "!=": operator.ne}
 
@@ -66,6 +69,15 @@ def _clause(key: str, spec, emu: Emulator, memory=None) -> bool:
         return _cmp(read_money(emu), spec)
     if key == "in_battle":
         return _cmp(1 if emu.read_memory(WISINBATTLE) else 0, spec)
+    if key == "at_xy":
+        # spec = [map, x, y]: player has reached (within 1 tile of) that map cell — used as a
+        # waypoint's termination so an LLM-chosen unstuck target actually commits.
+        try:
+            mp, x, y = (int(v) for v in spec)
+        except (TypeError, ValueError):
+            return False
+        return (emu.read_memory(WCURMAP) == mp
+                and abs(emu.read_memory(WPLAYERX) - x) + abs(emu.read_memory(WPLAYERY) - y) <= 1)
     if key == "talked_to":
         # spec = [map, x, y] faced tile; verified against interaction memory's talked set.
         if memory is None or not hasattr(memory, "interactions"):

@@ -90,3 +90,23 @@ def test_llm_garbage_json_falls_back_to_goal():
     p = Planner(goal_map=2, provider=FakeProvider("not json at all"))
     d = p.plan(Intent.TRAVEL, FakeEmulator(map_id=0), _mem())
     assert d.target["map"] == 2  # deterministic fallback on parse failure
+
+
+def test_stuck_replan_uses_llm_waypoint():
+    # when stuck, LunaRoute picks a concrete tile and the servo is bound to route there
+    prov = FakeProvider('{"x": 11, "y": 3, "reason": "west then up the open corridor"}')
+    p = Planner(goal_map=2, provider=prov)
+    ctx = {"map_view": ["ruler"], "player": {"x": 19, "y": 9, "map_id": 1},
+           "exits": [], "goal_dir": "north toward map 13"}
+    d = p.plan(Intent.GRIND, FakeEmulator(map_id=1), _mem(),
+               why="got stuck pursuing the grind directive; reroute", context=ctx)
+    assert d.target["kind"] == "waypoint" and (d.target["x"], d.target["y"]) == (11, 3)
+    assert d.success == {"at_xy": [1, 11, 3]}   # arrives-at termination on the current map
+    assert d.target_bearing                      # servo will BFS to it
+
+
+def test_stuck_without_context_or_provider_is_normal_directive():
+    # no map-view context -> no waypoint; falls back to the normal deterministic directive
+    p = Planner(goal_map=2, provider=FakeProvider('{"x":1,"y":1}'))
+    d = p.plan(Intent.GRIND, FakeEmulator(map_id=1), _mem(), why="got stuck")
+    assert d.target.get("kind") != "waypoint"

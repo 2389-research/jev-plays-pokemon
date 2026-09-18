@@ -23,9 +23,10 @@ class StubPlanner:
         self.queue = list(directives)
         self.calls = 0
 
-    def plan(self, intent, emu, memory, *, why=""):
+    def plan(self, intent, emu, memory, *, why="", context=None):
         self.calls += 1
         self.last_why = why
+        self.last_context = context
         return self.queue.pop(0) if self.queue else self.queue[-1]
 
 

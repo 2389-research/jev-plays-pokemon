@@ -143,15 +143,21 @@ class ReasoningLoop:
         obs, shot = self.builder.build(capture_screenshot=want_shot)
         self.session.record_position(obs.player)
         # FULL-MAP collision from RAM (wOverworldMap): load the whole current map's walkability
-        # once per map visit so the navigator routes across a town up front (not just the
-        # on-screen window). Cached per map id; overworld tileset only (interiors decode too
-        # but the corridor-to-Brock work only needs the overworld).
-        if obs.player is not None and obs.player.map_id not in self._collision_seen:
-            from ..games.pokemon_red.map_reader import read_collision_map
-            cm = read_collision_map(self.controller.emu)
-            if cm is not None and cm["map_id"] == obs.player.map_id:
-                self.world.ingest_collision(cm["map_id"], cm["width"], cm["height"], cm["walkable"])
-                self._collision_seen.add(obs.player.map_id)
+        # so the navigator routes across a town up front (not just the on-screen window).
+        # Guarded against STALE reads: after an in-game map transition the map buffer isn't
+        # settled for a few frames, so a read can decode the PREVIOUS map. We only accept a
+        # decode where the player stands on a walkable cell (always true for a correct read),
+        # and re-ingest if a cached grid ever marks the player's own tile as a wall.
+        if obs.player is not None:
+            mid = obs.player.map_id
+            stale_cache = self.world.tiles.get(mid, {}).get((obs.player.x, obs.player.y)) == WALL
+            if mid not in self._collision_seen or stale_cache:
+                from ..games.pokemon_red.map_reader import read_collision_map
+                cm = read_collision_map(self.controller.emu)
+                if (cm is not None and cm["map_id"] == mid
+                        and (obs.player.x, obs.player.y) in cm["walkable"]):  # reject stale reads
+                    self.world.ingest_collision(cm["map_id"], cm["width"], cm["height"], cm["walkable"])
+                    self._collision_seen.add(mid)
         self.world.observe(obs.player, obs.walkability)
         obs.map_view = self.world.render(obs.player, obs.exits, obs.map_dims)
         obs.unexplored_directions = self.world.unexplored_directions(obs.player)
@@ -218,6 +224,12 @@ class ReasoningLoop:
 
         # --- executor (Jev): the residual decision, its Choice masked+biased by the directive ---
         targets = build_targets(obs.game_state, obs.exits)
+        # under a travel/grind directive, don't offer the executor a building exit that isn't
+        # the next hop — otherwise, when the servo has no step, it wanders into a house/mart.
+        if directive is not None and directive.intent in (Intent.TRAVEL, Intent.GRIND):
+            allowed_next = self._next_hop_map(obs, directive)
+            targets = [t for t in targets
+                       if t.get("interact", True) or t.get("dest_map") == allowed_next]
         rstep, latency, usage = self.reasoner.step(
             primary_goal=self.session.goal.primary,
             image=shot if self.vision else None,
@@ -278,7 +290,20 @@ class ReasoningLoop:
                 self.on_event("directive_suspend", {"step": self.session.step,
                                                      "intent": self._directive.intent.value})
                 why = f"preempted by higher-priority {intent.value}"
-            self._directive = self.planner.plan(intent, emu, self.memory, why=why)
+            # on a STUCK/impossible replan, hand the planner the map view so LunaRoute can pick a
+            # concrete waypoint tile to route around the deadlock (LLM routing with teeth).
+            context = None
+            if ("stuck" in why or "impossible" in why) and obs.player is not None:
+                gd = next_direction(self.memory.graph, obs.player.map_id, self.goal_map) \
+                    if self.goal_map is not None else None
+                context = {
+                    "map_view": obs.map_view,
+                    "player": {"x": obs.player.x, "y": obs.player.y, "map_id": obs.player.map_id},
+                    "exits": obs.exits,
+                    "goal_dir": (f"{gd} toward map {self.goal_map}" if gd else None),
+                    "why": why,
+                }
+            self._directive = self.planner.plan(intent, emu, self.memory, why=why, context=context)
             self._replan_next = False
             self._servo_fail = 0
             self._steps_since_replan = 0
@@ -338,13 +363,23 @@ class ReasoningLoop:
         if player is None:
             return None
         exits = obs.exits or []  # already 0xFF-resolved in step_once
+        occupied = {(int(n["x"]), int(n["y"])) for n in ((obs.game_state or {}).get("npcs") or [])
+                    if "x" in n and "y" in n}
 
         # 1. an explicit tile — an object/NPC to talk to, or the exact exit/door tile the
-        #    planner attached (including a building's return door) -> BFS straight to it.
+        #    planner attached (including a building's return door) -> BFS straight to it,
+        #    routing around NPCs blocking the way.
         txy = directive.target_xy
         if txy is not None:
             interact = directive.intent in (Intent.TALK_TO, Intent.GRAB_ITEM)
-            return self._bfs_move(player, txy, interact=interact, blocked_dirs=blocked_dirs)
+            avoid = set(occupied)
+            # an on-map WAYPOINT is always reachable without leaving the map, so never route
+            # THROUGH a building door to get to it (doors are walkable -> the agent wandered
+            # into the Mart). Block every warp tile for waypoint routing.
+            if (directive.target or {}).get("kind") == "waypoint":
+                avoid |= {(int(e["x"]), int(e["y"])) for e in exits}
+            return self._bfs_move(player, txy, interact=interact, blocked_dirs=blocked_dirs,
+                                  occupied=avoid)
 
         # 2. no tile: a cross-map target reached by a door or a map-edge connection.
         tmap = directive.target_map
@@ -359,7 +394,7 @@ class ReasoningLoop:
         door = next((e for e in exits if e.get("dest_map") == next_map), None)
         if door is not None:
             return self._bfs_move(player, (int(door["x"]), int(door["y"])), interact=False,
-                                  blocked_dirs=blocked_dirs)
+                                  blocked_dirs=blocked_dirs, occupied=occupied)
 
         # else a map-EDGE connection (walk off the edge into next_map): BFS across the
         # accumulated collision map to the boundary edge in the connection direction, routing
@@ -371,9 +406,11 @@ class ReasoningLoop:
         edge = self._edge_goals(obs.map_dims, d)
         if edge:
             nav = Navigator(self.world)
-            off_route_doors = {(int(e["x"]), int(e["y"])) for e in exits
-                               if e.get("dest_map") != next_map}
-            step = nav._bfs_first_step(player.map_id, (player.x, player.y), edge, off_route_doors)
+            # route around off-route doors AND NPCs (pressing into an NPC talks to it instead
+            # of moving — the infinite "advance_dialog" bump loop at Viridian's Gambler).
+            off_route = {(int(e["x"]), int(e["y"])) for e in exits if e.get("dest_map") != next_map}
+            off_route |= occupied
+            step = nav._bfs_first_step(player.map_id, (player.x, player.y), edge, off_route)
             if step is not None and step.value not in blocked_dirs:
                 return MoveAction(direction=step)
             # BFS returned None because we're ALREADY on the boundary edge -> take the final
@@ -381,11 +418,11 @@ class ReasoningLoop:
             # servo used to stop here and hand a confused executor the crossing).
             if step is None and (player.x, player.y) in edge and d not in blocked_dirs:
                 return MoveAction(direction=Direction(d))
-        # fallback (edge unknown / no BFS path yet): greedy compass with door avoidance
-        if self._can_step(player, d, next_map, exits, blocked_dirs):
+        # fallback (edge unknown / no BFS path yet): greedy compass with door + NPC avoidance
+        if self._can_step(player, d, next_map, exits, blocked_dirs, occupied):
             return MoveAction(direction=Direction(d))
         for alt in _lateral(d):
-            if self._can_step(player, alt, next_map, exits, blocked_dirs):
+            if self._can_step(player, alt, next_map, exits, blocked_dirs, occupied):
                 return MoveAction(direction=Direction(alt))
         return None
 
@@ -406,24 +443,29 @@ class ReasoningLoop:
             return {(w - 1, y) for y in range(h)}
         return set()
 
-    def _can_step(self, player, d: str, next_map: int, exits, blocked_dirs: set[str]) -> bool:
-        """True if stepping `d` is safe: not a known wall/ledge, and not a warp door that
-        leads somewhere other than the intended next hop (so we don't wander into houses)."""
+    def _can_step(self, player, d: str, next_map: int, exits, blocked_dirs: set[str],
+                  occupied: set | None = None) -> bool:
+        """True if stepping `d` is safe: not a known wall/ledge, not an NPC (bumping talks
+        to it), and not a warp door that leads somewhere other than the intended next hop."""
         if d in blocked_dirs or self._confirmed_wall(Direction(d)):
             return False
         ax, ay = _tile_ahead(player, d)
+        if occupied and (ax, ay) in occupied:
+            return False  # an NPC stands there — stepping in talks to it, doesn't move
         for e in exits:
             if (int(e["x"]), int(e["y"])) == (ax, ay) and e.get("dest_map") != next_map:
                 return False  # a door to an off-route map (e.g. Blue's House) — don't enter
         return True
 
-    def _bfs_move(self, player, xy, *, interact: bool, blocked_dirs: set[str]):
-        """One BFS step toward tile ``xy`` over the learned map; InteractAction on arrival
-        (interact) or None on arrival (a warp/exit tile you just step onto)."""
+    def _bfs_move(self, player, xy, *, interact: bool, blocked_dirs: set[str], occupied=None):
+        """One BFS step toward tile ``xy`` over the learned map (routing around ``occupied``
+        NPC tiles); InteractAction on arrival (interact) or None on arrival (a warp/exit tile
+        you just step onto)."""
         if xy is None:
             return None
         nav = Navigator(self.world)
-        prim, arrived = nav.step_toward(player, {"x": int(xy[0]), "y": int(xy[1]), "interact": interact})
+        prim, arrived = nav.step_toward(player, {"x": int(xy[0]), "y": int(xy[1]), "interact": interact},
+                                        occupied)
         if arrived:
             return InteractAction() if interact else None
         if isinstance(prim, MoveAction) and prim.direction.value not in blocked_dirs:
@@ -538,6 +580,17 @@ class ReasoningLoop:
         from ..games.pokemon_red.game_state import read_screen_text
         _, caused_dialog = read_screen_text(self.builder.emu)
         self.interactions.record_action(self.session.step, obs.player, rstep.action, caused_dialog)
+        # BUMP GUARD: an overworld move that didn't change position hit something the static
+        # collision doesn't know — a SIGN or a stationary NPC. Mark that edge blocked so the
+        # servo/BFS routes AROUND it instead of re-bumping forever (the Viridian sign loop).
+        # Timing-independent (doesn't depend on the dialog box having finished opening).
+        ctx_now = ((obs.game_state or {}).get("context") or {})
+        if (isinstance(rstep.action, MoveAction) and obs.player is not None
+                and not ctx_now.get("forced_movement") and not ctx_now.get("in_battle")):
+            now = read_player(self.controller.emu)
+            if now is not None and (now.x, now.y, now.map_id) == (obs.player.x, obs.player.y, obs.player.map_id):
+                self.memory.mark_blocked_edge(obs.player.map_id, obs.player.x, obs.player.y,
+                                              rstep.action.direction.value)
         pos = f"({obs.player.x},{obs.player.y})m{obs.player.map_id}" if obs.player else "(?)"
         self._recent.append(f"{pos} {_desc(rstep.action)} -> {result.result}")
 

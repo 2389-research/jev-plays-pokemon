@@ -61,6 +61,14 @@ def test_unknown_key_is_unverifiable():
     assert not predicates.evaluate({"mystery": 1}, _mem())
 
 
+def test_at_xy_within_one_tile():
+    m = MemFake({0xD35E: 1, 0xD362: 11, 0xD361: 3})
+    assert predicates.evaluate({"at_xy": [1, 11, 3]}, m)       # exact
+    assert predicates.evaluate({"at_xy": [1, 11, 4]}, m)       # within 1 tile
+    assert not predicates.evaluate({"at_xy": [1, 11, 6]}, m)   # too far
+    assert not predicates.evaluate({"at_xy": [2, 11, 3]}, m)   # wrong map
+
+
 def test_talked_to_consults_memory():
     class Interactions:
         talked = {(2, 5, 6)}

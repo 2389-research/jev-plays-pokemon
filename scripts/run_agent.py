@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -109,6 +110,8 @@ def main() -> None:
     ap.add_argument("--orrery-workspace", default=None,
                     help="Orrery noosphere workspace id for the knowledge base (or env ORRERY_WORKSPACE_ID)")
     ap.add_argument("--orrery-url", default=None, help="Orrery base URL (default env or http://localhost:8100)")
+    ap.add_argument("--record-dir", default=None, help="run-recorder output dir (default runs/rec-<ts>); full per-step state + screenshots + new-area save states + viewer.html")
+    ap.add_argument("--no-record", action="store_true", help="disable the full run recorder")
     ap.add_argument("--goal", default="Leave the current area")
     ap.add_argument("--steps", type=int, default=30)
     ap.add_argument("--speed", type=int, default=None,
@@ -232,8 +235,16 @@ def main() -> None:
                 print(f"resumed memory+state from {ckpt_dir} (map_history={memory.map_history[-6:]})")
             else:
                 print(f"--resume: no checkpoint at {ckpt_dir}, starting fresh")
+        recorder = None
+        if not args.no_record and args.mode == "reason":
+            from pokemon_agent.logging.run_recorder import RunRecorder
+            rec_dir = Path(args.record_dir) if args.record_dir else (
+                states_dir.parent / "runs" / f"rec-{time.strftime('%Y%m%d-%H%M%S')}")
+            recorder = RunRecorder(emu, rec_dir)
+            print(f"recording run -> {rec_dir}  (view: cd {rec_dir} && python -m http.server, open viewer.html)")
+
         loop = ReasoningLoop(builder=ObservationBuilder(emu), controller=ActionController(emu),
-                             reasoner=reasoner, session=session, logger=logger,
+                             reasoner=reasoner, session=session, logger=logger, recorder=recorder,
                              vision=use_vision, reflect_every=(args.reflect_every or 8),
                              low_conf_reflect=low_conf_reflect, memory=memory,
                              checkpoint_every=args.checkpoint_every,
@@ -250,6 +261,8 @@ def main() -> None:
                 print(f"saved state -> {args.save_state_out}")
             if logger:
                 logger.close()
+            if recorder:
+                recorder.close()
             emu.close()
         print(f"done. final player state read: {emu.read_memory(0xD362)},{emu.read_memory(0xD361)} map={emu.read_memory(0xD35E)}")
         return

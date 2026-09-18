@@ -88,6 +88,7 @@ class ReasoningLoop:
         level_target: int = 0,
         strategist_provider=None,
         knowledge=None,
+        recorder=None,
         on_event: Optional[Callable[[str, dict], None]] = None,
     ):
         self.builder = builder
@@ -95,8 +96,16 @@ class ReasoningLoop:
         self.reasoner = reasoner
         self.session = session
         self.logger = logger
+        self.recorder = recorder      # full-fidelity per-step run recorder (optional)
         self.vision = vision
-        self.on_event = on_event or (lambda kind, payload: None)
+        _on_event = on_event or (lambda kind, payload: None)
+        if recorder is not None:  # tee events into the recorder so each step's record carries them
+            def _tee(kind, payload):
+                recorder.on_event(kind, payload)
+                _on_event(kind, payload)
+            self.on_event = _tee
+        else:
+            self.on_event = _on_event
         self.reflect_every = max(1, reflect_every)
         # when the decider reports confidence below this, re-plan on the NEXT step
         # (throttled by reflect_cooldown) instead of thrashing. None = off.
@@ -778,6 +787,8 @@ class ReasoningLoop:
                                  model="reasoner", latency_ms=latency, usage=usage)
             self.logger.record(step=self.session.step, observation=obs, response=resp,
                                result=result, plan=None, screenshot=shot)
+        if self.recorder is not None:  # full-fidelity record of everything the agent saw this step
+            self.recorder.record(step=self.session.step, obs=obs, action=rstep.action, result=result)
         self.session.step += 1
         if self.checkpoint_every and self.checkpoint_dir and self.session.step % self.checkpoint_every == 0:
             self._checkpoint()

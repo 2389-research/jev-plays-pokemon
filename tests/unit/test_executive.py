@@ -124,6 +124,23 @@ def test_story_gate_escalates_to_quest_and_advances_in_order():
     assert not loop._in_quest
 
 
+def test_wedged_quest_step_re_strategizes_instead_of_abandoning():
+    # a quest step that wedges too long re-plans from current state (force), staying on the
+    # errand rather than falling back to grind — even with a LOW escalation score.
+    loop, emu = _loop(map_id=1)
+    loop.reasoner = JudgingReasoner(0.1)               # router says "not a gate" ...
+    loop.arbiter = StubArbiter(Intent.TRAVEL)
+    q1 = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 0}, success={"on_map": 0})
+    deliver = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 40}, success={"on_map": 40})
+    loop.planner = StubQuestPlanner(quest=[deliver])   # ... but re-strategize returns the delivery quest
+    loop._directive = q1
+    loop._in_quest = True
+    loop._quest_step_age = 999                          # wedged
+    from pokemon_agent.agent.reason_loop import QUEST_STEP_BUDGET
+    loop._manage_directive(loop.builder.build(capture_screenshot=False)[0])
+    assert loop._in_quest and loop._directive is deliver  # re-strategized, still on the errand
+
+
 def test_low_escalation_score_does_not_quest():
     loop, emu = _loop(map_id=0)
     loop.reasoner = JudgingReasoner(0.1)               # Jev router: "just reroute"

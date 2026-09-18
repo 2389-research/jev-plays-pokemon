@@ -331,7 +331,17 @@ class ReasoningLoop:
                 self.on_event("quest_step_wedged", {"step": self.session.step,
                                                     "reason": self._directive.reason})
                 self._in_quest = False
-                self._quest.clear()  # wedged too long — fall through to re-strategize
+                self._quest.clear()
+                # RE-STRATEGIZE from the current state instead of abandoning the errand: the
+                # strategist sees what we now hold (e.g. the parcel) + that we're blocked, and
+                # re-derives the next objective (deliver it). Bypass the escalation gate — we're
+                # already mid-errand, so recovery shouldn't depend on a borderline score.
+                if self._try_quest(obs, "the current quest step wedged; re-plan from the current "
+                                        "state (keep pursuing the objective)", force=True):
+                    self._directive = self._quest.popleft()
+                    self._in_quest = True
+                    self._commit_directive("re-strategized quest")
+                    return self._directive
             elif intent == Intent.HEAL and self._directive.intent != Intent.HEAL:
                 self._in_quest = False  # emergency heal preempts; re-derive the quest later
             else:
@@ -414,11 +424,12 @@ class ReasoningLoop:
             "why": why,
         }
 
-    def _try_quest(self, obs, why: str) -> bool:
+    def _try_quest(self, obs, why: str, *, force: bool = False) -> bool:
         """Jev escalation router: is this block a story gate needing a sub-quest? If so, ask the
-        tier-2 strategist for an ordered quest and load it. Returns True if a quest was set."""
+        tier-2 strategist for an ordered quest and load it. ``force`` bypasses the escalation
+        check (used to re-plan mid-errand from the current state). Returns True if set."""
         strategize = getattr(self.planner, "strategize", None)
-        if strategize is None or obs.player is None or not self._should_escalate(obs):
+        if strategize is None or obs.player is None or (not force and not self._should_escalate(obs)):
             return False
         quest = strategize(self.controller.emu, self.memory, why=why)
         if not quest:

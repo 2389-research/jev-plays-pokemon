@@ -158,6 +158,12 @@ class ReasoningLoop:
                         and (obs.player.x, obs.player.y) in cm["walkable"]):  # reject stale reads
                     self.world.ingest_collision(cm["map_id"], cm["width"], cm["height"], cm["walkable"])
                     self._collision_seen.add(mid)
+                    # re-apply learned obstacles (signs / bump-blocked tiles) so a fresh ingest
+                    # doesn't wipe what we discovered by bumping — they'd read as walkable again.
+                    for (mp, ex, ey, edir) in self.memory.blocked_edges:
+                        if mp == mid:
+                            dx, dy = DELTA[Direction(edir)]
+                            self.world.tiles[mid][(ex + dx, ey + dy)] = WALL
         self.world.observe(obs.player, obs.walkability)
         obs.map_view = self.world.render(obs.player, obs.exits, obs.map_dims)
         obs.unexplored_directions = self.world.unexplored_directions(obs.player)
@@ -296,11 +302,16 @@ class ReasoningLoop:
             if ("stuck" in why or "impossible" in why) and obs.player is not None:
                 gd = next_direction(self.memory.graph, obs.player.map_id, self.goal_map) \
                     if self.goal_map is not None else None
+                npcs = {(int(n["x"]), int(n["y"])) for n in ((obs.game_state or {}).get("npcs") or [])
+                        if "x" in n and "y" in n}
                 context = {
-                    "map_view": obs.map_view,
+                    # a FULL, clearly-labeled map (unambiguous coords) — a windowed/wrapping view
+                    # is what made the LLM pick bad tiles; and the deterministic reachable set to
+                    # validate its pick against.
+                    "map_view": self.world.render_labeled(obs.player, obs.exits, npcs),
                     "player": {"x": obs.player.x, "y": obs.player.y, "map_id": obs.player.map_id},
-                    "exits": obs.exits,
                     "goal_dir": (f"{gd} toward map {self.goal_map}" if gd else None),
+                    "reachable": self._reachable_cells(obs.player, npcs),
                     "why": why,
                 }
             self._directive = self.planner.plan(intent, emu, self.memory, why=why, context=context)
@@ -538,6 +549,29 @@ class ReasoningLoop:
         self._emit_reason(rstep, 0)
         return self._finish(obs, rstep, result, 0, {}, shot)
 
+    def _reachable_cells(self, player, npcs: set[tuple[int, int]]) -> set[tuple[int, int]]:
+        """BFS-reachable cells from the player over the ingested collision, avoiding walls,
+        NPCs, and out-of-bounds — the deterministic ground truth the LLM's waypoint is validated
+        against (so it can't commit to a wall or an unreachable tile)."""
+        m = self.world.tiles.get(player.map_id, {})
+        bounds = self.world.bounds.get(player.map_id)
+        start = (player.x, player.y)
+        seen = {start}
+        q = deque([start])
+        while q:
+            x, y = q.popleft()
+            for dx, dy in ((0, -1), (0, 1), (-1, 0), (1, 0)):
+                n = (x + dx, y + dy)
+                if n in seen or n in npcs:
+                    continue
+                if bounds and not (0 <= n[0] < bounds[0] and 0 <= n[1] < bounds[1]):
+                    continue
+                if m.get(n) == WALL:
+                    continue
+                seen.add(n)
+                q.append(n)
+        return seen
+
     def _next_hop_map(self, obs, directive) -> int | None:
         """The map id of the next hop toward the active directive's target (for door filtering).
         None when there's no target-bearing directive / no known route."""
@@ -591,6 +625,11 @@ class ReasoningLoop:
             if now is not None and (now.x, now.y, now.map_id) == (obs.player.x, obs.player.y, obs.player.map_id):
                 self.memory.mark_blocked_edge(obs.player.map_id, obs.player.x, obs.player.y,
                                               rstep.action.direction.value)
+                # Mark the bumped-into TILE as a wall so the servo's BFS (which reads the
+                # collision map, not the edge ledger) routes AROUND it — without this the sign
+                # at (19,8) stays "walkable" and BFS keeps steering north into it forever.
+                dx, dy = DELTA[rstep.action.direction]
+                self.world.tiles[obs.player.map_id][(obs.player.x + dx, obs.player.y + dy)] = WALL
         pos = f"({obs.player.x},{obs.player.y})m{obs.player.map_id}" if obs.player else "(?)"
         self._recent.append(f"{pos} {_desc(rstep.action)} -> {result.result}")
 

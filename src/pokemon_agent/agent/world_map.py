@@ -114,6 +114,42 @@ class WorldMap:
                     q.append((nxt, first or d.value))
         return None
 
+    def render_labeled(
+        self,
+        player: PlayerState | None,
+        exits: list[dict] | None = None,
+        npcs: set[tuple[int, int]] | None = None,
+    ) -> list[str] | None:
+        """A FULL-map, unambiguously-labeled view for an LLM to read coordinates off:
+        two header rows (tens digit, then units) so x is unambiguous, and each row prefixed
+        with its y. '@'=you '.'=floor '#'=wall 'N'=NPC 'D'=door/exit '?'=unknown. Requires a
+        known map extent (a collision ingest); returns None otherwise (no cropping/wrapping,
+        which is what made the old windowed view unreadable)."""
+        if player is None:
+            return None
+        bounds = self.bounds.get(player.map_id)
+        if bounds is None:
+            return None
+        w, h = bounds
+        m = self.tiles[player.map_id]
+        doors = {(e["x"], e["y"]) for e in (exits or [])}
+        npcs = npcs or set()
+        rows = ["     " + "".join(str((x // 10) % 10) for x in range(w)),
+                "     " + "".join(str(x % 10) for x in range(w))]
+        for y in range(h):
+            line = f"y{y:2d} |"
+            for x in range(w):
+                if (x, y) == (player.x, player.y):
+                    line += "@"
+                elif (x, y) in npcs:
+                    line += "N"
+                elif (x, y) in doors:
+                    line += "D"
+                else:
+                    line += {FLOOR: ".", WALL: "#"}.get(m.get((x, y)), "?")
+            rows.append(line)
+        return rows
+
     def render(
         self,
         player: PlayerState | None,

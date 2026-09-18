@@ -21,7 +21,8 @@ _FACING = {0: "south", 4: "north", 8: "west", 12: "east"}
 # Sprite entity tables. Map coords live in wSpriteStateData2 (+4 Y, +5 X), absolute
 # and in the same frame as the player — correct even for off-screen sprites.
 WSPRITE1 = 0xC100  # 16 bytes/sprite; +0 picture id, +9 facing
-WSPRITE2 = 0xC200  # 16 bytes/sprite; +4 map Y, +5 map X
+WSPRITE2 = 0xC200  # 16 bytes/sprite; +4 map Y, +5 map X (each carries a +4 map-border offset)
+SPRITE_COORD_OFFSET = 4  # wSpriteStateData2 stores map coords shifted by the 4-tile border
 
 
 def _decode_byte(b: int) -> str:
@@ -207,8 +208,8 @@ def read_npcs(emu: Emulator) -> list[dict]:
                 continue
             b2 = WSPRITE2 + i * 16
             out.append({
-                "x": emu.read_memory(b2 + 5),
-                "y": emu.read_memory(b2 + 4),
+                "x": emu.read_memory(b2 + 5) - SPRITE_COORD_OFFSET,
+                "y": emu.read_memory(b2 + 4) - SPRITE_COORD_OFFSET,
                 "facing": _FACING.get(emu.read_memory(WSPRITE1 + i * 16 + 9), "?"),
                 "sprite": SPRITES.get(pic, f"sprite#{pic}"),
                 "sprite_id": pic,

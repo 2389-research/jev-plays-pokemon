@@ -58,21 +58,22 @@ target_map MUST be a real map id from ROUTE or NEIGHBORS (a reachable map), neve
 current map."""
 
 
-WAYPOINT_SYSTEM = """You are the NAVIGATOR for an agent playing Pokémon Red. The deterministic
-pathfinder is STUCK — it keeps oscillating and can't make progress on its own. Your job:
-look at the map and pick ONE concrete tile to walk to next that breaks the deadlock and heads
-the right way.
+WAYPOINT_SYSTEM = """You are the navigation module for a Pokémon Red agent. The deterministic
+pathfinder is STUCK. Pick ONE distant waypoint tile to commit to that breaks the deadlock.
 
-You are given: the goal (GOAL_DIR — the compass direction toward the next area, and why),
-PLAYER (your exact x,y), a MAP_VIEW ascii grid in map coordinates with a coordinate ruler
-('@'=you, 'E'=exit tile, '.'=walkable, '#'=wall, '?'=unexplored), EXITS (x,y + where they
-lead), and WHY_STUCK. Read tile coordinates straight off the grid.
+COORDINATE SYSTEM (read carefully): the grid uses (x, y). x = COLUMN, read off the TWO header
+rows — the first is the tens digit, the second the units digit — 0 at the left, increasing to
+the RIGHT. y = ROW, labeled 'y<n>' at the start of each line, increasing DOWNWARD (south);
+y=0 is the NORTH edge. Symbols: '@'=you, '.'=walkable floor, '#'=wall, 'N'=an NPC (NEVER
+target it — walking into one only talks to it), 'D'=a door/building exit, '?'=unknown.
 
-Pick a WALKABLE ('.') tile that (a) is reachable, (b) is NOT where you're stuck, and (c)
-moves you toward GOAL_DIR (usually into the open corridor that leads to the goal edge/exit).
-Prefer a tile several steps away in the goal direction, not an adjacent one.
+GOAL_DIR says which way the next area is. WHY_STUCK says what went wrong.
 
-Return ONLY JSON: {"x": <int>, "y": <int>, "reason": "one sentence"}"""
+Pick a WALKABLE '.' tile that is: (a) reachable from '@' WITHOUT crossing '#' or 'N';
+(b) AT LEAST 4 tiles away (Manhattan); (c) as far along a clear path toward GOAL_DIR as you
+can. TRACE the path tile-by-tile in your head first and make sure every step is '.'.
+
+Return ONLY JSON: {"path": "(x,y)->(x,y)->...", "x": <int>, "y": <int>, "reason": "..."}"""
 
 
 class Planner:
@@ -123,27 +124,34 @@ class Planner:
 
     def _waypoint(self, emu, context: dict) -> tuple[int, int, str] | None:
         """Ask LunaRoute for a concrete walkable tile on the CURRENT map to route toward, to
-        break a deterministic-pathfinder deadlock. Returns (x, y, reason) or None."""
+        break a deterministic-pathfinder deadlock. VALIDATES the pick against the deterministic
+        reachable set (rejecting walls / unreachable / too-close picks) and retries once — so a
+        good presentation does the heavy lifting and a guardrail catches the occasional miss.
+        Returns (x, y, reason) or None."""
         if self.provider is None:
             return None
-        try:
-            state = {
-                "goal_dir": context.get("goal_dir"),
-                "player": context.get("player"),
-                "map_view": context.get("map_view"),
-                "exits": context.get("exits"),
-                "why_stuck": context.get("why", "the pathfinder is oscillating without progress"),
-            }
-            content, _, _ = self.provider.chat_json(WAYPOINT_SYSTEM, state)
-            data = json.loads(strip_fences(content))
-            x, y = int(data["x"]), int(data["y"])
+        player = context.get("player") or {}
+        reachable = context.get("reachable")  # set[(x,y)] BFS-reachable, avoiding NPCs
+        state = {
+            "goal_dir": context.get("goal_dir"),
+            "player": player,
+            "map_view": context.get("map_view"),
+            "why_stuck": context.get("why", "the pathfinder is oscillating without progress"),
+        }
+        for _ in range(2):  # one retry if the model picks an invalid tile
+            try:
+                content, _, _ = self.provider.chat_json(WAYPOINT_SYSTEM, state)
+                data = json.loads(strip_fences(content))
+                x, y = int(data["x"]), int(data["y"])
+            except Exception:
+                continue
             reason = str(data.get("reason") or "").strip() or "head toward the goal corridor"
-            player = context.get("player") or {}
-            if (x, y) == (player.get("x"), player.get("y")):  # must not be where we already are
-                return None
-            return x, y, reason
-        except Exception:
-            return None
+            px, py = player.get("x"), player.get("y")
+            far_enough = px is None or (abs(x - px) + abs(y - py) >= 3)
+            ok = far_enough and (reachable is None or (x, y) in reachable)
+            if ok:
+                return x, y, reason
+        return None
 
     # --- travel: LLM picks the target map; graph does the geometry + fallback --
     def _travel(self, emu, memory, why: str) -> Directive:

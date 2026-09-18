@@ -85,6 +85,7 @@ class ReasoningLoop:
         checkpoint_dir: str | Path | None = None,
         goal_map: int | None = None,
         level_target: int = 0,
+        strategist_provider=None,
         on_event: Optional[Callable[[str, dict], None]] = None,
     ):
         self.builder = builder
@@ -124,10 +125,13 @@ class ReasoningLoop:
                 getattr(reasoner, "reflector", None), "provider", None)
             self.arbiter = NeedsArbiter(goal_map=goal_map, level_target=level_target)
             self.planner = Planner(goal_map=goal_map, level_target=level_target,
-                                   reflector=reasoner, provider=prov)
-        # executive state (the single source of truth + its suspension stack)
+                                   reflector=reasoner, provider=prov,
+                                   strategist=strategist_provider or prov)
+        # executive state (the single source of truth + its suspension stack + quest queue)
         self._directive: Directive | None = None
         self._dstack: list[Directive] = []
+        self._quest: deque[Directive] = deque()   # tier-2 quest steps, executed in order (FIFO)
+        self._in_quest = False                      # holding a quest step (overrides arbiter intent)
         self._replan_next = False       # a trigger (stuck / low-conf) asked for a replan
         self._servo_fail = 0            # consecutive servo no-route steps (impossibility)
         self._steps_since_replan = REPLAN_COOLDOWN  # cooldown counter (bold commitment)
@@ -275,59 +279,127 @@ class ReasoningLoop:
         emu = self.controller.emu
         intent = self.arbiter.intent(emu)
         self._steps_since_replan += 1
-        why = ""
 
-        # success met? (RAM verifier) -> resume a suspended directive or clear.
+        # --- termination: did the active directive succeed? ---
         if self._directive is not None and predicates.evaluate(self._directive.success, emu, memory=self.memory):
             self.on_event("directive_done", {"step": self.session.step,
-                                              "intent": self._directive.intent.value,
-                                              "reason": self._directive.reason})
-            why = f"previous {self._directive.intent.value} directive succeeded"
-            self._directive = self._dstack.pop() if self._dstack else None
+                                             "intent": self._directive.intent.value,
+                                             "reason": self._directive.reason})
             self._servo_fail = 0
+            if self._in_quest:
+                # advance the quest to its next step (FIFO); when empty, the quest is complete.
+                self._directive = self._quest.popleft() if self._quest else None
+                if self._directive is None:
+                    self._in_quest = False
+                    self.on_event("quest_done", {"step": self.session.step})
+                else:
+                    self._commit_directive("next quest step")
+                    return self._directive
+            else:
+                self._directive = self._dstack.pop() if self._dstack else None
 
+        # --- holding a quest step: it overrides the arbiter's intent; only drop it if the step
+        # is impossible (re-strategize) or a SURVIVE emergency preempts. ---
+        if self._in_quest and self._directive is not None:
+            if self._servo_fail >= SERVO_FAIL_LIMIT:
+                self._in_quest = False
+                self._quest.clear()  # this quest step can't be reached — fall through to re-plan
+            elif intent == Intent.HEAL and self._directive.intent != Intent.HEAL:
+                self._in_quest = False  # emergency heal preempts; re-derive the quest later
+            else:
+                return self._carry_plan()
+
+        # --- replan? ---
         if self._directive is None or self._should_replan(intent):
-            why = why or self._replan_reason(intent)
+            why = self._replan_reason(intent)
+            # BLOCKED and it smells like a story gate -> tier-2 quest (Jev escalation router).
+            if ("impossible" in why or "stuck" in why) and self._try_quest(obs, why):
+                self._directive = self._quest.popleft()
+                self._in_quest = True
+                self._commit_directive("quest start")
+                return self._directive
+            # otherwise: normal replan (with suspension + LLM waypoint on stuck).
             new_prio = _INTENT_PRIORITY.get(intent, 0)
             cur_prio = _INTENT_PRIORITY.get(self._directive.intent, 0) if self._directive else -1
-            # a higher-priority need preempts: suspend the current directive on the stack.
             if self._directive is not None and new_prio > cur_prio:
                 self._dstack.append(self._directive)
                 self.on_event("directive_suspend", {"step": self.session.step,
                                                      "intent": self._directive.intent.value})
                 why = f"preempted by higher-priority {intent.value}"
-            # on a STUCK/impossible replan, hand the planner the map view so LunaRoute can pick a
-            # concrete waypoint tile to route around the deadlock (LLM routing with teeth).
-            context = None
-            if ("stuck" in why or "impossible" in why) and obs.player is not None:
-                gd = next_direction(self.memory.graph, obs.player.map_id, self.goal_map) \
-                    if self.goal_map is not None else None
-                npcs = {(int(n["x"]), int(n["y"])) for n in ((obs.game_state or {}).get("npcs") or [])
-                        if "x" in n and "y" in n}
-                context = {
-                    # a FULL, clearly-labeled map (unambiguous coords) — a windowed/wrapping view
-                    # is what made the LLM pick bad tiles; and the deterministic reachable set to
-                    # validate its pick against.
-                    "map_view": self.world.render_labeled(obs.player, obs.exits, npcs),
-                    "player": {"x": obs.player.x, "y": obs.player.y, "map_id": obs.player.map_id},
-                    "goal_dir": (f"{gd} toward map {self.goal_map}" if gd else None),
-                    "reachable": self._reachable_cells(obs.player, npcs),
-                    "why": why,
-                }
+            context = self._replan_context(obs, why) if ("stuck" in why or "impossible" in why) else None
             self._directive = self.planner.plan(intent, emu, self.memory, why=why, context=context)
-            self._replan_next = False
-            self._servo_fail = 0
-            self._steps_since_replan = 0
-            self.on_event("directive", {"step": self.session.step,
-                                        "intent": self._directive.intent.value,
-                                        "target": self._directive.target,
-                                        "success": self._directive.success,
-                                        "reason": self._directive.reason})
+            self._commit_directive(self._directive.reason)
+        return self._carry_plan()
+
+    def _commit_directive(self, note: str) -> None:
+        self._replan_next = False
+        self._servo_fail = 0
+        self._steps_since_replan = 0
+        self.on_event("directive", {"step": self.session.step, "intent": self._directive.intent.value,
+                                    "target": self._directive.target, "success": self._directive.success,
+                                    "reason": self._directive.reason})
+
+    def _carry_plan(self) -> Directive | None:
         self.memory.plan = self._plan  # keep the checkpointed plan carrying the live directive
         if self._plan is not None:
             self._plan.directive = self._directive
             self._plan.stack = list(self._dstack)
         return self._directive
+
+    def _replan_context(self, obs, why: str) -> dict | None:
+        """The map view + reachable set handed to the tier-1 planner so LunaRoute can pick a
+        concrete waypoint tile to route around a deadlock (LLM routing with teeth)."""
+        if obs.player is None:
+            return None
+        gd = next_direction(self.memory.graph, obs.player.map_id, self.goal_map) \
+            if self.goal_map is not None else None
+        npcs = {(int(n["x"]), int(n["y"])) for n in ((obs.game_state or {}).get("npcs") or [])
+                if "x" in n and "y" in n}
+        return {
+            "map_view": self.world.render_labeled(obs.player, obs.exits, npcs),
+            "player": {"x": obs.player.x, "y": obs.player.y, "map_id": obs.player.map_id},
+            "goal_dir": (f"{gd} toward map {self.goal_map}" if gd else None),
+            "reachable": self._reachable_cells(obs.player, npcs),
+            "why": why,
+        }
+
+    def _try_quest(self, obs, why: str) -> bool:
+        """Jev escalation router: is this block a story gate needing a sub-quest? If so, ask the
+        tier-2 strategist for an ordered quest and load it. Returns True if a quest was set."""
+        strategize = getattr(self.planner, "strategize", None)
+        if strategize is None or obs.player is None or not self._should_escalate(obs):
+            return False
+        quest = strategize(self.controller.emu, self.memory, why=why)
+        if not quest:
+            return False
+        self._quest = deque(quest)
+        self.on_event("quest", {"step": self.session.step, "len": len(quest),
+                                "plan": [d.reason for d in quest]})
+        return True
+
+    def _should_escalate(self, obs) -> bool:
+        """Calibrated (Jev) decision: does this stuck need tier-2 problem-solving vs a reroute?
+        Falls back to escalate-on-impossibility when no calibrated router is available."""
+        judge = getattr(self.reasoner, "judge", None)
+        if judge is None:
+            return True  # no Jev router -> the impossibility trigger already gates this
+        try:
+            state = {
+                "situation": "the navigator is blocked and cannot reach its target after repeated tries",
+                "player": {"x": obs.player.x, "y": obs.player.y, "map_id": obs.player.map_id},
+                "map_view": obs.map_view,
+                "npcs": [(n.get("x"), n.get("y"), n.get("sprite"))
+                         for n in ((obs.game_state or {}).get("npcs") or [])],
+                "recent": list(self._recent)[-8:],
+            }
+            score = judge(
+                "Is the agent blocked by a STORY GATE or puzzle that needs a change of plan — "
+                "talking to an NPC, fetching/delivering an item, or entering a building — rather "
+                "than just walking a different path around an obstacle?", state)
+            self.on_event("escalate", {"step": self.session.step, "score": round(float(score), 2)})
+            return float(score) >= 0.5
+        except Exception:
+            return True
 
     def _replan_reason(self, intent: Intent) -> str:
         """A short human explanation of WHY we are replanning (Inner Monologue for the LLM)."""
@@ -553,9 +625,12 @@ class ReasoningLoop:
         """BFS-reachable cells from the player over the ingested collision, avoiding walls,
         NPCs, and out-of-bounds — the deterministic ground truth the LLM's waypoint is validated
         against (so it can't commit to a wall or an unreachable tile)."""
-        m = self.world.tiles.get(player.map_id, {})
         bounds = self.world.bounds.get(player.map_id)
         start = (player.x, player.y)
+        if bounds is None:
+            return {start}  # no ingested collision -> can't compute reachability (BFS would be unbounded)
+        w, h = bounds
+        m = self.world.tiles.get(player.map_id, {})
         seen = {start}
         q = deque([start])
         while q:
@@ -564,7 +639,7 @@ class ReasoningLoop:
                 n = (x + dx, y + dy)
                 if n in seen or n in npcs:
                     continue
-                if bounds and not (0 <= n[0] < bounds[0] and 0 <= n[1] < bounds[1]):
+                if not (0 <= n[0] < w and 0 <= n[1] < h):
                     continue
                 if m.get(n) == WALL:
                     continue

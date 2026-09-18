@@ -27,11 +27,27 @@ import operator
 
 from ...emulator.interface import Emulator
 from . import needs
-from .game_state import WPARTYCOUNT, read_badges, read_money
+from .game_state import WNUMBAGITEMS, WBAGITEMS, WPARTYCOUNT, read_badges, read_money
 from .needs import WCURMAP, WISINBATTLE
 
 WPLAYERX = 0xD362
 WPLAYERY = 0xD361
+
+
+def _bag_item_ids(emu) -> set[int]:
+    ids: set[int] = set()
+    try:
+        n = emu.read_memory(WNUMBAGITEMS)
+        if n > 20:
+            return ids
+        for i in range(n):
+            iid = emu.read_memory(WBAGITEMS + i * 2)
+            if iid == 0xFF:
+                break
+            ids.add(iid)
+    except Exception:
+        pass
+    return ids
 
 _OPS = {">=": operator.ge, "<=": operator.le, ">": operator.gt,
         "<": operator.lt, "==": operator.eq, "!=": operator.ne}
@@ -69,6 +85,22 @@ def _clause(key: str, spec, emu: Emulator, memory=None) -> bool:
         return _cmp(read_money(emu), spec)
     if key == "in_battle":
         return _cmp(1 if emu.read_memory(WISINBATTLE) else 0, spec)
+    if key == "has_item":
+        # spec = item id (int): true when that item is in the bag (e.g. Oak's Parcel 0x46).
+        try:
+            return int(spec) in _bag_item_ids(emu)
+        except (TypeError, ValueError):
+            return False
+    if key == "talked_on_map":
+        # spec = map id: true once we've had a real dialog with an NPC on that map (from
+        # interaction memory) — the machine-checkable "did the talk_to step happen" signal.
+        if memory is None or not hasattr(memory, "interactions"):
+            return False
+        try:
+            mp = int(spec)
+        except (TypeError, ValueError):
+            return False
+        return any(t[0] == mp for t in memory.interactions.talked)
     if key == "at_xy":
         # spec = [map, x, y]: player has reached (within 1 tile of) that map cell — used as a
         # waypoint's termination so an LLM-chosen unstuck target actually commits.

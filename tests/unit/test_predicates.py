@@ -79,3 +79,22 @@ def test_talked_to_consults_memory():
     assert predicates.evaluate({"talked_to": [2, 5, 6]}, _mem(), memory=Mem())
     assert not predicates.evaluate({"talked_to": [2, 9, 9]}, _mem(), memory=Mem())
     assert not predicates.evaluate({"talked_to": [2, 5, 6]}, _mem())  # no memory -> False
+
+
+def test_has_item_checks_bag():
+    m = MemFake({0xD31D: 2, 0xD31E: 0x46, 0xD31F: 1, 0xD320: 0x14, 0xD321: 3})
+    assert predicates.evaluate({"has_item": 0x46}, m)   # Oak's Parcel present
+    assert predicates.evaluate({"has_item": 0x14}, m)
+    assert not predicates.evaluate({"has_item": 0x99}, m)
+
+
+def test_talked_on_map():
+    class Interactions:
+        talked = {(1, 5, 6), (42, 3, 4)}
+
+    class Mem:
+        interactions = Interactions()
+
+    assert predicates.evaluate({"talked_on_map": 42}, MemFake({}), memory=Mem())
+    assert not predicates.evaluate({"talked_on_map": 7}, MemFake({}), memory=Mem())
+    assert not predicates.evaluate({"talked_on_map": 42}, MemFake({}))  # no memory -> False

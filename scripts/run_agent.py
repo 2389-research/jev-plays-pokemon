@@ -104,6 +104,8 @@ def main() -> None:
     ap.add_argument("--reflect-every", type=int, default=0,
                     help="run a vision planner every N steps (0 = off). Try 10.")
     ap.add_argument("--planner-model", default="glm-5.3-vision", help="vision model for reflection")
+    ap.add_argument("--strategist-model", default="glm-5.3",
+                    help="strong text model for tier-2 quest planning when the path is story-gated")
     ap.add_argument("--goal", default="Leave the current area")
     ap.add_argument("--steps", type=int, default=30)
     ap.add_argument("--speed", type=int, default=None,
@@ -178,8 +180,17 @@ def main() -> None:
                 print(f"  [directive ⏸] step {payload['step']} suspended {payload['intent']} (higher need)")
             elif kind == "directive_impossible":
                 print(f"  [directive ✗] step {payload['step']} {payload['intent']} impossible -> replan")
+            elif kind == "escalate":
+                print(f"  [escalate?] step {payload['step']} story-gate score={payload['score']}")
+            elif kind == "quest":
+                print(f"  [QUEST] step {payload['step']} ({payload['len']} steps):")
+                for s in payload["plan"]:
+                    print(f"       - {s}")
+            elif kind == "quest_done":
+                print(f"  [quest ✓] step {payload['step']} quest complete")
 
         low_conf_reflect = args.low_conf_reflect
+        strategist_provider = None
         if args.decider == "typesafe":
             from pokemon_agent.agent.typesafe_reasoner import TypeSafeReasoner
             # generative reflection stays on LunaRoute; per-step decisions go to TypeSafe.
@@ -189,8 +200,10 @@ def main() -> None:
             use_vision = False  # TypeSafe reads structured state, not screenshots
             if low_conf_reflect is None:
                 low_conf_reflect = 0.35  # unsure actor -> re-plan instead of thrash
+            # tier-2 strategist: a strong text model for quest planning when story-gated
+            strategist_provider = LunaRouteProvider(model=args.strategist_model, max_tokens=700)
             print(f"decider=typesafe (model={args.typesafe_model or 'default'}), reflection via {rmodel}, "
-                  f"wait_gate={args.wait_gate}, low_conf_reflect={low_conf_reflect}")
+                  f"strategist={args.strategist_model}, wait_gate={args.wait_gate}, low_conf_reflect={low_conf_reflect}")
         else:
             reasoner = Reasoner(vprov)
         low_conf_reflect = None if (low_conf_reflect is not None and low_conf_reflect <= 0) else low_conf_reflect
@@ -214,7 +227,8 @@ def main() -> None:
                              low_conf_reflect=low_conf_reflect, memory=memory,
                              checkpoint_every=args.checkpoint_every,
                              checkpoint_dir=(ckpt_dir if args.checkpoint_every else None),
-                             goal_map=args.goal_map, level_target=args.level_target, on_event=on_event_r)
+                             goal_map=args.goal_map, level_target=args.level_target,
+                             strategist_provider=strategist_provider, on_event=on_event_r)
         print(f"running REASON mode decider={args.decider} model={rmodel} vision={use_vision} goal={args.goal!r}")
         try:
             loop.run(max_steps=args.steps)

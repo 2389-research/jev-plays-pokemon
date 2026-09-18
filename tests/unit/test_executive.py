@@ -76,6 +76,67 @@ def test_success_predicate_triggers_replan():
     assert loop.planner.calls == 1 and loop._directive is nxt  # replanned to the next directive
 
 
+class StubQuestPlanner(StubPlanner):
+    def __init__(self, *directives, quest=()):
+        super().__init__(*directives)
+        self._quest = list(quest)
+
+    def strategize(self, emu, memory, *, why=""):
+        self.strategize_why = why
+        return list(self._quest)
+
+    def plan(self, intent, emu, memory, *, why="", context=None):
+        # real planner always returns a directive; the stub falls back to a benign one when its
+        # scripted queue is exhausted (e.g. the normal replan after a quest completes).
+        if self.queue:
+            return self.queue.pop(0)
+        return Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 0}, success={"on_map": -1})
+
+
+class JudgingReasoner(StubReasoner):
+    def __init__(self, score):
+        self.score = score
+
+    def judge(self, question, state):
+        return self.score
+
+
+def test_story_gate_escalates_to_quest_and_advances_in_order():
+    loop, emu = _loop(map_id=0)
+    loop.reasoner = JudgingReasoner(0.9)               # Jev router: "needs a sub-quest"
+    loop.arbiter = StubArbiter(Intent.TRAVEL)
+    q1 = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 5}, success={"on_map": 5})
+    q2 = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 9}, success={"on_map": 9})
+    loop.planner = StubQuestPlanner(quest=[q1, q2])
+    # an impossible active directive forces the escalation path
+    loop._directive = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 2}, success={"on_map": 2})
+    loop._servo_fail = 99
+
+    loop._manage_directive(loop.builder.build(capture_screenshot=False)[0])
+    assert loop._in_quest and loop._directive is q1     # escalated -> first quest step
+
+    emu.map_id = 5                                        # q1 success -> advance to q2
+    loop._manage_directive(loop.builder.build(capture_screenshot=False)[0])
+    assert loop._in_quest and loop._directive is q2
+
+    emu.map_id = 9                                        # q2 success -> quest complete
+    loop._manage_directive(loop.builder.build(capture_screenshot=False)[0])
+    assert not loop._in_quest
+
+
+def test_low_escalation_score_does_not_quest():
+    loop, emu = _loop(map_id=0)
+    loop.reasoner = JudgingReasoner(0.1)               # Jev router: "just reroute"
+    loop.arbiter = StubArbiter(Intent.TRAVEL)
+    normal = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 9}, success={"on_map": 9})
+    loop.planner = StubQuestPlanner(normal, quest=[Directive(intent=Intent.TRAVEL,
+                                                             target={"kind": "map", "map": 5}, success={"on_map": 5})])
+    loop._directive = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 2}, success={"on_map": 2})
+    loop._servo_fail = 99
+    loop._manage_directive(loop.builder.build(capture_screenshot=False)[0])
+    assert not loop._in_quest and loop._directive is normal  # normal replan, no quest
+
+
 def test_higher_need_suspends_current_directive_on_the_stack():
     loop, emu = _loop(map_id=0)
     travel = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 9}, success={"on_map": 9})

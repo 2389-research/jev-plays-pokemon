@@ -110,3 +110,21 @@ def test_stuck_without_context_or_provider_is_normal_directive():
     p = Planner(goal_map=2, provider=FakeProvider('{"x":1,"y":1}'))
     d = p.plan(Intent.GRIND, FakeEmulator(map_id=1), _mem(), why="got stuck")
     assert d.target.get("kind") != "waypoint"
+
+
+def test_strategize_builds_quest_from_llm_steps():
+    # tier-2 strategist returns an ordered quest; talk steps expand to a travel+talk pair
+    strat = FakeProvider('{"plan":"deliver Oak parcel","steps":['
+                         '{"map":42,"talk":true,"why":"get parcel from mart clerk"},'
+                         '{"map":0,"talk":true,"why":"deliver to Oak"},'
+                         '{"map":1,"talk":false,"why":"return to Viridian"}]}')
+    p = Planner(goal_map=2, strategist=strat)
+    quest = p.strategize(FakeEmulator(map_id=1), _mem(), why="blocked by old man")
+    intents = [(d.intent.value, d.target.get("map"), d.success) for d in quest]
+    # map42 travel+talk, map0 travel+talk, map1 travel  -> 5 directives
+    assert [i[0] for i in intents] == ["travel", "talk_to", "travel", "talk_to", "travel"]
+    assert intents[0][2] == {"on_map": 42} and intents[1][2] == {"talked_on_map": 42}
+
+
+def test_strategize_empty_without_provider():
+    assert Planner(goal_map=2).strategize(FakeEmulator(map_id=1), _mem(), why="x") == []

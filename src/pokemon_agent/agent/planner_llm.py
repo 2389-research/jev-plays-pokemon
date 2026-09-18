@@ -19,6 +19,8 @@ from __future__ import annotations
 import json
 
 from ..games.pokemon_red import needs
+from ..games.pokemon_red.constants import MAP_NAMES_RAW
+from ..games.pokemon_red.game_state import read_badges, read_items, read_party
 from ..games.pokemon_red.maps import map_name
 from ..games.pokemon_red.needs import WCURMAP
 from ..providers.parsing import strip_fences
@@ -76,14 +78,68 @@ can. TRACE the path tile-by-tile in your head first and make sure every step is 
 Return ONLY JSON: {"path": "(x,y)->(x,y)->...", "x": <int>, "y": <int>, "reason": "..."}"""
 
 
+STRATEGIST_SYSTEM = """You are the STRATEGIC planner (tier 2) for an agent playing Pokémon Red,
+working toward the first gym (Brock, in Pewter City, north). The fast navigator is BLOCKED and
+cannot proceed on its own — usually a STORY GATE (an NPC who won't move, a locked path, a
+required item/errand). Use your knowledge of Pokémon Red to work out the SEQUENCE of steps that
+unblocks progress.
+
+You are given: WHY_BLOCKED, CURRENT_MAP (id + name), PARTY, ITEMS, BADGES, and MAPS (an
+id→name table for reference — use these exact ids).
+
+Reason about what the game requires here (e.g. fetch an item from a shop and deliver it, talk to
+a specific person, enter a building), then output an ORDERED list of steps. Each step is a MAP to
+go to, optionally talking to an NPC once there. The LAST step should continue toward the gym once
+unblocked.
+
+Return ONLY JSON:
+{"plan": "one-line summary", "steps": [{"map": <int map id>, "talk": <true|false>, "why": "<short>"}]}"""
+
+
 class Planner:
     def __init__(self, *, goal_map: int | None = None, level_target: int = 0,
-                 heal_hp: float = 0.80, reflector=None, provider=None):
+                 heal_hp: float = 0.80, reflector=None, provider=None, strategist=None):
         self.goal_map = goal_map
         self.level_target = level_target
         self.heal_hp = heal_hp
         self.reflector = reflector      # optional generative strategist (maintains AgentPlan)
-        self.provider = provider        # optional chat_json provider (LunaRoute) for target selection
+        self.provider = provider        # tier-1 chat_json provider (LunaRoute-fast) for targets
+        self.strategist = strategist    # tier-2 chat_json provider (LunaRoute-strong) for quests
+
+    def strategize(self, emu, memory=None, *, why: str = "") -> list[Directive]:
+        """Tier-2 problem solving: given a blocked situation, return an ORDERED quest of
+        directives that unblocks progress (travel/enter to a map, optionally talk there). Empty
+        list if no strategist is wired or the plan can't be parsed."""
+        prov = self.strategist or self.provider
+        if prov is None:
+            return []
+        cur = emu.read_memory(WCURMAP)
+        try:
+            state = {
+                "why_blocked": why,
+                "current_map": {"id": cur, "name": map_name(cur)},
+                "goal": f"reach map {self.goal_map} ({map_name(self.goal_map)})" if self.goal_map is not None else "progress",
+                "party": [f"{p['species']} L{p['level']}" for p in read_party(emu)],
+                "items": [it["item"] for it in read_items(emu)],
+                "badges": read_badges(emu)["count"],
+                "maps": {str(mid): name for mid, name in MAP_NAMES_RAW.items()},
+            }
+            content, _, _ = prov.chat_json(STRATEGIST_SYSTEM, state)
+            data = json.loads(strip_fences(content))
+            plan_note = str(data.get("plan") or "quest").strip()
+            quest: list[Directive] = []
+            for step in data.get("steps", []):
+                mp = int(step["map"])
+                why_s = str(step.get("why") or plan_note)[:80]
+                quest.append(Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": mp},
+                                       success={"on_map": mp}, reason=f"quest: go to {map_name(mp)} — {why_s}"))
+                if step.get("talk"):
+                    quest.append(Directive(intent=Intent.TALK_TO, target={"kind": "npc", "map": mp},
+                                           success={"talked_on_map": mp},
+                                           reason=f"quest: talk to someone in {map_name(mp)} — {why_s}"))
+            return quest
+        except Exception:
+            return []
 
     def plan(self, intent: Intent, emu, memory=None, *, why: str = "", context: dict | None = None) -> Directive:
         """Compute the concrete directive for ``intent``. ``why`` explains the replan

@@ -128,6 +128,9 @@ class ReasoningLoop:
             self.planner = Planner(goal_map=goal_map, level_target=level_target,
                                    reflector=reasoner, provider=prov,
                                    strategist=strategist_provider or prov, knowledge=knowledge)
+            # surface the planner's knowledge-base tool-calls in the run log
+            self.planner.on_search = lambda q, n: self.on_event(
+                "kb_search", {"step": self.session.step, "query": q, "results": n})
         # executive state (the single source of truth + its suspension stack + quest queue)
         self._directive: Directive | None = None
         self._dstack: list[Directive] = []

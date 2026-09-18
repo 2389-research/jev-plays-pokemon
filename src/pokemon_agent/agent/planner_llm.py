@@ -83,9 +83,15 @@ working toward the first gym (Brock, in Pewter City, north). The fast navigator 
 cannot proceed on its own — usually a STORY GATE (an NPC who won't move, a locked path, a
 required item/errand). Work out the SEQUENCE of steps that unblocks progress.
 
+TOOL — knowledge base: you can look things up in a Pokémon Red guide/knowledge base before you
+commit. To search, reply with ONLY {"search": ["query1", "query2"]} (1-3 queries); you'll get
+the results back in KNOWLEDGE_GATHERED and can search again or finalize. SEARCH FIRST to ground
+your plan in the guides rather than guessing, especially for story gates. SEARCH_ROUNDS_LEFT
+tells you how many more searches you may do; when it hits 0 you must output the final plan.
+
 You are given: WHY_BLOCKED, CURRENT_MAP (id + name), PARTY, ITEMS, BADGES, MAPS (an id→name
-table — use these exact ids), and REFERENCE_KNOWLEDGE (retrieved walkthrough/guide passages
-from the knowledge base — TRUST these over your own memory when they conflict).
+table — use these exact ids), and KNOWLEDGE_GATHERED (results of your searches so far — TRUST
+these over your own memory when they conflict).
 
 Reason about what the game requires here (e.g. fetch an item from a shop and deliver it, talk to
 a specific person, enter a building), then output an ORDERED list of steps. Each step is a MAP to
@@ -106,6 +112,32 @@ class Planner:
         self.provider = provider        # tier-1 chat_json provider (LunaRoute-fast) for targets
         self.strategist = strategist    # tier-2 chat_json provider (LunaRoute-strong) for quests
         self.knowledge = knowledge      # optional Orrery KnowledgeBase for retrieval-grounded quests
+        self.on_search = None           # optional callback(query, n_results) for logging KB tool-calls
+
+    def _llm_with_search(self, provider, system: str, state: dict, *, max_rounds: int = 3) -> dict:
+        """Run an LLM call where the model MAY use the knowledge base as a tool: each round it
+        returns either {"search": [...]} (we run the queries, feed results back) or its final
+        JSON object. The model decides when and what to look up. Returns the final parsed dict."""
+        gathered: list[dict] = []
+        data: dict = {}
+        for round_i in range(max_rounds + 1):
+            s = {**state, "knowledge_gathered": gathered, "search_rounds_left": max_rounds - round_i}
+            try:
+                content, _, _ = provider.chat_json(system, s)
+                data = json.loads(strip_fences(content))
+            except Exception:
+                return data
+            queries = data.get("search")
+            is_search = (isinstance(queries, list) and queries and self.knowledge is not None
+                         and "steps" not in data and round_i < max_rounds)
+            if not is_search:
+                return data
+            for q in [str(x) for x in queries][:3]:
+                res = self.knowledge.query_texts(q, top_k=4)
+                gathered.append({"query": q, "results": res})
+                if self.on_search:
+                    self.on_search(q, len(res))
+        return data
 
     def strategize(self, emu, memory=None, *, why: str = "") -> list[Directive]:
         """Tier-2 problem solving: given a blocked situation, return an ORDERED quest of
@@ -116,11 +148,6 @@ class Planner:
             return []
         cur = emu.read_memory(WCURMAP)
         try:
-            # retrieval-grounded planning: pull relevant guide passages from the knowledge base
-            reference = []
-            if self.knowledge is not None:
-                q = f"{why}. In {map_name(cur)}, playing Pokemon Red toward the first gym — what should I do?"
-                reference = self.knowledge.query_texts(q, top_k=5)
             state = {
                 "why_blocked": why,
                 "current_map": {"id": cur, "name": map_name(cur)},
@@ -128,11 +155,10 @@ class Planner:
                 "party": [f"{p['species']} L{p['level']}" for p in read_party(emu)],
                 "items": [it["item"] for it in read_items(emu)],
                 "badges": read_badges(emu)["count"],
-                "reference_knowledge": reference,
                 "maps": {str(mid): name for mid, name in MAP_NAMES_RAW.items()},
             }
-            content, _, _ = prov.chat_json(STRATEGIST_SYSTEM, state)
-            data = json.loads(strip_fences(content))
+            # the strategist MAY search the knowledge base as a tool before finalizing the quest
+            data = self._llm_with_search(prov, STRATEGIST_SYSTEM, state, max_rounds=3)
             plan_note = str(data.get("plan") or "quest").strip()
             quest: list[Directive] = []
             for step in data.get("steps", []):

@@ -139,10 +139,37 @@ class FakeKB:
         return list(self.texts)
 
 
-def test_strategize_includes_retrieved_knowledge():
-    strat = FakeProvider('{"plan":"deliver parcel","steps":[{"map":42,"talk":true,"why":"get parcel"}]}')
+class SeqProvider:
+    """Returns scripted responses in order, recording each state it was handed."""
+
+    def __init__(self, *responses):
+        self.responses = list(responses)
+        self.states = []
+
+    def chat_json(self, system_prompt, user, image=None):
+        self.states.append(user)
+        return self.responses.pop(0), 5, {}
+
+
+def test_strategist_uses_search_tool_then_plans():
+    # the strategist first calls the search 'tool', gets results fed back, then plans
+    prov = SeqProvider('{"search":["how to leave Viridian City"]}',
+                       '{"plan":"deliver parcel","steps":[{"map":42,"talk":true,"why":"get parcel"}]}')
     kb = FakeKB(["Oak's Parcel gate: get the parcel from the Viridian Mart clerk"])
-    p = Planner(goal_map=2, strategist=strat, knowledge=kb)
-    p.strategize(FakeEmulator(map_id=1), _mem(), why="blocked by old man north of Viridian")
-    assert strat.state["reference_knowledge"] == ["Oak's Parcel gate: get the parcel from the Viridian Mart clerk"]
-    assert "old man" in kb.last_q  # the block reason drives the retrieval query
+    searches = []
+    p = Planner(goal_map=2, strategist=prov, knowledge=kb)
+    p.on_search = lambda q, n: searches.append((q, n))
+    quest = p.strategize(FakeEmulator(map_id=1), _mem(), why="blocked by old man north of Viridian")
+    assert kb.last_q == "how to leave Viridian City"                  # model chose the query
+    assert searches == [("how to leave Viridian City", 1)]           # tool-call surfaced
+    # the second call received the search results back as KNOWLEDGE_GATHERED
+    assert prov.states[1]["knowledge_gathered"][0]["results"] == \
+        ["Oak's Parcel gate: get the parcel from the Viridian Mart clerk"]
+    assert len(quest) == 2  # travel + talk from the finalized plan
+
+
+def test_strategist_can_skip_search_and_plan_directly():
+    prov = SeqProvider('{"plan":"x","steps":[{"map":42,"talk":false}]}')
+    p = Planner(goal_map=2, strategist=prov, knowledge=FakeKB(["unused"]))
+    quest = p.strategize(FakeEmulator(map_id=1), _mem(), why="blocked")
+    assert len(quest) == 1 and len(prov.states) == 1  # no search round

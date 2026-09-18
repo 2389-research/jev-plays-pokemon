@@ -191,6 +191,8 @@ def main() -> None:
                     print(f"       - {s}")
             elif kind == "quest_done":
                 print(f"  [quest ✓] step {payload['step']} quest complete")
+            elif kind == "kb_search":
+                print(f"  [kb search] step {payload['step']} q={payload['query']!r} -> {payload['results']} hits")
 
         low_conf_reflect = args.low_conf_reflect
         strategist_provider = None

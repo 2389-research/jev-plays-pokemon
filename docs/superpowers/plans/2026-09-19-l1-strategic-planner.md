@@ -354,7 +354,7 @@ Note: `_l1_due()` is a PURE predicate (no side effects); `_run_l1` resets `_legs
 - [ ] **Step 3:** implement, in `ReasoningLoop`:
   - `__init__`: `self._plan_steps: list[QuestStep] = []`, `self._qid = 0`, `self._legs_since_l1 = 0`, `self._blocked_for_n = 0`, `self._l1_event = False`.
   - `_next_qid()` → `self._qid += 1; return f"q{self._qid}"`.
-  - `_l1_due()` → True if `self._legs_since_l1 >= self.l1_every` or `self._l1_event` or `self._blocked_for_n >= BLOCK_TRIGGER` (with the existing replan cooldown to avoid double-fire). Reset counters when it fires.
+  - `_l1_due()` → **pure predicate** (no side effects): True if `self._legs_since_l1 >= self.l1_every` or `self._l1_event` or `self._blocked_for_n >= BLOCK_TRIGGER`. Counter resets live in `_run_l1` (which sets `_legs_since_l1=0`, `_l1_event=False` after running), NOT here.
   - `_run_l1(obs)`: build context (map, party, items, badges, `_plan_steps` with status + done_when, signals incl. `blocked_for_n`, mission/milestone) → `self.planner.revise_quests(emu, ctx)`; if `change`, `self._plan_steps = reconcile_quests(self._plan_steps, {add,remove}, next_id=self._next_qid)`; update `AgentPlan.mission/milestone` and append dropped approaches to `tried_failed`; recompile the pending region into `self._quest` (keep the active directive); emit `l1_review` + `quest` events. On `revise_quests` failure/`change:false`, do nothing (keep plan). Emit `l1_failed` on exception.
   - `_recompile_quest()`: `self._quest = deque(compile_steps_to_directives([s for s in self._plan_steps if s.status == 'pending']))`.
   - Module constants: `L1_EVERY_N_LEGS_DEFAULT = 5`, `BLOCK_TRIGGER = 6`; `self.l1_every = l1_every or 5` from a new `__init__` kwarg.
@@ -375,6 +375,7 @@ Note: `_l1_due()` is a PURE predicate (no side effects); `_run_l1` resets `_legs
   - Keep the door/exit servo tests (`test_warp_exit_dir_*`, `test_servo_steps_through_door_*`, `test_navigate_leg_*`) unchanged.
 - [ ] **Step 2:** run the rewritten tests → FAIL (old `_manage_directive` still intent-driven).
 - [ ] **Step 3:** rewrite `_manage_directive(obs)` to be plan-driven:
+  0. **Imports:** `read_party` is only imported inline today (inside `_directive_satisfied`); add a module-scope import (or have `game_signals` surface the party list) so Step 3's reflex/signals don't `NameError`.
   1. `signals = game_signals(emu)`; `signals["blocked_for_n"] = self._blocked_for_n`.
   2. **Emergency reflex:** read `party = read_party(emu)` (or reuse `game_signals`'s party); if `needs_emergency_heal(party)` and the active directive isn't already the heal → set `self._directive` to a heal directive (`Intent.HEAL`, `success={"hp_frac": ">=0.95"}`) and return it (preempt). When HP safe again, drop back to the plan. (`signals.py`'s `needs_emergency_heal` takes a PARTY LIST — it implements its own fainted check; do NOT call `needs.any_fainted(emu)` here, which takes an emu.)
   3. **L1 gate:** if `_l1_due()` → `_run_l1(obs)`.

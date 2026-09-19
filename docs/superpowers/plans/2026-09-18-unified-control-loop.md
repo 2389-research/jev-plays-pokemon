@@ -530,7 +530,78 @@ def test_navigate_leg_configured_failure_grounded_proceeds_and_flags():
     move = loop._navigate_leg(_d(), obs, set())
     assert isinstance(move, MoveAction) and move.direction == Direction.SOUTH
     assert any(k == "proposer_failed" for k, _ in events)
+
+
+# --- THE REGRESSION TESTS: a reflect/proposer model's stated target is actually navigated to ---
+# In the frozen run the model literally said "step west to (4,6), then south to the exit at (4,11)"
+# and the agent never moved (the proposal was orphaned). These lock in that a proposer's output
+# TRANSLATES INTO MOVEMENT toward/through the named target.
+
+import json as _json
+
+_DELTA = {Direction.NORTH: (0, -1), Direction.SOUTH: (0, 1), Direction.EAST: (1, 0), Direction.WEST: (-1, 0)}
+
+
+def _manhattan(a, b):
+    return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
+
+def _applied(player, move):
+    dx, dy = _DELTA[move.direction]
+    return (player.x + dx, player.y + dy)
+
+
+class ProposerProvider:
+    """A provider whose chat_json emits the exact target a reflect/proposer model would name."""
+    def __init__(self, obj): self._obj = obj
+    def chat_json(self, system, state, image=None): return _json.dumps(self._obj), 0, {}
+
+
+def _lab_like_obs(px, py):
+    # a 4x8 room with the only exit door at (3,7) — stand-in for the lab / a building interior
+    player = SimpleNamespace(x=px, y=py, map_id=42, facing="south")
+    return SimpleNamespace(player=player, map_dims=(4, 8), game_state={}, map_view=["room"],
+                           exits=[{"x": 3, "y": 7, "dest_map": 1}])
+
+
+def test_reflect_style_exit_proposal_is_navigated_toward_the_door():
+    # model says "head to the exit and leave" -> the agent MOVES toward the door (not None/stall).
+    loop, _ = _nav_loop(42)
+    loop.planner.provider = ProposerProvider({"kind": "exit", "note": "head south to the exit and leave"})
+    loop.memory.graph.next_hop = lambda a, b: None       # fresh-load lab: no known route out
+    loop.world.ingest_collision(42, 4, 8, {(x, y) for x in range(4) for y in range(8)}, None, None)
+    obs = _lab_like_obs(1, 1)
+    move = loop._navigate_leg(_d(), obs, set())
+    assert isinstance(move, MoveAction)
+    assert _manhattan(_applied(obs.player, move), (3, 7)) < _manhattan((1, 1), (3, 7))  # got CLOSER
+
+
+def test_reflect_style_named_tile_proposal_is_navigated_toward():
+    # model names a concrete stepping-stone tile (like "go to (4,6)") -> the agent steps toward it.
+    loop, _ = _nav_loop(42)
+    loop.planner.provider = ProposerProvider({"kind": "tile", "x": 3, "y": 7, "note": "go to the exit at (3,7)"})
+    loop.memory.graph.next_hop = lambda a, b: None
+    loop.world.ingest_collision(42, 4, 8, {(x, y) for x in range(4) for y in range(8)}, None, None)
+    obs = _lab_like_obs(1, 1)
+    move = loop._navigate_leg(_d(), obs, set())
+    assert isinstance(move, MoveAction)
+    assert _manhattan(_applied(obs.player, move), (3, 7)) < _manhattan((1, 1), (3, 7))
+
+
+def test_reflect_style_proposal_emits_target_event_and_folds_note():
+    # the proposer's note becomes the visible short-term objective (reflection folded in).
+    loop, _ = _nav_loop(42)
+    loop.planner.provider = ProposerProvider({"kind": "exit", "note": "leave the lab, gym is north"})
+    loop.memory.graph.next_hop = lambda a, b: None
+    loop.world.ingest_collision(42, 4, 8, {(x, y) for x in range(4) for y in range(8)}, None, None)
+    events = []
+    loop.on_event = lambda k, p: events.append((k, p))
+    loop._navigate_leg(_d(), _lab_like_obs(1, 1), set())
+    assert any(k == "target" for k, _ in events)                       # a target event per leg
+    assert loop._plan is not None and "leave the lab" in (loop._plan.next_objective or "")
 ```
+
+Note: `_nav_loop`'s Stub reasoner has no `_plan` populated by default; `ReasoningLoop.__init__` sets `self._plan = self.memory.plan`. For the note-fold test, ensure `loop._plan` is a `ReflectionPlan` instance (the plan wrapper) — if `self.memory.plan` is None in the fake setup, initialize `loop._plan = ReflectionPlan()` at the top of that test (import it from `pokemon_agent.agent.reasoner`). The implementer should adjust the test setup minimally so `next_objective` is assignable, WITHOUT weakening the assertion.
 
 - [ ] **Step 2: Run to verify fail**
 

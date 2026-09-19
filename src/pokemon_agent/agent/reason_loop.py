@@ -39,13 +39,17 @@ from ..games.pokemon_red.state import detect_mode, read_player
 from ..observations.builder import ObservationBuilder
 from .memory import AgentMemory
 from .navigator import Navigator
-from .plan import Directive, Intent
+from .plan import AgentPlan, Directive, Intent
+from .quest_reconciler import QuestStep, compile_steps_to_directives, reconcile_quests
 from .reasoner import Reasoner, ReasonStep
 from .session import Session
+from .signals import game_signals
 from .targets import build_targets
 from .world_map import DELTA, WALL
 
 MAX_GOTO_STEPS = 18  # safety bound on one navigation macro
+L1_EVERY_N_LEGS_DEFAULT = 5  # cadence: run the L1 strategic review every N legs by default
+BLOCK_TRIGGER = 6  # blocked-for-N legs at/above which L1 fires early (navigation deadlock)
 SERVO_FAIL_LIMIT = 6  # consecutive servo no-route steps before the directive is deemed impossible
 REPLAN_COOLDOWN = 8   # min steps between soft replans (stuck/low-conf) — enforces bold commitment
 QUEST_STEP_BUDGET = 60  # steps to keep working one quest step before re-strategizing (anti-churn)
@@ -94,6 +98,7 @@ class ReasoningLoop:
         knowledge=None,
         recorder=None,
         pather: str = "bfs",
+        l1_every: int = 0,
         on_event: Optional[Callable[[str, dict], None]] = None,
     ):
         self.builder = builder
@@ -181,6 +186,14 @@ class ReasoningLoop:
         self._recent: deque[str] = deque(maxlen=recent_max)
         self._prev: ReasonStep | None = None
         self._plan = self.memory.plan  # strategic AgentPlan (reflection), separate from the directive
+        # L1 strategic planner (Task 6a): the canonical ordered plan (QuestSteps) L1 revises, plus
+        # the gate state that decides WHEN to run a strategic review (cadence / blocked / event).
+        self.l1_every = l1_every or L1_EVERY_N_LEGS_DEFAULT
+        self._plan_steps: list[QuestStep] = []   # canonical plan L1 reconciles + recompiles into _quest
+        self._qid = 0                            # monotonic QuestStep id counter
+        self._legs_since_l1 = 0                  # legs since the last L1 review (cadence trigger)
+        self._blocked_for_n = 0                  # consecutive legs blocked (>= BLOCK_TRIGGER fires L1)
+        self._l1_event = False                   # a one-shot event asked for an L1 review next gate
 
     # ------------------------------------------------------------------ step
     def step_once(self) -> ActionResult:
@@ -317,6 +330,82 @@ class ReasoningLoop:
             self._replan_next = True
         result = self._dispatch(rstep, obs, blocked_dirs, ctx_kind)
         return self._finish(obs, rstep, result, latency, usage, shot)
+
+    # ---------------------------------------------------- L1 strategic planner
+    def _next_qid(self) -> str:
+        self._qid += 1
+        return f"q{self._qid}"
+
+    def _l1_due(self) -> bool:
+        """PURE predicate (no side effects): should L1 run now? Fires on the cadence, on a
+        one-shot event flag, or when navigation has been blocked for too long. Resets live only
+        in ``_run_l1`` so this can be polled freely."""
+        return (self._legs_since_l1 >= self.l1_every
+                or self._l1_event
+                or self._blocked_for_n >= BLOCK_TRIGGER)
+
+    def _recompile_quest(self) -> None:
+        """Recompile the pending plan steps into the executable quest queue (deque of Directives)."""
+        self._quest = deque(compile_steps_to_directives(
+            [s for s in self._plan_steps if s.status == "pending"]))
+
+    def _run_l1(self, obs) -> None:
+        """L1 strategic review: ask the planner whether the standing plan needs to change; if so,
+        deterministically reconcile the proposal into the canonical plan (preserving progress) and
+        recompile the quest queue. Durable strategy (mission/milestone/tried_failed) lives on the
+        AgentPlan in memory. Never raises: any failure emits ``l1_failed`` and changes nothing."""
+        try:
+            if self.planner is None:
+                return
+            if self._plan is None:
+                self._plan = AgentPlan()
+            emu = self.controller.emu
+            signals = game_signals(emu)
+            signals["blocked_for_n"] = self._blocked_for_n
+            cur_mid = obs.player.map_id if obs.player else None
+            context = {
+                "current_map": {"id": cur_mid,
+                                "name": map_name(cur_mid) if cur_mid is not None else None},
+                "party": signals["party"],
+                "items": signals["items"],
+                "badges": signals["badges"],
+                "plan": [{"id": s.id, "map": s.map, "talk": s.talk, "done_when": s.done_when,
+                          "status": s.status} for s in self._plan_steps],
+                "signals": signals,
+                "mission": self._plan.mission,
+                "milestone": self._plan.milestone,
+            }
+            prop = self.planner.revise_quests(emu, context) or {}
+            if prop.get("change"):
+                removed_ids = set(prop.get("remove") or [])
+                removed = [s for s in self._plan_steps if s.id in removed_ids]
+                self._plan_steps = reconcile_quests(
+                    self._plan_steps,
+                    {"add": prop.get("add", []), "remove": prop.get("remove", [])},
+                    next_id=self._next_qid)
+                if prop.get("mission"):
+                    self._plan.mission = prop["mission"]
+                if prop.get("milestone"):
+                    self._plan.milestone = prop["milestone"]
+                # record the approaches L1 discarded so they aren't retried
+                for s in removed:
+                    note = s.why or s.done_when or f"map {s.map}"
+                    if note not in self._plan.tried_failed:
+                        self._plan.tried_failed.append(note)
+                self._recompile_quest()
+                self.on_event("l1_review", {"step": self.session.step, "change": True,
+                                            "assessment": prop.get("assessment"),
+                                            "add": len(prop.get("add", [])),
+                                            "remove": prop.get("remove", [])})
+                self.on_event("quest", {"step": self.session.step, "len": len(self._quest),
+                                        "plan": [d.reason for d in self._quest]})
+            else:
+                self.on_event("l1_review", {"step": self.session.step, "change": False,
+                                            "assessment": prop.get("assessment")})
+            self._legs_since_l1 = 0
+            self._l1_event = False
+        except Exception as e:  # never let a strategic review break the loop
+            self.on_event("l1_failed", {"step": self.session.step, "error": str(e)})
 
     # --------------------------------------------------- directive lifecycle
     def _manage_directive(self, obs) -> Directive | None:

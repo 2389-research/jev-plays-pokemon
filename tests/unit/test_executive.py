@@ -219,3 +219,44 @@ def test_higher_need_suspends_current_directive_on_the_stack():
     loop._manage_directive(loop.builder.build(capture_screenshot=False)[0])
     assert loop._directive is heal
     assert travel in loop._dstack  # the lower-priority directive was suspended, not dropped
+
+
+# --- L1 strategic planner (Task 6a) ---
+from collections import deque
+from pokemon_agent.agent.plan import Intent
+
+
+def test_run_l1_inserts_and_recompiles():
+    loop, _ = _loop(map_id=1, goal_map=2)
+    loop.planner.revise_quests = lambda emu, ctx: {
+        "change": True, "mission": "reach Pewter", "milestone": "deliver parcel",
+        "add": [{"map": 42, "talk": True, "who": "clerk", "done_when": "has_item:Oak's Parcel", "why": "get parcel"}],
+        "remove": []}
+    obs, _ = loop.builder.build(capture_screenshot=False)
+    loop._run_l1(obs)
+    assert any(s.map == 42 and s.talk for s in loop._plan_steps)          # reconciled into the plan
+    assert isinstance(loop._quest, deque) and any(d.intent == Intent.TALK_TO for d in loop._quest)  # recompiled
+    assert loop._plan is not None and loop._plan.milestone == "deliver parcel"   # durable memory updated
+
+
+def test_run_l1_no_change_keeps_plan():
+    loop, _ = _loop(map_id=1, goal_map=2)
+    from pokemon_agent.agent.quest_reconciler import QuestStep
+    loop._plan_steps = [QuestStep(id="q1", map=2, done_when="on_map", status="active")]
+    loop.planner.revise_quests = lambda emu, ctx: {"change": False, "add": [], "remove": []}
+    obs, _ = loop.builder.build(capture_screenshot=False)
+    loop._run_l1(obs)
+    assert [s.id for s in loop._plan_steps] == ["q1"]                     # unchanged on no-change
+
+
+def test_l1_due_is_a_pure_predicate():
+    loop, _ = _loop(goal_map=2)
+    loop.l1_every = 5
+    loop._legs_since_l1, loop._blocked_for_n, loop._l1_event = 0, 0, False
+    assert loop._l1_due() is False
+    loop._legs_since_l1 = 5
+    assert loop._l1_due() is True                # cadence
+    loop._legs_since_l1 = 0; loop._blocked_for_n = 6
+    assert loop._l1_due() is True                # blocked (>= BLOCK_TRIGGER)
+    loop._blocked_for_n = 0; loop._l1_event = True
+    assert loop._l1_due() is True                # event flag

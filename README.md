@@ -2,6 +2,10 @@
 
 An agent that plays Pokémon Red through the [PyBoy](https://github.com/Baekalfen/PyBoy) Game Boy emulator.
 
+> **📖 Full setup, run commands, parameters, the Orrery knowledge base, the viewer, tuning constants,
+> and current status: [`docs/RUNNING.md`](docs/RUNNING.md).** Read that first — it's the operational
+> source of truth (the quick-start below is just the basics).
+
 ## Setup
 
 This project uses [`uv`](https://docs.astral.sh/uv/).

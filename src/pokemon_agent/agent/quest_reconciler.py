@@ -43,3 +43,29 @@ def compile_steps_to_directives(steps: list[QuestStep]) -> list[Directive]:
             out.append(Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": s.map},
                                  success=crit, quest_id=s.id, reason=f"quest: go to {nm} — {s.why}"[:120]))
     return out
+
+
+def reconcile_quests(current, proposal, *, next_id):
+    """Deterministically merge L1's proposal into the canonical plan, preserving progress.
+    Keeps done + active steps; removes only named pending steps; ALWAYS drops wedged steps (they are
+    replaced by adds); inserts adds after the active step, dedup by (map, done_when)."""
+    add = proposal.get("add") or []
+    remove = set(proposal.get("remove") or [])
+    done = [s for s in current if s.status == "done"]
+    active = [s for s in current if s.status == "active"]
+    pending = [s for s in current if s.status == "pending" and s.id not in remove]
+    have = {(s.map, s.done_when or "on_map") for s in done + active + pending}
+    new_steps = []
+    for a in add:
+        try:
+            mp = int(a["map"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        dw = a.get("done_when")
+        key = (mp, dw or "on_map")
+        if key in have:
+            continue
+        have.add(key)
+        new_steps.append(QuestStep(id=next_id(), map=mp, talk=bool(a.get("talk")),
+                                   who=(a.get("who") or None), done_when=dw, why=str(a.get("why") or "")[:80]))
+    return done + active + new_steps + pending

@@ -32,3 +32,47 @@ def test_compile_bad_done_when_falls_back_to_on_map():
     s = QuestStep(id="q3", map=2, talk=False, who=None, done_when="garbage", why="x")
     ds = compile_steps_to_directives([s])
     assert ds[0].success == {"on_map": 2}     # unparseable criterion -> safe default for a travel step
+
+
+from pokemon_agent.agent.quest_reconciler import reconcile_quests
+
+def _mk(id, map, status="pending", dw="on_map"): return QuestStep(id=id, map=map, done_when=dw, status=status)
+
+def _ids():
+    n = [100]
+    def nxt():
+        n[0] += 1; return f"q{n[0]}"
+    return nxt
+
+def test_reconcile_preserves_done_and_active_and_adds():
+    cur = [_mk("q1", 0, "done"), _mk("q2", 1, "active"), _mk("q3", 2, "pending")]
+    prop = {"add": [{"map": 42, "talk": True, "who": "clerk", "done_when": "has_item:Oak's Parcel", "why": "get parcel"}],
+            "remove": ["q3"]}
+    out = reconcile_quests(cur, prop, next_id=_ids())
+    ids = [s.id for s in out]
+    assert "q1" in ids and "q2" in ids          # done + active preserved
+    assert "q3" not in ids                        # pending removed
+    assert any(s.map == 42 and s.talk for s in out)   # add inserted
+    assert out.index(next(s for s in out if s.id == "q2")) < out.index(next(s for s in out if s.map == 42))  # added after active
+
+def test_reconcile_never_removes_active_or_done():
+    cur = [_mk("q1", 0, "done"), _mk("q2", 1, "active")]
+    out = reconcile_quests(cur, {"add": [], "remove": ["q1", "q2"]}, next_id=_ids())
+    assert [s.id for s in out] == ["q1", "q2"]     # removes of done/active ignored
+
+def test_reconcile_replaces_wedged_step():
+    cur = [_mk("q2", 1, "active"), _mk("q3", 2, "wedged")]
+    prop = {"add": [{"map": 2, "talk": False, "done_when": "on_map", "why": "retry via other route"}], "remove": ["q3"]}
+    out = reconcile_quests(cur, prop, next_id=_ids())
+    assert all(s.status != "wedged" for s in out)   # wedged gone
+    assert any(s.map == 2 and s.status == "pending" for s in out)  # replaced by a fresh pending step
+
+def test_reconcile_empty_proposal_is_unchanged():
+    cur = [_mk("q2", 1, "active"), _mk("q3", 2, "pending")]
+    out = reconcile_quests(cur, {"add": [], "remove": []}, next_id=_ids())
+    assert [s.id for s in out] == ["q2", "q3"]
+
+def test_reconcile_dedups_by_map_and_criterion():
+    cur = [_mk("q2", 1, "active"), _mk("q3", 2, "pending", dw="on_map")]
+    out = reconcile_quests(cur, {"add": [{"map": 2, "talk": False, "done_when": "on_map", "why": "dup"}], "remove": []}, next_id=_ids())
+    assert sum(1 for s in out if s.map == 2 and (s.done_when or "on_map") == "on_map") == 1

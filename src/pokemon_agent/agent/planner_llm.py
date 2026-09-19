@@ -164,6 +164,45 @@ Return ONLY JSON:
             "done_when": "<criterion>", "why": "<short>"}]}"""
 
 
+L1_SYSTEM = """You are the L1 STRATEGIST for an agent playing Pokémon Red, working toward the
+first gym (Brock, Pewter City, north). This is a PERIODIC strategic REVIEW, not a rescue: look
+at the whole situation — the current MISSION/MILESTONE, the standing PLAN (its steps with their
+status), where the agent is, and the SIGNALS (e.g. how long it's been blocked) — and decide
+whether the plan still makes sense. Usually it does; say so and change nothing.
+
+THE PLAN is an ordered list of quest STEPS. Each step is:
+  {"map": <int map id>, "talk": <true|false>, "who": "<npc name, if talk>",
+   "done_when": "<criterion>", "why": "<short>"}
+The done_when is the checkable ACCEPTANCE CRITERION that proves a step is complete. It MUST be
+one of:
+  "on_map"            — arrived on that map (default for pure travel).
+  "talked"            — had a conversation on that map (only when nothing more specific fits).
+  "has_item:<name>"   — that item is now in the bag (talk to Mart clerk -> has_item:Oak's Parcel).
+  "no_item:<name>"    — that item is gone (delivered/used -> no_item:Oak's Parcel).
+  "level>=<N>"        — party reached level N.   "badges>=<N>" — earned N badges.
+  "hp_frac>=<F>"      — party healed to fraction F of max HP (Poké Center nurse -> hp_frac>=0.95).
+  "verify:<yes/no question>" — a verifier judges it from game state, when none of the above fit.
+
+TOOL — knowledge base: you MAY look things up in a Pokémon Red guide before revising. To search,
+reply with ONLY {"search": ["query1", "query2"]} (1-3 queries); results come back in
+KNOWLEDGE_GATHERED and you can search again or finalize. SEARCH_ROUNDS_LEFT limits searches.
+SEARCH THE KB before adding any story-gate or errand step (WHERE an item/objective is, what a
+gate requires) — ground it in the guide rather than guessing.
+
+WHAT TO RETURN — ONLY a JSON object:
+  {"assessment": "<one line: how the plan is doing>",
+   "change": <true|false>,
+   "mission": "<the overall mission, e.g. 'reach Pewter and beat Brock'>",
+   "milestone": "<the current concrete sub-goal>",
+   "add": [ <new step objects, each with a VALID done_when> ],
+   "remove": [ <step ids to drop from the current plan> ]}
+
+When the plan is fine (the COMMON case) reply {"change": false, "add": [], "remove": []} — do
+NOT churn a working plan. Only when something is wrong (missing a required errand, stuck on a
+story gate, a step that can never complete) propose `add` steps to fix it and `remove` the ids of
+steps that should go. Every added step MUST have a done_when from the list above."""
+
+
 class Planner:
     def __init__(self, *, goal_map: int | None = None, level_target: int = 0,
                  heal_hp: float = 0.80, reflector=None, provider=None, strategist=None, knowledge=None):
@@ -245,6 +284,53 @@ class Planner:
             return quest
         except Exception:
             return []
+
+    def revise_quests(self, emu, context: dict) -> dict:
+        """L1 periodic strategic review: look at the whole situation (mission/milestone, the
+        standing plan with step statuses, current map, signals) and decide whether the plan needs
+        to change. Returns {"assessment","change","mission","milestone","add":[...],"remove":[...]}.
+
+        Uses the strategist provider and MAY ground itself in the Orrery KB via `_llm_with_search`.
+        NEVER wipes the plan on a model hiccup: any parse/validation failure — or no provider —
+        returns {"change": False, "add": [], "remove": []}. Added steps whose done_when is
+        unparseable (or whose map is invalid) are dropped so a bad criterion can't enter the plan."""
+        prov = self.strategist or self.provider
+        if prov is None:
+            return {"change": False, "add": [], "remove": []}
+        try:
+            state = {
+                "current_map": context.get("current_map"),
+                "party": context.get("party"),
+                "items": context.get("items"),
+                "badges": context.get("badges"),
+                "plan": context.get("plan"),
+                "signals": context.get("signals"),
+                "mission": context.get("mission"),
+                "milestone": context.get("milestone"),
+                "maps": {str(mid): name for mid, name in MAP_NAMES_RAW.items()},
+            }
+            # L1 MAY search the KB before revising (story gates / where things are)
+            data = self._llm_with_search(prov, L1_SYSTEM, state, final_key="assessment")
+            if not isinstance(data, dict):
+                return {"change": False, "add": [], "remove": []}
+            add = []
+            for s in (data.get("add") or []):
+                if not isinstance(s, dict):
+                    continue
+                try:
+                    mp = int(s.get("map", -1))
+                except (TypeError, ValueError):
+                    continue
+                if Planner._parse_done_when(s.get("done_when"), mp) is not None:
+                    add.append(s)
+            remove = [str(x) for x in (data.get("remove") or [])]
+            return {"assessment": str(data.get("assessment") or ""),
+                    "change": bool(data.get("change", bool(add or remove))),
+                    "mission": str(data.get("mission") or ""),
+                    "milestone": str(data.get("milestone") or ""),
+                    "add": add, "remove": remove}
+        except Exception:
+            return {"change": False, "add": [], "remove": []}
 
     def plan(self, intent: Intent, emu, memory=None, *, why: str = "", context: dict | None = None) -> Directive:
         """Compute the concrete directive for ``intent``. ``why`` explains the replan

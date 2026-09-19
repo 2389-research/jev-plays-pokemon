@@ -59,6 +59,7 @@ class Directive(BaseModel):
                                               description="optional explicit whitelist for the executor's Choice")
     option_bias: list[str] = Field(default_factory=list, description="options to prefer (SayCan prior)")
     reason: str = Field(default="", description="provenance / why — for logs + replan feedback")
+    quest_id: str | None = Field(default=None, description="id of the QuestStep this directive was compiled from")
 
     @property
     def target_bearing(self) -> bool:

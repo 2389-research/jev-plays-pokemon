@@ -793,9 +793,14 @@ class ReasoningLoop:
                 if facing_map.get(getattr(player, "facing", None)) == d:
                     return InteractAction()          # adjacent AND facing -> talk
                 return MoveAction(direction=d)        # adjacent, turn to face (a blocked step turns you)
-        reachable_stand = min(adj.values(), key=lambda c: abs(c[0] - player.x) + abs(c[1] - player.y))
-        return self._bfs_move(player, reachable_stand, interact=False,
-                              blocked_dirs=blocked_dirs, occupied=(occupied - {(nx, ny)}))
+        others = occupied - {(nx, ny)}
+        # try each of the 4 stand-tiles nearest-first; take the first BFS-reachable one (cheap, and
+        # avoids burning a re-propose cycle when the single nearest stand-tile happens to be a wall).
+        for stand in sorted(adj.values(), key=lambda c: abs(c[0] - player.x) + abs(c[1] - player.y)):
+            mv = self._bfs_move(player, stand, interact=False, blocked_dirs=blocked_dirs, occupied=others)
+            if mv is not None:
+                return mv
+        return None
 
     def _resolve_target(self, target, directive, obs, blocked_dirs, occupied):
         """Turn a typed target ({tile|exit|enter|approach_npc}) into ONE move. Returns a MoveAction /

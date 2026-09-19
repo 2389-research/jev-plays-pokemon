@@ -108,7 +108,7 @@ def test_resolve_exit_routes_to_nearest_exit_door():
     obs = SimpleNamespace(player=player, map_dims=(4, 8), game_state={},
                           exits=[{"x": 3, "y": 7, "dest_map": 1}])
     move = loop._resolve_target({"kind": "exit"}, _d(), obs, set(), set())
-    assert isinstance(move, MoveAction)
+    assert isinstance(move, MoveAction) and move.direction in (Direction.EAST, Direction.SOUTH)
 
 
 def test_resolve_approach_npc_interacts_when_adjacent_and_facing():
@@ -136,4 +136,24 @@ def test_resolve_tile_that_is_an_exit_door_steps_through():
     obs = SimpleNamespace(player=player, map_dims=(4, 8), game_state={},
                           exits=[{"x": 3, "y": 7, "dest_map": 1}])
     move = loop._resolve_target({"kind": "tile", "x": 3, "y": 7}, _d(), obs, set(), set())
+    assert isinstance(move, MoveAction) and move.direction == Direction.SOUTH
+
+
+def test_resolve_target_unknown_or_unresolved_kind_returns_none():
+    # the anti-wander guard: an unknown/unresolved kind must NOT route to an exit even when a door
+    # is present -> returns None (break loudly / stall, never silently wander).
+    loop, _ = _nav_loop(42)
+    player = SimpleNamespace(x=1, y=1, map_id=42, facing="south")
+    obs = SimpleNamespace(player=player, map_dims=(4, 8), game_state={},
+                          exits=[{"x": 3, "y": 7, "dest_map": 1}])
+    assert loop._resolve_target({"kind": "unresolved"}, _d(), obs, set(), set()) is None
+    assert loop._resolve_target({"kind": "bogus"}, _d(), obs, set(), set()) is None
+
+
+def test_resolve_edge_steps_off_boundary_toward_goal_dir():
+    loop, _ = _nav_loop(1)
+    loop.world.ingest_collision(1, 4, 8, {(x, y) for x in range(4) for y in range(8)}, None, None)
+    player = SimpleNamespace(x=2, y=7, map_id=1, facing="south")   # on the south boundary (h-1 == 7)
+    obs = SimpleNamespace(player=player, map_dims=(4, 8), game_state={}, exits=[])
+    move = loop._resolve_target({"kind": "edge", "dir": "south", "next_map": 0}, _d(), obs, set(), set())
     assert isinstance(move, MoveAction) and move.direction == Direction.SOUTH

@@ -46,3 +46,19 @@ def test_propose_target_configured_but_bad_json_returns_unresolved():
     # provider wired but returns garbage -> model failure -> unresolved (flagged), not a guess.
     p = Planner(goal_map=0, provider=FakeProvider("not json"))
     assert p.propose_target(emu=None, context=_ctx())["kind"] == "unresolved"
+
+
+def test_propose_target_approach_npc_without_sprite_returns_unresolved():
+    p = Planner(goal_map=0, provider=FakeProvider('{"kind":"approach_npc","note":"talk"}'))
+    assert p.propose_target(emu=None, context=_ctx())["kind"] == "unresolved"
+
+
+def test_propose_target_enter_without_map_returns_unresolved():
+    p = Planner(goal_map=0, provider=FakeProvider('{"kind":"enter","note":"door"}'))
+    assert p.propose_target(emu=None, context=_ctx())["kind"] == "unresolved"
+
+
+def test_propose_target_unresolved_payload_has_reason_and_note():
+    p = Planner(goal_map=0, provider=FakeProvider("not json"))
+    t = p.propose_target(emu=None, context=_ctx())
+    assert t["kind"] == "unresolved" and t.get("reason") and t.get("note")

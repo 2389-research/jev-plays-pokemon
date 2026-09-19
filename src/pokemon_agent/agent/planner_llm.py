@@ -410,7 +410,11 @@ class Planner:
                     reason = "enter missing map"
                     continue
             if kind == "approach_npc":
-                return {"kind": "approach_npc", "sprite": (data.get("sprite") or None), "note": note}
+                sprite = (data.get("sprite") or None)
+                if not sprite:
+                    reason = "approach_npc missing sprite"
+                    continue
+                return {"kind": "approach_npc", "sprite": sprite, "note": note}
             if kind == "exit":
                 return {"kind": "exit", "note": note}
             reason = f"unknown kind {kind!r}"

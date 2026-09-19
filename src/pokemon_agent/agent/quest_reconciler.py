@@ -1,0 +1,45 @@
+from __future__ import annotations
+from dataclasses import dataclass
+from .plan import Directive, Intent
+from ..games.pokemon_red.maps import map_name
+
+
+@dataclass
+class QuestStep:
+    id: str
+    map: int
+    talk: bool = False
+    who: str | None = None
+    done_when: str | None = None
+    why: str = ""
+    status: str = "pending"          # pending | active | done | wedged
+
+
+def _criterion(done_when: str | None, map_id: int) -> dict:
+    from .planner_llm import Planner
+    parsed = Planner._parse_done_when(done_when, map_id)
+    return parsed if parsed is not None else {"on_map": map_id}
+
+
+def compile_steps_to_directives(steps: list[QuestStep]) -> list[Directive]:
+    """Expand each QuestStep into its 1-2 Directives (TRAVEL + optional TALK_TO), tagged quest_id —
+    following strategize()'s expansion shape. The model-authored done_when attaches to the talk step
+    when there is one, else to the travel step (deliberate improvement over strategize, which forces
+    on_map on the travel directive)."""
+    out: list[Directive] = []
+    for s in steps:
+        crit = _criterion(s.done_when, s.map)
+        nm = map_name(s.map)
+        if s.talk:
+            out.append(Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": s.map},
+                                 success={"on_map": s.map}, quest_id=s.id,
+                                 reason=f"quest: go to {nm} — {s.why}"[:120]))
+            tgt = {"kind": "npc", "map": s.map}
+            if s.who:
+                tgt["sprite"] = s.who
+            out.append(Directive(intent=Intent.TALK_TO, target=tgt, success=crit, quest_id=s.id,
+                                 reason=f"quest: talk to {s.who or 'someone'} in {nm} — {s.why}"[:120]))
+        else:
+            out.append(Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": s.map},
+                                 success=crit, quest_id=s.id, reason=f"quest: go to {nm} — {s.why}"[:120]))
+    return out

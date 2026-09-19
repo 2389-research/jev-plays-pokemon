@@ -6,7 +6,11 @@ Writes, into ``runs/<run_id>/``:
   * ``shots/NNNNNN.png`` — the screen each step (or every ``shot_every`` steps).
   * ``states/map<M>_step<N>.state`` — a reloadable emulator save state on ENTERING A NEW MAP
     (and periodically), so any newly-seen area can be reloaded and inspected offline.
-  * ``viewer.html`` — a self-contained local viewer to scrub steps (screen + state panel).
+  * ``viewer.html`` — a self-contained local viewer to scrub THIS run (screen + state panel).
+
+It also drops ``runs/_viewer.html`` (one level up) — the multi-run PLAYER with a run-picker
+dropdown, play/pause, speed, and live-follow — so serving ``runs/`` and opening ``_viewer.html``
+lets you browse and play back every run. Serve with ``python -m http.server`` from ``runs/``.
 
 Best-effort: any failure is swallowed so recording never breaks a run.
 """
@@ -16,7 +20,8 @@ import json
 import time
 from pathlib import Path
 
-_VIEWER_SRC = Path(__file__).with_name("viewer.html")
+_VIEWER_SRC = Path(__file__).with_name("viewer.html")   # per-run viewer (this run only)
+_PLAYER_SRC = Path(__file__).with_name("player.html")   # multi-run player w/ run dropdown (runs/ root)
 
 
 class RunRecorder:
@@ -37,6 +42,9 @@ class RunRecorder:
         try:
             if _VIEWER_SRC.exists():
                 (self.dir / "viewer.html").write_bytes(_VIEWER_SRC.read_bytes())
+            # drop the multi-run PLAYER at the runs/ root so a single URL browses every run
+            if _PLAYER_SRC.exists():
+                (self.dir.parent / "_viewer.html").write_bytes(_PLAYER_SRC.read_bytes())
         except Exception:
             pass
 

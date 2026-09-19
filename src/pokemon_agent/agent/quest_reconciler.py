@@ -13,6 +13,7 @@ class QuestStep:
     done_when: str | None = None
     why: str = ""
     status: str = "pending"          # pending | active | done | wedged
+    provisional: bool = False        # a synthesized bootstrap default; superseded once L1 adds real steps
 
 
 def _criterion(done_when: str | None, map_id: int) -> dict:

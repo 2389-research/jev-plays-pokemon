@@ -396,6 +396,16 @@ class ReasoningLoop:
                     note = s.why or s.done_when or f"map {s.map}"
                     if note not in self._plan.tried_failed:
                         self._plan.tried_failed.append(note)
+                # a provisional bootstrap default (generic goal-travel) is SUPERSEDED the moment L1
+                # supplies a real step — otherwise reconcile keeps it first (adds go after the active
+                # step) and the real plan sits behind a possibly story-gated default forever.
+                real = [s for s in self._plan_steps
+                        if not s.provisional and s.status in ("pending", "active")]
+                if real and any(s.provisional for s in self._plan_steps):
+                    dropped = {s.id for s in self._plan_steps if s.provisional}
+                    if self._directive is not None and self._directive.quest_id in dropped:
+                        self._directive = None   # the committed default is gone -> advance to L1's first real step
+                    self._plan_steps = [s for s in self._plan_steps if not s.provisional]
                 self._recompile_quest()
                 self._l1_last = {"change": True, "assessment": prop.get("assessment")}
                 self.on_event("l1_review", {"step": self.session.step, "change": True,
@@ -464,15 +474,23 @@ class ReasoningLoop:
         # (which makes L1 INSERT a routed heal quest — heal is an L1 ping, never a target-less
         # directive that would freeze the agent). The heal-step guard stops it re-forcing L1 once a
         # heal errand is already in the plan.
+        ran_l1 = False
         if self._l1_due() or (emergency and not self._has_heal_step()):
             self._run_l1(obs, emergency=emergency)
+            ran_l1 = True
 
-        # --- 3. bootstrap: an empty plan synthesizes a default goal step -------------------------
+        # --- 3. bootstrap: L1 owns the plan. On an empty plan, let L1 populate it FIRST (so we don't
+        # commit a generic "travel to goal_map" step that lands us on a story-gated hop and wedges
+        # forever). Only when L1 can't help (offline / declined) do we synthesize a PROVISIONAL
+        # default — which _run_l1 drops the moment L1 supplies real steps.
         if not self._plan_steps:
-            gm = self.goal_map if self.goal_map is not None else (obs.player.map_id if obs.player else 0)
-            self._plan_steps.append(QuestStep(id=self._next_qid(), map=gm,
-                                              done_when="on_map", status="pending"))
-            self._recompile_quest()
+            if not ran_l1 and self.planner is not None and (self.planner.strategist or self.planner.provider):
+                self._run_l1(obs)
+            if not self._plan_steps:
+                gm = self.goal_map if self.goal_map is not None else (obs.player.map_id if obs.player else 0)
+                self._plan_steps.append(QuestStep(id=self._next_qid(), map=gm, done_when="on_map",
+                                                  status="pending", provisional=True))
+                self._recompile_quest()
 
         # --- 3b. the active directive's step was removed/replaced by L1 -> advance to the plan ----
         if self._directive is not None and self._directive.quest_id is not None:

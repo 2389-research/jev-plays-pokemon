@@ -327,3 +327,35 @@ def test_l1_plans_parcel_errand_end_to_end():
     # the compiled queue contains a TALK_TO to Oak whose success checks the parcel is gone
     talk_oak = [d for d in loop._quest if d.intent == Intent.TALK_TO and (d.target or {}).get("sprite") == "Oak"]
     assert talk_oak and "no_item" in talk_oak[0].success   # deliver step is machine-checkable
+
+
+def test_l1_plan_supersedes_bootstrap_default():
+    # regression: a synthesized bootstrap "travel to goal_map" step must NOT stay the active
+    # directive once L1 supplies a real plan. In the live bug it stayed travel->Route 2 (a
+    # story-gated hop) for 300+ steps while L1's parcel errand sat behind it (planned-not-executed).
+    from pokemon_agent.agent.plan import Intent
+    from pokemon_agent.agent.quest_reconciler import QuestStep
+    loop, _ = _loop(map_id=1, goal_map=2)
+    loop.planner.strategist = object()      # a provider is available (so bootstrap defers to L1)
+    obs = loop.builder.build(capture_screenshot=False)[0]
+
+    # 1) bug precondition: L1 declines on the empty plan -> a PROVISIONAL default is committed.
+    loop.planner.revise_quests = lambda emu, ctx: {"change": False, "add": [], "remove": []}
+    d0 = loop._manage_directive(obs)
+    assert d0 is not None and d0.target_map == 2                  # committed the goal-travel default
+    prov = [s for s in loop._plan_steps if s.provisional]
+    assert len(prov) == 1 and prov[0].status == "active"         # the default is provisional + active
+
+    # 2) L1 now supplies the real parcel errand -> the provisional default must be superseded.
+    loop._l1_event = True                                         # force the L1 gate this call
+    loop.planner.revise_quests = lambda emu, ctx: {"change": True, "mission": "reach Pewter",
+        "milestone": "deliver Oak's Parcel",
+        "add": [
+            {"map": 42, "talk": True, "who": "clerk", "done_when": "has_item:Oak's Parcel", "why": "get parcel"},
+            {"map": 40, "talk": True, "who": "Oak", "done_when": "no_item:Oak's Parcel", "why": "deliver"},
+        ], "remove": []}
+    out = loop._manage_directive(obs)
+    assert not any(s.provisional for s in loop._plan_steps)      # provisional default dropped
+    assert all(s.map != 2 for s in loop._plan_steps)            # no lingering goal-travel default
+    assert out is not None and out.target_map == 42             # active directive now leads to the Mart
+    assert loop._directive is out and out.quest_id is not None  # it's L1's first real step

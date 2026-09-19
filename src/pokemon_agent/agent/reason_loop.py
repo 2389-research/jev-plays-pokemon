@@ -253,15 +253,11 @@ class ReasoningLoop:
 
         directive = self._manage_directive(obs)
         blocked_dirs = self._blocked_dirs(obs, self._next_hop_map(obs, directive))
-        self._maybe_reflect(obs, player_desc)
+        # NOTE: no separate _maybe_reflect on the planner path — reflection is now folded INTO the
+        # mid-level proposer inside _navigate_leg (its note becomes self._plan.next_objective). The
+        # legacy no-planner path above still calls _maybe_reflect.
         if directive is not None and directive.target_bearing:
-            # TALK_TO / GRAB_ITEM head to a concrete NPC/item tile (no navigation reasoning) ->
-            # deterministic servo. Everything else (TRAVEL / GRIND: traverse this map toward an
-            # exit) is driven by L2: LunaRoute picks the next grid tile, BFS routes to it.
-            if directive.intent in (Intent.TALK_TO, Intent.GRAB_ITEM):
-                servo = self._servo_step(directive, obs, blocked_dirs)
-            else:
-                servo = self._navigate_leg(directive, obs, blocked_dirs)
+            servo = self._dispatch_servo(directive, obs, blocked_dirs)
             if servo is not None:
                 self._servo_fail = 0
                 return self._act_servo(obs, directive, servo, shot)
@@ -276,6 +272,14 @@ class ReasoningLoop:
         self._prev = rstep
         self._emit_reason(rstep, 0)
         return self._finish(obs, rstep, self.controller.execute(rstep.action), 0, {}, shot)
+
+    def _dispatch_servo(self, directive, obs, blocked_dirs):
+        """Route a target-bearing directive to the right servo: a talk/grab with a concrete TILE ->
+        the deterministic BFS+interact servo; anything else (incl. a talk/grab with NO tile yet) ->
+        the unified nav leg, whose approach_npc finds and reaches the person."""
+        if directive.intent in (Intent.TALK_TO, Intent.GRAB_ITEM) and directive.target_xy is not None:
+            return self._servo_step(directive, obs, blocked_dirs)
+        return self._navigate_leg(directive, obs, blocked_dirs)
 
     def _maybe_reflect(self, obs, player_desc) -> None:
         """Periodic/forced strategic reflection (maintains the AgentPlan) — LunaRoute."""

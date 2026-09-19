@@ -258,10 +258,12 @@ class ReasoningLoop:
             servo = self._dispatch_servo(directive, obs, blocked_dirs)
             if servo is not None:
                 self._servo_fail = 0
-                self._blocked_for_n = 0   # we have a route -> progress; clear the block counter
+                # NOTE: do NOT clear _blocked_for_n here — a servo move exists even while CIRCLING
+                # (a route to a tile we keep revisiting). _blocked_for_n is driven by the stuck
+                # detector in _finish (consecutive no-PROGRESS legs), so circling accumulates toward
+                # the wedge/L1 trigger instead of oscillating 0<->1 and never firing.
                 return self._act_servo(obs, directive, servo, shot)
             self._servo_fail += 1     # no clean route -> navigation deadlock (feeds the wedge + L1)
-            self._blocked_for_n += 1  # consecutive blocked legs -> triggers L1 at BLOCK_TRIGGER
         # awaiting a fresh target/plan from LunaRoute -> a brief wait; the next step re-plans.
         from ..core.models import WaitAction
         rstep = ReasonStep(location="await-plan",
@@ -1321,8 +1323,11 @@ class ReasoningLoop:
             self.memory.note(f"setback at step {self.session.step}", source="observed", step=self.session.step)
         if stuck.stuck:
             # a local loop / no-objective-progress leg counts toward the block budget that feeds
-            # the wedge trigger + the L1 gate (BLOCK_TRIGGER).
+            # the wedge trigger + the L1 gate (BLOCK_TRIGGER). This is the get-unstuck signal:
+            # circling accumulates here until it wedges the step and L1 re-plans it.
             self._blocked_for_n += 1
+        else:
+            self._blocked_for_n = 0   # genuine progress this leg -> clear the block budget
         if stuck.stuck or stuck.setback:
             self.on_event("stuck", {"step": self.session.step, "kind": stuck.kind,
                                     "setback": stuck.setback, "repeat_count": stuck.repeat_count})

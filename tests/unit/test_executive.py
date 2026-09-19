@@ -296,3 +296,34 @@ def test_l1_due_is_a_pure_predicate():
     assert loop._l1_due() is True                # blocked (>= BLOCK_TRIGGER)
     loop._blocked_for_n = 0; loop._l1_event = True
     assert loop._l1_due() is True                # event flag
+
+
+def test_recorder_extra_has_l1_fields():
+    loop, _ = _loop(map_id=1, goal_map=2)
+    loop.planner.revise_quests = lambda emu, ctx: {"change": True, "mission": "reach Pewter",
+        "milestone": "deliver parcel", "add": [{"map": 42, "talk": False, "done_when": "on_map", "why": "mart"}], "remove": []}
+    obs, _ = loop.builder.build(capture_screenshot=False)
+    loop._run_l1(obs)
+    assert loop._l1_last is not None and loop._l1_last["change"] is True
+    assert loop._plan.milestone == "deliver parcel"
+    assert "assessment" in loop._l1_last
+
+
+def test_l1_plans_parcel_errand_end_to_end():
+    from pokemon_agent.agent.plan import Intent
+    loop, _ = _loop(map_id=1, goal_map=2)   # in Viridian, goal Pewter
+    loop._qid = 50
+    # stub L1: when blocked at Viridian, insert the parcel errand (Mart -> get parcel -> Lab -> deliver)
+    loop.planner.revise_quests = lambda emu, ctx: {"change": True, "mission": "reach Pewter",
+        "milestone": "deliver Oak's Parcel",
+        "add": [
+            {"map": 42, "talk": True, "who": "clerk", "done_when": "has_item:Oak's Parcel", "why": "get parcel"},
+            {"map": 40, "talk": True, "who": "Oak", "done_when": "no_item:Oak's Parcel", "why": "deliver"},
+        ], "remove": []}
+    obs, _ = loop.builder.build(capture_screenshot=False)
+    loop._run_l1(obs)
+    maps = [s.map for s in loop._plan_steps]
+    assert 42 in maps and 40 in maps                       # Mart + Lab planned
+    # the compiled queue contains a TALK_TO to Oak whose success checks the parcel is gone
+    talk_oak = [d for d in loop._quest if d.intent == Intent.TALK_TO and (d.target or {}).get("sprite") == "Oak"]
+    assert talk_oak and "no_item" in talk_oak[0].success   # deliver step is machine-checkable

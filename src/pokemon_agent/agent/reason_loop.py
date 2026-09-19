@@ -179,6 +179,7 @@ class ReasoningLoop:
         self._legs_since_l1 = 0                  # legs since the last L1 review (cadence trigger)
         self._blocked_for_n = 0                  # consecutive legs blocked (>= BLOCK_TRIGGER fires L1)
         self._l1_event = False                   # a one-shot event asked for an L1 review next gate
+        self._l1_last = None                     # last L1 review's {change, assessment} (for the recorder)
 
     # ------------------------------------------------------------------ step
     def step_once(self) -> ActionResult:
@@ -396,6 +397,7 @@ class ReasoningLoop:
                     if note not in self._plan.tried_failed:
                         self._plan.tried_failed.append(note)
                 self._recompile_quest()
+                self._l1_last = {"change": True, "assessment": prop.get("assessment")}
                 self.on_event("l1_review", {"step": self.session.step, "change": True,
                                             "assessment": prop.get("assessment"),
                                             "add": len(prop.get("add", [])),
@@ -403,9 +405,11 @@ class ReasoningLoop:
                 self.on_event("quest", {"step": self.session.step, "len": len(self._quest),
                                         "plan": [d.reason for d in self._quest]})
             else:
+                self._l1_last = {"change": False, "assessment": prop.get("assessment")}
                 self.on_event("l1_review", {"step": self.session.step, "change": False,
                                             "assessment": prop.get("assessment")})
         except Exception as e:  # never let a strategic review break the loop
+            self._l1_last = {"change": False, "assessment": "l1_failed"}
             self.on_event("l1_failed", {"step": self.session.step, "error": str(e)})
         finally:
             # clear the cadence/event gate even on failure, so a raising review doesn't re-fire
@@ -618,6 +622,7 @@ class ReasoningLoop:
             "map_view": obs.map_view,
             "player": {"x": player.x, "y": player.y, "map_id": player.map_id},
             "objective": directive.reason,
+            "milestone": (self._plan.milestone if self._plan else None),
             "destination": (f"{map_name(tmap)} (map {tmap})" if tmap is not None else "the goal"),
             "goal_dir": goal_dir,
             "exit_tile": exit_tile,
@@ -1321,6 +1326,7 @@ class ReasoningLoop:
                 "milestone": (self._plan.milestone if self._plan else None),
                 "plan_steps": [{"id": s.id, "map": s.map, "status": s.status}
                                for s in self._plan_steps],
+                "l1_last": self._l1_last,
                 "quest_remaining": [q.reason for q in self._quest],
                 "waypoint": ([tgt["x"], tgt["y"]] if tgt and tgt.get("kind") == "tile" else None),
                 "target": tgt,   # the unified mid-level typed target (kind/x/y/map/sprite)

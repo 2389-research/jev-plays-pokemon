@@ -18,26 +18,6 @@ class StubReasoner:
         return ReasonStep(location="", objective="", reasoning="", action=WaitAction(frames=1)), 0, {}
 
 
-class StubPlanner:
-    def __init__(self, *directives):
-        self.queue = list(directives)
-        self.calls = 0
-
-    def plan(self, intent, emu, memory, *, why="", context=None):
-        self.calls += 1
-        self.last_why = why
-        self.last_context = context
-        return self.queue.pop(0) if self.queue else self.queue[-1]
-
-
-class StubArbiter:
-    def __init__(self, intent):
-        self._intent = intent
-
-    def intent(self, emu):
-        return self._intent
-
-
 def _loop(goal_map=99, map_id=0, events=None):
     emu = FakeEmulator(map_id=map_id)
     session = Session(GoalState(primary="reach pewter", current="reach pewter"))
@@ -104,12 +84,16 @@ def test_navigate_leg_falls_back_to_exit_tile_without_provider():
 
 
 def test_servo_walks_toward_same_map_tile_no_model_call():
+    # plan-driven: the compiled quest queue holds the active tile directive; the servo routes to it
+    # deterministically (no arbiter, no planner.plan, no model call).
+    from collections import deque as _deque
+    from pokemon_agent.agent.quest_reconciler import QuestStep
     loop, emu = _loop(map_id=0)
     # target is open floor south of the start (2,2) -> servo should step south, no executor
-    loop.arbiter = StubArbiter(Intent.TRAVEL)
     d = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 0, "x": 2, "y": 4},
-                  success={"on_map": 99})
-    loop.planner = StubPlanner(d)
+                  success={"on_map": 99}, quest_id="q1")
+    loop._plan_steps = [QuestStep(id="q1", map=0, done_when="on_map", status="active")]
+    loop._quest = _deque([d])            # already compiled; _manage_directive pops it as the active one
     start = (emu.x, emu.y)
     loop.step_once()
     assert (emu.x, emu.y) != start and emu.y > start[1]  # moved south toward the target
@@ -117,108 +101,89 @@ def test_servo_walks_toward_same_map_tile_no_model_call():
 
 
 def test_success_predicate_triggers_replan():
+    # success on the active directive marks its step done and advances to the next compiled directive.
+    from collections import deque as _deque
+    from pokemon_agent.agent.quest_reconciler import QuestStep
     events = []
     loop, emu = _loop(map_id=5, events=events)
-    loop.arbiter = StubArbiter(Intent.TRAVEL)
-    done = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 5}, success={"on_map": 5})
+    done = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 5}, success={"on_map": 5},
+                     quest_id="q1")
     nxt = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 9, "x": 2, "y": 4},
-                    success={"on_map": 9})
-    loop.planner = StubPlanner(nxt)
+                    success={"on_map": 9}, quest_id="q2")
+    loop._plan_steps = [QuestStep(id="q1", map=5, done_when="on_map", status="active"),
+                        QuestStep(id="q2", map=9, done_when="on_map", status="pending")]
+    loop._quest = _deque([nxt])
     loop._directive = done  # already-satisfied directive (emu is on map 5)
-    loop.step_once()
+    out = loop._manage_directive(loop.builder.build(capture_screenshot=False)[0])
     kinds = [k for k, _ in events]
     assert "directive_done" in kinds
-    assert loop.planner.calls == 1 and loop._directive is nxt  # replanned to the next directive
+    assert out is nxt and loop._directive is nxt        # advanced to the next compiled directive
+    steps = {s.id: s.status for s in loop._plan_steps}
+    assert steps["q1"] == "done" and steps["q2"] == "active"   # step statuses advanced in order
 
 
-class StubQuestPlanner(StubPlanner):
-    def __init__(self, *directives, quest=()):
-        super().__init__(*directives)
-        self._quest = list(quest)
-
-    def strategize(self, emu, memory, *, why=""):
-        self.strategize_why = why
-        return list(self._quest)
-
-    def plan(self, intent, emu, memory, *, why="", context=None):
-        # real planner always returns a directive; the stub falls back to a benign one when its
-        # scripted queue is exhausted (e.g. the normal replan after a quest completes).
-        if self.queue:
-            return self.queue.pop(0)
-        return Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 0}, success={"on_map": -1})
-
-
-class JudgingReasoner(StubReasoner):
-    def __init__(self, score):
-        self.score = score
-
-    def judge(self, question, state):
-        return self.score
-
-
-def test_story_gate_escalates_to_quest_and_advances_in_order():
+def test_emergency_heal_preempts_then_restores_plan():
+    # the near-faint emergency reflex is the ONLY preemption: it injects a HEAL directive ahead of
+    # the plan; once HP is safe again the plan resumes exactly where it was.
+    from collections import deque as _deque
+    from pokemon_agent.agent.quest_reconciler import QuestStep
+    import pokemon_agent.agent.reason_loop as rl
     loop, emu = _loop(map_id=0)
-    loop.reasoner = JudgingReasoner(0.9)               # Jev router: "needs a sub-quest"
-    loop.arbiter = StubArbiter(Intent.TRAVEL)
-    q1 = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 5}, success={"on_map": 5})
-    q2 = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 9}, success={"on_map": 9})
-    loop.planner = StubQuestPlanner(quest=[q1, q2])
-    # an impossible active directive forces the escalation path
-    loop._directive = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 2}, success={"on_map": 2})
-    loop._servo_fail = 99
-
-    loop._manage_directive(loop.builder.build(capture_screenshot=False)[0])
-    assert loop._in_quest and loop._directive is q1     # escalated -> first quest step
-
-    emu.map_id = 5                                        # q1 success -> advance to q2
-    loop._manage_directive(loop.builder.build(capture_screenshot=False)[0])
-    assert loop._in_quest and loop._directive is q2
-
-    emu.map_id = 9                                        # q2 success -> quest complete
-    loop._manage_directive(loop.builder.build(capture_screenshot=False)[0])
-    assert not loop._in_quest
+    d = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 9}, success={"on_map": 9},
+                  quest_id="q1")
+    loop._plan_steps = [QuestStep(id="q1", map=9, done_when="on_map", status="active")]
+    loop._quest = _deque([d])
+    state = {"party": [{"hp": 0, "max_hp": 20}, {"hp": 3, "max_hp": 26}]}  # a fainted member
+    orig = rl.game_signals
+    rl.game_signals = lambda emu: {"party": state["party"], "hp_frac": 0.0, "min_level": 5,
+                                   "badges": 0, "items": []}
+    try:
+        obs = loop.builder.build(capture_screenshot=False)[0]
+        out = loop._manage_directive(obs)
+        assert out.intent == Intent.HEAL and loop._directive.intent == Intent.HEAL  # preempted
+        state["party"] = [{"hp": 26, "max_hp": 26}]                                 # HP safe again
+        out2 = loop._manage_directive(obs)
+        assert out2 is d and loop._directive is d                                   # plan resumed
+    finally:
+        rl.game_signals = orig
 
 
-def test_wedged_quest_step_re_strategizes_instead_of_abandoning():
-    # a quest step that wedges too long re-plans from current state (force), staying on the
-    # errand rather than falling back to grind — even with a LOW escalation score.
-    loop, emu = _loop(map_id=1)
-    loop.reasoner = JudgingReasoner(0.1)               # router says "not a gate" ...
-    loop.arbiter = StubArbiter(Intent.TRAVEL)
-    q1 = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 0}, success={"on_map": 0})
-    deliver = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 40}, success={"on_map": 40})
-    loop.planner = StubQuestPlanner(quest=[deliver])   # ... but re-strategize returns the delivery quest
-    loop._directive = q1
-    loop._in_quest = True
-    loop._quest_step_age = 999                          # wedged
-    from pokemon_agent.agent.reason_loop import QUEST_STEP_BUDGET
-    loop._manage_directive(loop.builder.build(capture_screenshot=False)[0])
-    assert loop._in_quest and loop._directive is deliver  # re-strategized, still on the errand
+def test_wedged_step_marked_and_replaced_by_l1_next_gate():
+    # a wedged step is marked `wedged` and L1's next review replaces just that step; the rest of the
+    # plan survives (no quest.clear(), no escalation-score path).
+    from collections import deque as _deque
+    from pokemon_agent.agent.quest_reconciler import QuestStep
+    from pokemon_agent.agent.reason_loop import SERVO_FAIL_LIMIT
+    loop, emu = _loop(map_id=1, goal_map=2)
+    loop._plan_steps = [QuestStep(id="q1", map=5, done_when="on_map", status="active"),
+                        QuestStep(id="q2", map=9, done_when="on_map", status="pending")]
+    d_active = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 5}, success={"on_map": 5},
+                         quest_id="q1")
+    d_pending = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 9}, success={"on_map": 9},
+                          quest_id="q2")
+    loop._quest = _deque([d_pending])
+    loop._directive = d_active
+    loop._qid = 10                                    # so L1's fresh step ids don't reuse "q1"/"q2"
+    loop._servo_fail = SERVO_FAIL_LIMIT               # the active step is wedged (no route)
 
+    obs = loop.builder.build(capture_screenshot=False)[0]
+    loop._manage_directive(obs)
+    assert any(s.id == "q1" and s.status == "wedged" for s in loop._plan_steps)  # marked, not cleared
+    assert loop._l1_event is True                                                # L1 armed for next gate
+    assert any(s.id == "q2" for s in loop._plan_steps)                           # plan NOT cleared
 
-def test_low_escalation_score_does_not_quest():
-    loop, emu = _loop(map_id=0)
-    loop.reasoner = JudgingReasoner(0.1)               # Jev router: "just reroute"
-    loop.arbiter = StubArbiter(Intent.TRAVEL)
-    normal = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 9}, success={"on_map": 9})
-    loop.planner = StubQuestPlanner(normal, quest=[Directive(intent=Intent.TRAVEL,
-                                                             target={"kind": "map", "map": 5}, success={"on_map": 5})])
-    loop._directive = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 2}, success={"on_map": 2})
-    loop._servo_fail = 99
-    loop._manage_directive(loop.builder.build(capture_screenshot=False)[0])
-    assert not loop._in_quest and loop._directive is normal  # normal replan, no quest
-
-
-def test_higher_need_suspends_current_directive_on_the_stack():
-    loop, emu = _loop(map_id=0)
-    travel = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 9}, success={"on_map": 9})
-    heal = Directive(intent=Intent.HEAL, target=None, success={"hp_frac": ">=0.8"})
-    loop._directive = travel
-    loop.arbiter = StubArbiter(Intent.HEAL)   # a higher-priority need preempts
-    loop.planner = StubPlanner(heal)
-    loop._manage_directive(loop.builder.build(capture_screenshot=False)[0])
-    assert loop._directive is heal
-    assert travel in loop._dstack  # the lower-priority directive was suspended, not dropped
+    # next gate: L1 replaces the wedged step (remove q1, add a fresh retry step); q2 survives.
+    loop.planner.revise_quests = lambda emu, ctx: {
+        "change": True,
+        "add": [{"map": 5, "talk": False, "done_when": "on_map", "why": "retry via another route"}],
+        "remove": ["q1"]}
+    loop._manage_directive(obs)
+    ids = [s.id for s in loop._plan_steps]
+    assert "q1" not in ids                                          # the wedged step was replaced
+    assert "q2" in ids                                              # the rest of the plan survived
+    assert all(s.status != "wedged" for s in loop._plan_steps)     # nothing left wedged
+    # a fresh retry step for map 5 replaced the wedged one; the plan advanced onto it (now active)
+    assert any(s.map == 5 and s.status in ("pending", "active") for s in loop._plan_steps)
 
 
 # --- L1 strategic planner (Task 6a) ---

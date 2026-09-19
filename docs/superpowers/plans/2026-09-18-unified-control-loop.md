@@ -4,7 +4,15 @@
 
 **Goal:** Make the mid-level layer (reflection, merged with the L2 waypoint call) propose ONE machine-usable typed target every leg that ALWAYS drives the router — so the agent never freezes with a planner that "knows the answer" but stands still, and L2 can force navigation and get unstuck.
 
-**Architecture:** `Planner.propose_target(emu, context)` returns a typed target (`tile` / `exit` / `enter` / `approach_npc`) with a one-line note; it never returns None (defaults to `exit`). `ReasoningLoop` holds one typed target across frames (cadence B — re-propose on reached / stuck / map-change), resolves it deterministically to a move via existing resolvers (BFS / weighted-policy / Jev-path / door-step-through / edge-crossing / approach-NPC), Jev still picks the routing policy inside a leg, and the reflection note is folded into the proposer output. The old `_navigate_leg` `return None` "await-plan" freeze is replaced by: re-propose to unstick, then default to `exit`; only after the proposer also fails does it hand up to L1 (the existing quest/strategize/heal escalation).
+**Architecture:** `Planner.propose_target(emu, context)` returns a typed target (`tile` / `exit` / `enter` / `approach_npc`) with a one-line note; it never returns None. `ReasoningLoop` holds one typed target across frames (cadence B — re-propose on reached / stuck / map-change), resolves it deterministically to a move via existing resolvers (BFS / weighted-policy / Jev-path / door-step-through / edge-crossing / approach-NPC), Jev still picks the routing policy inside a leg, and the reflection note is folded into the proposer output. The old `_navigate_leg` `return None` "await-plan" freeze is replaced by: re-propose to unstick, then hand up to L1 (the existing quest/strategize/heal escalation) only after that fails.
+
+**PRIORITY — the model's proposal drives movement, and a model failure BREAKS LOUDLY (does not silently wander).** The bug we are fixing is NOT "the agent didn't know the way out" — in the frozen run the reflection model explicitly said *"step west to (4,6), then south to the exit at (4,11)."* It knew. The failure was that its answer was **orphaned** — nothing turned it into movement. So the ordering is strict, and it treats a genuine model failure as a bug to surface, not to paper over:
+
+1. **The proposer (the reflection model) chooses the target every leg** — a tile, an exit, an enter, or an approach-npc — and that choice is what the router enacts. This is the primary, load-bearing path. When the model gives an answer, we enact it, full stop (never orphan it).
+2. **A configured model that FAILS to produce a usable target is an ERROR, and the agent breaks visibly.** If a provider *is* wired (a live run) but the call errors, returns empty/garbage, or names an unreachable tile after the retry, `propose_target` returns an **`unresolved`** marker (never a deterministic guess). The loop then emits a loud `proposer_failed` event carrying the raw response + reason, and the agent **stalls in place (a visible WaitAction) rather than deterministically wandering toward some exit.** That way the break shows up in the logs and the viewer — debuggable — instead of being masked by aimless deterministic movement. (This is the behavior the user explicitly asked for: "flag the issues and allow us to debug in logs, rather than wandering around deterministically with no model guidance… I would rather it break.")
+3. **The deterministic `_default_target` is used ONLY in the no-provider mode** (tests / offline — where running with no LLM is intentional, not an error). It is never a live-run fallback for a failed model call.
+
+`_default_target` (no-provider mode only) yields `exit` in one narrow case (cross-map with no *known* route out yet). In a live run that case is exactly where the model's guidance is required, so a model failure there is flagged and broken per rule 2 — we do not silently substitute the nearest-door guess.
 
 **Tech Stack:** Python 3.13, PyBoy, LunaRoute (OpenAI-compatible, `chat_json`), TypeSafe/Jev (`system_one` Choice), pytest, `uv`.
 
@@ -62,7 +70,8 @@ def _ctx(**kw):
     base.update(kw); return base
 
 
-def test_propose_target_offline_returns_default():
+def test_propose_target_no_provider_returns_deterministic_default():
+    # OFFLINE / tests: running with no LLM is intentional, not an error -> deterministic default.
     p = Planner(goal_map=0, provider=None)
     assert p.propose_target(emu=None, context=_ctx()) == {"kind": "exit"}
 
@@ -73,9 +82,12 @@ def test_propose_target_parses_tile():
     assert t["kind"] == "tile" and (t["x"], t["y"]) == (3, 4) and t["note"] == "south"
 
 
-def test_propose_target_rejects_unreachable_tile_falls_back_to_default():
+def test_propose_target_configured_but_unreachable_tile_returns_unresolved():
+    # a provider IS wired (live run) but it named an unreachable tile -> this is a model failure;
+    # BREAK LOUDLY, do NOT silently substitute the deterministic default.
     p = Planner(goal_map=0, provider=FakeProvider('{"kind":"tile","x":9,"y":9,"note":"bad"}'))
-    assert p.propose_target(emu=None, context=_ctx()) == {"kind": "exit"}
+    t = p.propose_target(emu=None, context=_ctx())
+    assert t["kind"] == "unresolved" and "note" in t
 
 
 def test_propose_target_passes_through_exit_and_approach_and_enter():
@@ -86,9 +98,10 @@ def test_propose_target_passes_through_exit_and_approach_and_enter():
         assert p.propose_target(emu=None, context=_ctx())["kind"] == kind
 
 
-def test_propose_target_bad_json_returns_default():
+def test_propose_target_configured_but_bad_json_returns_unresolved():
+    # provider wired but returns garbage -> model failure -> unresolved (flagged), not a guess.
     p = Planner(goal_map=0, provider=FakeProvider("not json"))
-    assert p.propose_target(emu=None, context=_ctx()) == {"kind": "exit"}
+    assert p.propose_target(emu=None, context=_ctx())["kind"] == "unresolved"
 ```
 
 - [ ] **Step 2: Run to verify they fail**
@@ -124,10 +137,16 @@ sentence of your reasoning (this becomes the agent's visible short-term objectiv
 
 def propose_target(self, emu, context: dict) -> dict:
     """The unified mid-level proposer: ONE typed short-term target toward the goal, and the
-    get-unstuck mechanism. Never returns None — defaults to {"kind":"exit"} (leave toward the
-    goal) so the loop always has something to enact. When no provider is wired (offline/tests)
-    or the model's pick is invalid, returns context['default'] (the deterministic layer's choice,
-    itself defaulting to exit)."""
+    get-unstuck mechanism.
+
+    Failure policy (the important part): a CONFIGURED provider that can't produce a usable target
+    is a BUG we surface, not one we hide. So:
+      * no provider wired (offline / tests): return context['default'] — the deterministic target,
+        because running with no LLM is intentional there, not an error.
+      * a provider IS wired but the call errors / returns empty|garbage / names an unreachable tile
+        after the retry: return {"kind":"unresolved","reason":...} so the loop can flag it loudly
+        (a 'proposer_failed' event) and BREAK VISIBLY, instead of silently wandering deterministically.
+    Never returns None."""
     default = context.get("default") or {"kind": "exit"}
     if self.provider is None:
         return default
@@ -146,18 +165,23 @@ def propose_target(self, emu, context: dict) -> dict:
         "default": default,
         "why": context.get("why", "pick the next target toward the goal"),
     }
+    reason = "no response"
+    last_raw = None
     for _ in range(2):  # one retry on an invalid pick
         try:
             content, _, _ = self.provider.chat_json(PROPOSER_SYSTEM, state)
+            last_raw = content
             data = json.loads(strip_fences(content))
             kind = data.get("kind")
-        except Exception:
+        except Exception as e:
+            reason = f"call/parse failed: {e}"
             continue
         note = str(data.get("note") or "").strip()
         if kind == "tile":
             try:
                 x, y = int(data["x"]), int(data["y"])
             except (KeyError, TypeError, ValueError):
+                reason = "tile missing x/y"
                 continue
             px = (context.get("player") or {}).get("x")
             py = (context.get("player") or {}).get("y")
@@ -165,17 +189,22 @@ def propose_target(self, emu, context: dict) -> dict:
             progresses = (px is None) or (x, y) != (px, py)
             if progresses and (is_exit or reachable is None or (x, y) in reachable):
                 return {"kind": "tile", "x": x, "y": y, "note": note}
-            continue  # unreachable / no-op pick -> retry, then fall back
+            reason = f"tile ({x},{y}) unreachable / no-op"
+            continue
         if kind == "enter":
             try:
                 return {"kind": "enter", "map": int(data["map"]), "note": note}
             except (KeyError, TypeError, ValueError):
+                reason = "enter missing map"
                 continue
         if kind == "approach_npc":
             return {"kind": "approach_npc", "sprite": (data.get("sprite") or None), "note": note}
         if kind == "exit":
             return {"kind": "exit", "note": note}
-    return default
+        reason = f"unknown kind {kind!r}"
+    # a wired provider failed to produce a usable target -> surface it; do NOT guess deterministically
+    return {"kind": "unresolved", "reason": reason, "raw": (str(last_raw)[:300] if last_raw else None),
+            "note": f"proposer failed: {reason}"}
 ```
 
 - [ ] **Step 4: Run to verify pass**
@@ -268,6 +297,16 @@ def test_resolve_tile_interacts_on_arrival_when_flagged():
     assert isinstance(move, InteractAction)
 
 
+def test_resolve_tile_that_is_an_exit_door_steps_through():
+    # the model named the exit as a coordinate that IS a warp door -> step THROUGH it, don't stop.
+    loop, _ = _nav_loop(42)
+    player = SimpleNamespace(x=3, y=7, map_id=42, facing="south")
+    obs = SimpleNamespace(player=player, map_dims=(4, 8), game_state={},
+                          exits=[{"x": 3, "y": 7, "dest_map": 1}])
+    move = loop._resolve_target({"kind": "tile", "x": 3, "y": 7}, _d(), obs, set(), set())
+    assert isinstance(move, MoveAction) and move.direction == Direction.SOUTH
+
+
 def _d(intent=Intent.TRAVEL):
     return Directive(intent=intent, target={"kind": "map", "map": 40}, success={"on_map": 40})
 ```
@@ -358,7 +397,13 @@ def _resolve_target(self, target, directive, obs, blocked_dirs, occupied):
     player = obs.player
     if kind == "tile":
         xy = (int(target["x"]), int(target["y"]))
+        door = next((e for e in (obs.exits or []) if (int(e["x"]), int(e["y"])) == xy), None)
         if (player.x, player.y) == xy:
+            # a model-named tile that IS an exit door: step THROUGH the warp (the model said "leave
+            # via (4,11)" — honor it), don't just stop on the doormat.
+            if door is not None:
+                d = self._warp_exit_dir(xy, obs.map_dims)
+                return MoveAction(direction=d) if d is not None else None
             return InteractAction() if target.get("interact") else None
         avoid = set(occupied)
         return self._route_to_tile(obs, xy, blocked_dirs, avoid)
@@ -368,7 +413,9 @@ def _resolve_target(self, target, directive, obs, blocked_dirs, occupied):
         return self._approach_npc(target.get("sprite"), obs, blocked_dirs, occupied)
     if kind == "edge":
         return self._cross_edge(target.get("dir"), target.get("next_map"), obs, blocked_dirs, occupied)
-    # exit (default): leave via nearest door; if none, try a boundary-edge crossing toward the goal
+    if kind != "exit":
+        return None  # unknown / unresolved kind -> no move (never silently wander)
+    # exit: leave via nearest door; if none, try a boundary-edge crossing toward the goal
     move = self._leave_via_nearest_exit(player, obs, blocked_dirs, occupied)
     if move is not None:
         return move
@@ -444,6 +491,45 @@ def test_navigate_leg_door_step_through_still_works():
                           exits=[{"x": 3, "y": 7, "dest_map": 1}])
     move = loop._navigate_leg(_d(), obs, set())
     assert isinstance(move, MoveAction) and move.direction == Direction.SOUTH
+
+
+class FailProvider:
+    def chat_json(self, system, state, image=None):
+        raise RuntimeError("boom")
+
+
+def test_navigate_leg_configured_failure_ungrounded_stalls_and_flags():
+    # a wired model FAILS and there's NO known route out -> deterministic default would be an
+    # ungrounded 'exit'. Policy: do NOT wander; STALL (None) and flag proposer_failed for debugging.
+    loop, _ = _nav_loop(42)
+    loop.planner.provider = FailProvider()
+    loop.memory.graph.next_hop = lambda a, b: None
+    cells = {(x, y) for x in range(4) for y in range(8)}
+    loop.world.ingest_collision(42, 4, 8, cells, None, None)
+    events = []
+    loop.on_event = lambda k, p: events.append((k, p))
+    player = SimpleNamespace(x=1, y=1, map_id=42, facing="south")
+    obs = SimpleNamespace(player=player, map_dims=(4, 8), game_state={}, map_view=["x"],
+                          exits=[{"x": 3, "y": 7, "dest_map": 1}])
+    move = loop._navigate_leg(_d(), obs, set())
+    assert move is None
+    assert any(k == "proposer_failed" for k, _ in events)
+
+
+def test_navigate_leg_configured_failure_grounded_proceeds_and_flags():
+    # a wired model FAILS but a KNOWN route exists (enter a door) -> proceed on the grounded route
+    # (correct navigation, not a wander) AND still flag proposer_failed.
+    loop, _ = _nav_loop(42)
+    loop.planner.provider = FailProvider()
+    loop.memory.graph.next_hop = lambda a, b: (1, (3, 7))
+    player = SimpleNamespace(x=3, y=7, map_id=42, facing="east")
+    obs = SimpleNamespace(player=player, map_dims=(4, 8), game_state={}, map_view=["x"],
+                          exits=[{"x": 3, "y": 7, "dest_map": 1}])
+    events = []
+    loop.on_event = lambda k, p: events.append((k, p))
+    move = loop._navigate_leg(_d(), obs, set())
+    assert isinstance(move, MoveAction) and move.direction == Direction.SOUTH
+    assert any(k == "proposer_failed" for k, _ in events)
 ```
 
 - [ ] **Step 2: Run to verify fail**
@@ -489,6 +575,9 @@ def _default_target(self, directive, obs) -> dict | None:
     if directive.intent in (Intent.TALK_TO, Intent.GRAB_ITEM) and txy is None:
         return {"kind": "approach_npc", "sprite": (directive.target or {}).get("sprite")}
     if txy is not None and (tmap is None or tmap == player.map_id):
+        # NOTE: in production a talk/grab WITH a concrete tile is dispatched to _servo_step (see
+        # _dispatch_servo), so this interact=True case is only exercised by the resolver's unit test;
+        # kept for completeness (a tile target that should press A on arrival).
         interact = directive.intent in (Intent.TALK_TO, Intent.GRAB_ITEM)
         return {"kind": "tile", "x": txy[0], "y": txy[1], "interact": interact}
     if tmap is None or tmap == player.map_id:
@@ -525,7 +614,15 @@ def _current_target(self, directive, obs) -> dict | None:
     if (held is not None and self._target_map == player.map_id
             and not self._target_reached(held, obs)):
         return held
-    self._target = self._propose_target(obs, directive, default, stuck=False)
+    proposed = self._propose_target(obs, directive, default, stuck=False)
+    if proposed.get("kind") == "unresolved":
+        # a configured model failed AND there's no grounded route (proposer already flagged it).
+        # Don't cache the failure — retry the model next frame (a transient 429/cold-start recovers);
+        # this leg stalls visibly. Persistent failures keep flagging + stalling = a visible break.
+        self._target = None
+        self._target_map = None
+        return proposed
+    self._target = proposed
     self._target_map = player.map_id
     self._target_stuck = 0
     return self._target
@@ -570,6 +667,17 @@ def _propose_target(self, obs, directive, default, *, stuck) -> dict:
     target = self.planner.propose_target(self.controller.emu, ctx)
     if not target:
         target = default
+    if target.get("kind") == "unresolved":
+        # a CONFIGURED model failed. ALWAYS flag it loudly (logs + viewer) so it's debuggable.
+        self.on_event("proposer_failed", {"step": self.session.step, "reason": target.get("reason"),
+                                          "raw": target.get("raw"), "default": default, "stuck": stuck})
+        if default.get("kind") != "exit":
+            target = default          # a GROUNDED route (enter/edge/tile/approach) -> proceed on it
+                                      # (correct navigation, not a wander) — but the failure is flagged.
+        else:
+            if self._plan is not None:
+                self._plan.next_objective = f"[proposer failed] {target.get('reason')}"
+            return target             # UNGROUNDED (would be an exit/explore guess) -> break visibly
     note = target.get("note")
     if note and self._plan is not None:
         self._plan.next_objective = note      # fold the reflection note (mid-level -> visible objective)
@@ -592,6 +700,9 @@ def _navigate_leg(self, directive: Directive, obs, blocked_dirs: set[str]):
     target = self._current_target(directive, obs)
     if target is None:
         return None  # arrived on the target map; the success predicate ends the directive
+    if target.get("kind") == "unresolved":
+        return None  # configured model failed with no grounded route -> already flagged; STALL
+                     # visibly (step_once's await-plan wait) rather than wander deterministically
     move = self._resolve_target(target, directive, obs, blocked_dirs, occupied)
     if move is not None:
         self._target_stuck = 0
@@ -599,8 +710,11 @@ def _navigate_leg(self, directive: Directive, obs, blocked_dirs: set[str]):
     # stuck: re-propose a DIFFERENT target (the proposer's whole purpose), a couple of times
     self._target_stuck += 1
     if self._target_stuck <= TARGET_REPROPOSE_LIMIT:
-        self._target = self._propose_target(obs, directive, {"kind": "exit"}, stuck=True)
+        self._target = self._propose_target(obs, directive, self._default_target(directive, obs) or {"kind": "exit"}, stuck=True)
         self._target_map = player.map_id
+        if self._target.get("kind") == "unresolved":
+            self._target = None
+            return None  # flagged; stall (don't wander)
         move = self._resolve_target(self._target, directive, obs, blocked_dirs, occupied)
         if move is not None:
             return move
@@ -630,38 +744,54 @@ git commit -m "reason_loop: unify _navigate_leg around a held typed target + uns
 - Modify: `src/pokemon_agent/agent/reason_loop.py`
 - Test: `tests/unit/test_unified_loop.py`
 
+Extract the dispatch into a small helper so it's directly unit-testable (avoids a tautological/brittle `step_once` spy test — reviewer advisory), and drop the orphaned `_maybe_reflect` on the planner path.
+
 - [ ] **Step 1: Write failing test**
 
 ```python
 # add to tests/unit/test_unified_loop.py
 
-def test_talk_to_without_tile_routes_via_navigate_leg_approach_npc(monkeypatch):
+def test_dispatch_servo_talk_without_tile_uses_navigate_leg():
     loop, _ = _nav_loop(0)
-    calls = {"nav": 0, "servo": 0}
-    loop._navigate_leg = lambda d, o, b: (calls.__setitem__("nav", calls["nav"] + 1) or None)
-    loop._servo_step = lambda d, o, b: (calls.__setitem__("servo", calls["servo"] + 1) or None)
-    from pokemon_agent.agent.plan import Directive, Intent
-    d = Directive(intent=Intent.TALK_TO, target={"kind": "npc", "map": 0}, success={"talked_on_map": 0})
-    # exercise just the dispatch branch used in step_once
-    servo = (loop._servo_step(d, None, set()) if (d.intent in (Intent.TALK_TO, Intent.GRAB_ITEM)
-             and d.target_xy is not None) else loop._navigate_leg(d, None, set()))
-    assert calls["nav"] == 1 and calls["servo"] == 0
+    calls = []
+    loop._navigate_leg = lambda d, o, b: calls.append("nav")
+    loop._servo_step = lambda d, o, b: calls.append("servo")
+    d_notile = Directive(intent=Intent.TALK_TO, target={"kind": "npc", "map": 0}, success={"talked_on_map": 0})
+    d_tile = Directive(intent=Intent.TALK_TO, target={"kind": "npc", "map": 0, "x": 2, "y": 2},
+                       success={"talked_on_map": 0})
+    loop._dispatch_servo(d_notile, None, set())
+    loop._dispatch_servo(d_tile, None, set())
+    assert calls == ["nav", "servo"]  # no-tile talk -> approach_npc via nav; tile talk -> servo
 ```
-
-(This test documents the intended dispatch rule; Step 3 makes `step_once` follow it.)
 
 - [ ] **Step 2: Run to verify fail**
 
-Run: `uv run python -m pytest tests/unit/test_unified_loop.py::test_talk_to_without_tile_routes_via_navigate_leg_approach_npc -q`
-Expected: PASS actually (it inlines the rule) — so instead assert the real `step_once` path. Simpler: skip a brittle monkeypatch test and rely on Task 3's `approach_npc` tests + the dispatch change being obvious. If keeping, verify it fails BEFORE editing `step_once` by asserting on a real `step_once` run with a TALK_TO directive and a stub `_navigate_leg` spy. Use judgment; do not force a flaky test.
+Run: `uv run python -m pytest tests/unit/test_unified_loop.py::test_dispatch_servo_talk_without_tile_uses_navigate_leg -q`
+Expected: FAIL (`_dispatch_servo` missing).
 
-- [ ] **Step 3: Edit `step_once` dispatch + drop the orphaned reflect on the planner path**
+- [ ] **Step 3: Add `_dispatch_servo`, call it from `step_once`, drop the orphaned reflect**
 
-In `step_once`, replace:
+Add the helper method to `ReasoningLoop`:
 
 ```python
+def _dispatch_servo(self, directive, obs, blocked_dirs):
+    """Route a target-bearing directive to the right servo: a talk/grab with a concrete TILE ->
+    the deterministic BFS+interact servo; anything else (incl. a talk/grab with NO tile yet) ->
+    the unified nav leg, whose approach_npc finds and reaches the person."""
+    if directive.intent in (Intent.TALK_TO, Intent.GRAB_ITEM) and directive.target_xy is not None:
+        return self._servo_step(directive, obs, blocked_dirs)
+    return self._navigate_leg(directive, obs, blocked_dirs)
+```
+
+In `step_once`, replace this exact current block (note the multi-line comment must be matched too):
+
+```python
+        blocked_dirs = self._blocked_dirs(obs, self._next_hop_map(obs, directive))
         self._maybe_reflect(obs, player_desc)
         if directive is not None and directive.target_bearing:
+            # TALK_TO / GRAB_ITEM head to a concrete NPC/item tile (no navigation reasoning) ->
+            # deterministic servo. Everything else (TRAVEL / GRIND: traverse this map toward an
+            # exit) is driven by L2: LunaRoute picks the next grid tile, BFS routes to it.
             if directive.intent in (Intent.TALK_TO, Intent.GRAB_ITEM):
                 servo = self._servo_step(directive, obs, blocked_dirs)
             else:
@@ -671,17 +801,15 @@ In `step_once`, replace:
 with:
 
 ```python
-        # NOTE: no separate _maybe_reflect here — reflection is now folded into the mid-level
-        # proposer inside _navigate_leg (its note becomes self._plan.next_objective). The
+        blocked_dirs = self._blocked_dirs(obs, self._next_hop_map(obs, directive))
+        # NOTE: no separate _maybe_reflect on the planner path — reflection is now folded INTO the
+        # mid-level proposer inside _navigate_leg (its note becomes self._plan.next_objective). The
         # legacy no-planner path above still calls _maybe_reflect.
         if directive is not None and directive.target_bearing:
-            # an explicit NPC/item TILE -> deterministic servo (BFS + interact). A talk/grab with
-            # no tile yet -> the unified nav's approach_npc finds and reaches the person.
-            if directive.intent in (Intent.TALK_TO, Intent.GRAB_ITEM) and directive.target_xy is not None:
-                servo = self._servo_step(directive, obs, blocked_dirs)
-            else:
-                servo = self._navigate_leg(directive, obs, blocked_dirs)
+            servo = self._dispatch_servo(directive, obs, blocked_dirs)
 ```
+
+Verify the real surrounding text first with `grep -n "_maybe_reflect" src/pokemon_agent/agent/reason_loop.py` and read the block, so the Edit matches exactly (reviewer advisory: the current file has the multi-line comment between `_maybe_reflect` and the `if`).
 
 - [ ] **Step 4: Run full suite**
 
@@ -813,11 +941,14 @@ Update `~/.claude/.../memory/pokemon-agent-emulator.md`: unified loop IMPLEMENTE
 
 ## Definition of done
 
-- `_navigate_leg` never returns None on a fresh-load cross-map leg with a reachable exit (freeze fixed).
-- One `target` event per leg (cadence B), not per frame; note is the visible short-term objective.
+- **The model's proposal drives movement.** When the proposer returns a valid target, the router enacts it — it is never orphaned (the freeze bug is fixed at its root: the model's answer becomes movement).
+- **A configured-model failure BREAKS LOUDLY, not silently.** Every failed proposal emits a `proposer_failed` event (reason + raw response) in the logs/viewer. With no grounded route it STALLS in place (visible break) instead of wandering deterministically; with a known route it proceeds on that route (still flagged). No silent deterministic wander when the model was supposed to guide.
+- The deterministic `_default_target` is used only in the no-provider mode (tests/offline), never as a live-run fallback for a failed call.
+- A model-named exit *tile* is stepped through (honored), not stopped on.
+- One `target` event per leg (cadence B), not per frame; the note is the visible short-term objective.
 - Reflection is folded into the proposer (no separate orphaned `_maybe_reflect` on the planner path).
 - `approach_npc` reaches and interacts with the NAMED sprite (Oak), not the nearest (rival).
 - Escalation to L1 (quest / re-strategize / heal) still fires — only after the proposer's unstick attempts fail.
 - Full suite green (188 + new).
-- Live: wins the rival battle, leaves the lab, reaches Viridian.
+- Live: wins the rival battle, leaves the lab, reaches Viridian — and if the model errors, the run visibly stalls with `proposer_failed` in the log rather than drifting.
 ```

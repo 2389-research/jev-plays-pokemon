@@ -300,12 +300,14 @@ def test_reflect_style_proposal_emits_target_event_and_folds_note():
 
 def test_dispatch_servo_talk_without_tile_uses_navigate_leg():
     loop, _ = _nav_loop(0)
-    calls = []
-    loop._navigate_leg = lambda d, o, b: calls.append("nav")
-    loop._servo_step = lambda d, o, b: calls.append("servo")
+    loop._navigate_leg = lambda d, o, b: "nav-result"
+    loop._servo_step = lambda d, o, b: "servo-result"
     d_notile = Directive(intent=Intent.TALK_TO, target={"kind": "npc", "map": 0}, success={"talked_on_map": 0})
     d_tile = Directive(intent=Intent.TALK_TO, target={"kind": "npc", "map": 0, "x": 2, "y": 2},
                        success={"talked_on_map": 0})
-    loop._dispatch_servo(d_notile, None, set())
-    loop._dispatch_servo(d_tile, None, set())
-    assert calls == ["nav", "servo"]  # no-tile talk -> approach_npc via nav; tile talk -> servo
+    d_travel = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 5}, success={"on_map": 5})
+    # no-tile talk -> nav (approach_npc); tile talk -> servo; travel -> nav. And the servo's RETURN
+    # value is passed through (step_once branches on it).
+    assert loop._dispatch_servo(d_notile, None, set()) == "nav-result"
+    assert loop._dispatch_servo(d_tile, None, set()) == "servo-result"
+    assert loop._dispatch_servo(d_travel, None, set()) == "nav-result"

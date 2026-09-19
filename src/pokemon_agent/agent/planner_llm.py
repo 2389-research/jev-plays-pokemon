@@ -155,9 +155,13 @@ step is complete (like a quest objective), so a step can't be marked done premat
   "talked"            — had a conversation on that map (only when nothing more specific fits).
   "verify:<yes/no question>" — a verifier judges it from game state, when none of the above fit.
 
+When "talk" is true, set "who" to the NPC you must talk to (e.g. "Oak", "the Mart clerk") so the
+agent approaches the RIGHT person, not the nearest one.
+
 Return ONLY JSON:
 {"plan": "one-line summary",
- "steps": [{"map": <int map id>, "talk": <true|false>, "done_when": "<criterion>", "why": "<short>"}]}"""
+ "steps": [{"map": <int map id>, "talk": <true|false>, "who": "<npc name to talk to, e.g. Oak>",
+            "done_when": "<criterion>", "why": "<short>"}]}"""
 
 
 class Planner:
@@ -230,9 +234,14 @@ class Planner:
                 if step.get("talk"):
                     # the talk step's acceptance is the MODEL-authored criterion (e.g. has_item:parcel)
                     # so it can't complete on a random dialog; default to talked_on_map only if unset.
-                    quest.append(Directive(intent=Intent.TALK_TO, target={"kind": "npc", "map": mp},
+                    who = str(step.get("who") or "").strip() or None
+                    tgt = {"kind": "npc", "map": mp}
+                    if who:
+                        tgt["sprite"] = who      # so approach_npc reaches the NAMED person, not the nearest
+                    quest.append(Directive(intent=Intent.TALK_TO, target=tgt,
                                            success=(done or {"talked_on_map": mp}),
-                                           reason=f"quest: talk in {map_name(mp)} [{step.get('done_when') or 'talked'}] — {why_s}"))
+                                           reason=f"quest: talk to {who or 'someone'} in {map_name(mp)} "
+                                                  f"[{step.get('done_when') or 'talked'}] — {why_s}"))
             return quest
         except Exception:
             return []

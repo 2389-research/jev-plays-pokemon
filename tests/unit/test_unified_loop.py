@@ -311,3 +311,25 @@ def test_dispatch_servo_talk_without_tile_uses_navigate_leg():
     assert loop._dispatch_servo(d_notile, None, set()) == "nav-result"
     assert loop._dispatch_servo(d_tile, None, set()) == "servo-result"
     assert loop._dispatch_servo(d_travel, None, set()) == "nav-result"
+
+
+def test_strategize_talk_step_carries_sprite_name():
+    import json as _json
+    plan = {"plan": "deliver", "steps": [{"map": 40, "talk": True, "who": "Oak",
+                                          "done_when": "no_item:Oak's Parcel", "why": "hand it over"}]}
+    class P:
+        def chat_json(self, system, state, image=None): return _json.dumps(plan), 0, {}
+    from pokemon_agent.agent.planner_llm import Planner
+
+    class FakeEmu:
+        def read_memory(self, a): return 0
+    pl = Planner(goal_map=40, strategist=P())
+    import pokemon_agent.agent.planner_llm as m
+    pl_party, pl_items, pl_badges = m.read_party, m.read_items, m.read_badges
+    m.read_party = lambda e: []; m.read_items = lambda e: []; m.read_badges = lambda e: {"count": 0}
+    try:
+        quest = pl.strategize(FakeEmu(), memory=None, why="deliver the parcel")
+    finally:
+        m.read_party, m.read_items, m.read_badges = pl_party, pl_items, pl_badges
+    talk = [d for d in quest if d.intent.name == "TALK_TO"]
+    assert talk and (talk[0].target or {}).get("sprite") == "Oak"

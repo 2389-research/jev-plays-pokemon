@@ -852,9 +852,13 @@ class ReasoningLoop:
             return self._leave_via_nearest_exit(player, obs, blocked_dirs, occupied)
         def pick():
             if sprite:
-                named = [n for n in npcs if str(n.get("sprite") or "").lower() == str(sprite).lower()]
+                s = str(sprite).lower()
+                named = [n for n in npcs
+                         if (nm := str(n.get("sprite") or "").lower()) and (nm in s or s in nm)]
                 if named:
                     return named[0]
+                self.on_event("approach_npc_miss", {"step": self.session.step, "sprite": sprite,
+                                                    "seen": [n.get("sprite") for n in npcs]})
             fresh = [n for n in npcs if not n.get("talked_to")] or npcs
             return min(fresh, key=lambda n: abs(int(n["x"]) - player.x) + abs(int(n["y"]) - player.y))
         npc = pick()

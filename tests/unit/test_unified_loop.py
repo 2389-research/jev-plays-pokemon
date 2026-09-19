@@ -333,3 +333,36 @@ def test_strategize_talk_step_carries_sprite_name():
         m.read_party, m.read_items, m.read_badges = pl_party, pl_items, pl_badges
     talk = [d for d in quest if d.intent.name == "TALK_TO"]
     assert talk and (talk[0].target or {}).get("sprite") == "Oak"
+
+
+def test_approach_npc_substring_matches_named_sprite():
+    # a free-form who ("the Mart clerk") must reach the RAM sprite label "Clerk" via substring match
+    loop, _ = _nav_loop(0)
+    player = SimpleNamespace(x=3, y=3, map_id=0, facing="north")
+    obs = SimpleNamespace(player=player, map_dims=(6, 6),
+                          game_state={"npcs": [{"x": 3, "y": 2, "sprite": "Clerk"}]}, exits=[])
+    move = loop._resolve_target({"kind": "approach_npc", "sprite": "the Mart clerk"},
+                                _d(Intent.TALK_TO), obs, set(), set())
+    assert isinstance(move, InteractAction)  # matched Clerk; adjacent (3,3) + facing north
+
+
+def test_strategize_talk_step_without_who_has_no_sprite():
+    import json as _json
+    plan = {"plan": "x", "steps": [{"map": 40, "talk": True, "who": "   ",
+                                    "done_when": "talked", "why": "y"}]}
+    class P:
+        def chat_json(self, system, state, image=None): return _json.dumps(plan), 0, {}
+    from pokemon_agent.agent.planner_llm import Planner
+    import pokemon_agent.agent.planner_llm as m
+
+    class FakeEmu:
+        def read_memory(self, a): return 0
+    pl = Planner(goal_map=40, strategist=P())
+    pl_party, pl_items, pl_badges = m.read_party, m.read_items, m.read_badges
+    m.read_party = lambda e: []; m.read_items = lambda e: []; m.read_badges = lambda e: {"count": 0}
+    try:
+        quest = pl.strategize(FakeEmu(), memory=None, why="z")
+    finally:
+        m.read_party, m.read_items, m.read_badges = pl_party, pl_items, pl_badges
+    talk = [d for d in quest if d.intent.name == "TALK_TO"]
+    assert talk and "sprite" not in (talk[0].target or {})   # whitespace who -> no sprite key

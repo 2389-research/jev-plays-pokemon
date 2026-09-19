@@ -386,20 +386,26 @@ def test_choose_npc_picks_index_against_objective():
     assert idx == 1 and conf == 0.9
 
 
-def test_approach_npc_uses_jev_to_disambiguate_multiple(monkeypatch):
+def test_approach_npc_uses_jev_pick_over_nearest():
+    # Jev must be able to pick the NON-nearest NPC. Rival is adjacent-north (the nearest); Oak is
+    # 3 tiles SOUTH. If the code used the nearest fallback it would interact with the Rival (player
+    # faces north, adjacent) -> InteractAction. Using Jev's pick it routes SOUTH toward Oak. The
+    # SOUTH MoveAction is only producible by the Jev path, so it distinguishes the two.
     loop, _ = _nav_loop(0)
+    loop.world.ingest_collision(0, 6, 8, {(x, y) for x in range(6) for y in range(8)}, None, None)
 
     class R:
         def choose_npc(self, *, objective, candidates):
-            return 1, 0.9  # pick the 2nd candidate (Oak at 3,2)
+            return 1, 0.9  # index 1 == Oak, the FARTHER npc (not the nearest)
     loop.reasoner = R()
     player = SimpleNamespace(x=3, y=3, map_id=0, facing="north")
-    obs = SimpleNamespace(player=player, map_dims=(6, 6),
-                          game_state={"npcs": [{"x": 5, "y": 5, "sprite": "Rival"},
-                                               {"x": 3, "y": 2, "sprite": "Oak"}]}, exits=[])
+    obs = SimpleNamespace(player=player, map_dims=(6, 8),
+                          game_state={"npcs": [{"x": 3, "y": 2, "sprite": "Rival"},
+                                               {"x": 3, "y": 6, "sprite": "Oak"}]}, exits=[])
     d = Directive(intent=Intent.TALK_TO, target={"kind": "npc", "map": 0}, success={"talked_on_map": 0})
     move = loop._resolve_target({"kind": "approach_npc", "sprite": None}, d, obs, set(), set())
-    assert isinstance(move, InteractAction)
+    # SOUTH = toward Jev's pick (Oak); the nearest-fallback would have interacted with the Rival instead
+    assert isinstance(move, MoveAction) and move.direction == Direction.SOUTH
 
 
 def test_approach_npc_single_candidate_skips_jev():

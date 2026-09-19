@@ -65,6 +65,43 @@ def test_saycan_bias_reranks_among_legal_options():
     assert isinstance(step.action, MoveAction) and step.action.direction == Direction.NORTH
 
 
+class DirClient:
+    """Records the Choice it was handed and returns a scripted direction."""
+    def __init__(self, choice="move_east", confidence=0.9):
+        self.choice, self.confidence = choice, confidence
+
+    def system_one(self, *, state, questions):
+        self.state = state
+        self.criteria = questions["dir"].criteria
+        ans = SimpleNamespace(choice=self.choice, confidence=self.confidence)
+        return SimpleNamespace(answers={"dir": ans}, usage=None)
+
+
+def test_jev_path_step_picks_direction_masks_blocked_and_gets_bfs_hint():
+    from pokemon_agent.agent.typesafe_reasoner import TypeSafeReasoner
+    from pokemon_agent.core.models import Direction
+    c = DirClient("move_east", 0.88)
+    r = TypeSafeReasoner(client=c)
+    nbrs = {"north": "wall", "south": "floor", "east": "floor", "west": "wall"}
+    d, conf, _probs = r.path_step(player={"x": 1, "y": 1}, target=(5, 1), neighbors=nbrs,
+                                  blocked_dirs={"north", "west"}, bfs_suggestion="east")
+    assert d == Direction.EAST and conf == 0.88
+    assert "move_north" not in c.criteria and "move_west" not in c.criteria  # blocked masked out
+    assert set(c.criteria) == {"move_south", "move_east"}
+    assert c.state["bfs_suggestion"] == "move_east"       # BFS hint passed to Jev
+    assert c.state["bearing"] == "target is E (dx=+4, dy=+0)"  # minimal bearing, not a full map
+    assert c.state["neighbors"] == nbrs
+    assert "map_view" not in c.state                      # full map dropped (oversaturation)
+
+
+def test_jev_path_step_all_blocked_returns_none():
+    from pokemon_agent.agent.typesafe_reasoner import TypeSafeReasoner
+    r = TypeSafeReasoner(client=DirClient())
+    d, conf, _probs = r.path_step(player={"x": 0, "y": 0}, target=(0, 5), neighbors={},
+                                  blocked_dirs={"north", "south", "east", "west"})
+    assert d is None
+
+
 def test_no_directive_is_legacy_behavior():
     # a plain call (no directive) keeps all move_* options — unchanged from before
     c = RecClient(choice="move_north")

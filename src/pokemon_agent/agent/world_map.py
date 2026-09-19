@@ -37,20 +37,26 @@ class WorldMap:
         self.bounds: dict[int, tuple[int, int]] = {}
         # counter / "talk-over" cells per map (talk to an NPC across one), from the ingest
         self.counters: dict[int, set[tuple[int, int]]] = {}
+        # per-map semantic terrain class per cell (floor/wall/grass/water/ledge_*/door/counter)
+        self.terrain: dict[int, dict[tuple[int, int], str]] = {}
 
     # --- updates ----------------------------------------------------------
     def ingest_collision(self, map_id: int, width: int, height: int,
-                         walkable: set[tuple[int, int]], counters: set[tuple[int, int]] | None = None) -> None:
+                         walkable: set[tuple[int, int]], counters: set[tuple[int, int]] | None = None,
+                         terrain: dict[tuple[int, int], str] | None = None) -> None:
         """Load a full-map collision grid (from RAM's wOverworldMap) as ground truth: every
         cell in bounds becomes FLOOR or WALL. This gives the navigator the whole map up front
         so it can route around buildings instead of guessing over unseen tiles. ``counters`` are
-        talk-over cells (an NPC can be talked to across one)."""
+        talk-over cells (an NPC can be talked to across one). ``terrain`` is the per-cell semantic
+        class (floor/wall/grass/water/ledge_*/door/counter) for the map the agent reasons on."""
         m = self.tiles[map_id]
         for y in range(height):
             for x in range(width):
                 m[(x, y)] = FLOOR if (x, y) in walkable else WALL
         self.bounds[map_id] = (width, height)  # so bounds-aware BFS can't leak off the map edge
         self.counters[map_id] = set(counters or ())
+        if terrain:
+            self.terrain[map_id] = dict(terrain)
 
     def observe(self, player: PlayerState | None, local_ascii: list[str] | None) -> None:
         if player is None:
@@ -149,6 +155,61 @@ class WorldMap:
                     line += "N"
                 elif (x, y) in doors:
                     line += "D"
+                else:
+                    line += {FLOOR: ".", WALL: "#"}.get(m.get((x, y)), "?")
+            rows.append(line)
+        return rows
+
+    # symbol per terrain class + the legend describing each symbol's PROPERTIES, so the model
+    # never has to guess what a tile is (derived from RAM + the pokered tile catalog).
+    SEMANTIC_SYMBOLS = {
+        "floor": ".", "wall": "#", "grass": "G", "water": "~",
+        "ledge_s": "v", "ledge_w": "<", "ledge_e": ">", "door": "D", "counter": "C",
+    }
+    SEMANTIC_LEGEND = (
+        "MAP LEGEND (each tile's real properties, not a guess):\n"
+        "  @ = you    . = path (walkable)    # = obstacle: tree/rock/building/fence (NOT walkable)\n"
+        "  G = tall grass (walkable; wild Pokemon appear here)    ~ = water (NOT walkable without Surf)\n"
+        "  D = door/exit (step onto it to change area)    C = counter (talk to an NPC across it)\n"
+        "  N = a person/NPC (walking into them talks, doesn't move you)\n"
+        "  v/</> = LEDGE, one-way: 'v' you may hop SOUTH, '<' hop WEST, '>' hop EAST; you can NEVER "
+        "go back up a ledge, so treat them as walls except in the hop direction.\n"
+        "  x = COLUMN (two header rows: tens then units), y = ROW (labeled at left, increases south)."
+    )
+
+    def render_semantic(
+        self,
+        player: PlayerState | None,
+        exits: list[dict] | None = None,
+        npcs: set[tuple[int, int]] | None = None,
+    ) -> list[str] | None:
+        """The full-map view the agent navigates on, using SEMANTIC terrain symbols (grass, water,
+        ledges, doors, counters) from RAM + the tile catalog — with a legend so the model knows
+        exactly what each tile is. Falls back to floor/wall where terrain wasn't decoded."""
+        if player is None:
+            return None
+        bounds = self.bounds.get(player.map_id)
+        if bounds is None:
+            return None
+        w, h = bounds
+        m = self.tiles[player.map_id]
+        ter = self.terrain.get(player.map_id, {})
+        doors = {(e["x"], e["y"]) for e in (exits or [])}
+        npcs = npcs or set()
+        rows = list(self.SEMANTIC_LEGEND.split("\n"))
+        rows.append("     " + "".join(str((x // 10) % 10) for x in range(w)))
+        rows.append("     " + "".join(str(x % 10) for x in range(w)))
+        for y in range(h):
+            line = f"y{y:2d} |"
+            for x in range(w):
+                if (x, y) == (player.x, player.y):
+                    line += "@"
+                elif (x, y) in npcs:
+                    line += "N"
+                elif (x, y) in doors:
+                    line += "D"
+                elif (x, y) in ter:
+                    line += self.SEMANTIC_SYMBOLS.get(ter[(x, y)], "?")
                 else:
                     line += {FLOOR: ".", WALL: "#"}.get(m.get((x, y)), "?")
             rows.append(line)

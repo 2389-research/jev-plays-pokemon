@@ -48,6 +48,61 @@ def _loop(goal_map=99, map_id=0, events=None):
     return loop, emu
 
 
+def test_warp_exit_dir_steps_off_the_map_edge():
+    from pokemon_agent.core.models import Direction
+    f = ReasoningLoop._warp_exit_dir
+    assert f((3, 7), (4, 8)) == Direction.SOUTH   # bottom-row door -> step south (buildings)
+    assert f((3, 0), (4, 8)) == Direction.NORTH
+    assert f((0, 3), (4, 8)) == Direction.WEST
+    assert f((3, 3), (4, 8)) == Direction.EAST    # right-edge door
+    assert f((2, 2), None) == Direction.SOUTH     # unknown dims -> default downward
+
+
+def test_servo_steps_through_door_when_standing_on_it():
+    # the Viridian Mart wedge: LunaRoute says "go to map 40" (needs to exit the building via the
+    # door), the player is already standing ON the exit warp -> the servo must step THROUGH it
+    # (off the bottom edge) to fire the warp, not report "arrived" and wait forever.
+    from types import SimpleNamespace
+    from pokemon_agent.core.models import Direction, MoveAction
+    loop, _ = _loop(map_id=42)
+    loop.memory.graph.next_hop = lambda a, b: (1, (3, 7))  # next hop toward 40 is map 1 via the door
+    player = SimpleNamespace(x=3, y=7, map_id=42, facing="east")
+    obs = SimpleNamespace(player=player, map_dims=(4, 8), game_state={},
+                          exits=[{"x": 3, "y": 7, "dest_map": 1}, {"x": 4, "y": 7, "dest_map": 1}])
+    d = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 40}, success={"on_map": 40})
+    move = loop._servo_step(d, obs, set())
+    assert isinstance(move, MoveAction) and move.direction == Direction.SOUTH
+
+
+def test_navigate_leg_steps_through_door_on_arrival():
+    # L2/BFS delivered us onto the Mart exit warp -> _navigate_leg must step THROUGH it (south,
+    # off the bottom edge) to fire the warp, not report arrived and wait (the Mart wedge).
+    from types import SimpleNamespace
+    from pokemon_agent.core.models import Direction, MoveAction
+    loop, _ = _loop(map_id=42)
+    loop.memory.graph.next_hop = lambda a, b: (1, (3, 7))
+    player = SimpleNamespace(x=3, y=7, map_id=42, facing="east")
+    obs = SimpleNamespace(player=player, map_dims=(4, 8), game_state={},
+                          exits=[{"x": 3, "y": 7, "dest_map": 1}])
+    d = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 40}, success={"on_map": 40})
+    move = loop._navigate_leg(d, obs, set())
+    assert isinstance(move, MoveAction) and move.direction == Direction.SOUTH
+
+
+def test_navigate_leg_falls_back_to_exit_tile_without_provider():
+    # no LunaRoute provider (offline/tests) -> L2 falls back to routing toward the exit tile, so
+    # navigation still works deterministically instead of stalling.
+    from types import SimpleNamespace
+    from pokemon_agent.core.models import MoveAction
+    loop, _ = _loop(map_id=42)
+    assert loop.planner.provider is None            # StubReasoner exposes no provider
+    loop.memory.graph.next_hop = lambda a, b: (1, (3, 7))
+    d = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 40}, success={"on_map": 40})
+    wp = loop._pick_waypoint(SimpleNamespace(player=SimpleNamespace(x=1, y=1, map_id=42), exits=[]),
+                             d, goal_dir="south", next_map=1, exit_tile=(3, 7), occupied=set())
+    assert wp == (3, 7)                              # fell back to the exit tile
+
+
 def test_servo_walks_toward_same_map_tile_no_model_call():
     loop, emu = _loop(map_id=0)
     # target is open floor south of the start (2,2) -> servo should step south, no executor

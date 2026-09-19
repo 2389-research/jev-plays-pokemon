@@ -64,34 +64,56 @@ target_map MUST be a real map id from ROUTE or NEIGHBORS (a reachable map), neve
 current map."""
 
 
-WAYPOINT_SYSTEM = """You are the navigation module for a Pokémon Red agent. The deterministic
-pathfinder is STUCK. Pick ONE distant waypoint tile to commit to that breaks the deadlock.
+WAYPOINT_SYSTEM = """You are the NAVIGATOR (tier 2, tactical) for a Pokémon Red agent. The
+strategic layer has chosen where to go; your job each leg is to look at the grid and pick the
+next TILE to head to that makes progress toward that goal. A deterministic pathfinder (BFS) then
+walks the agent to the tile you choose, and you are asked again once it arrives or can't get
+closer — so pick the best next stepping-stone, not the whole path.
 
-COORDINATE SYSTEM (read carefully): the grid uses (x, y). x = COLUMN, read off the TWO header
-rows — the first is the tens digit, the second the units digit — 0 at the left, increasing to
-the RIGHT. y = ROW, labeled 'y<n>' at the start of each line, increasing DOWNWARD (south);
-y=0 is the NORTH edge. Symbols: '@'=you, '.'=walkable floor, '#'=wall, 'N'=an NPC (NEVER
-target it — walking into one only talks to it), 'D'=a door/building exit, '?'=unknown.
+WHAT YOU MUST DO — OBJECTIVE and DESTINATION tell you where you are going and why (e.g. "reach
+Viridian Mart — next hop is Viridian City to the north"). Always move toward it.
 
-GOAL_DIR says which way the next area is. WHY_STUCK says what went wrong.
+MEMORY — you are NOT memoryless. RECENT_TRAIL is your last several frames as
+"(x,y)mMAP action -> result" (watch for bouncing between the same tiles). RECENT_WAYPOINTS is
+the tiles you already picked — do NOT pick the same ones again or reverse course; if you keep
+ending up in the same place, commit to the EXIT_TILE / GOAL_DIR and push through.
 
-Pick a WALKABLE '.' tile that is: (a) reachable from '@' WITHOUT crossing '#' or 'N';
-(b) AT LEAST 4 tiles away (Manhattan); (c) as far along a clear path toward GOAL_DIR as you
-can. TRACE the path tile-by-tile in your head first and make sure every step is '.'.
+COORDINATE SYSTEM: the grid uses (x, y). x = COLUMN (two header rows: tens then units, left→right).
+y = ROW (labeled 'y<n>' at left, increasing DOWNWARD/south; y=0 is north). The MAP_VIEW begins with
+a LEGEND that tells you exactly what every symbol is and its properties (path, grass, water, wall,
+ledges with their one-way hop direction, doors, counters, NPCs) — READ IT; you never have to guess
+what a tile is. Note grass ('G') IS walkable (wild battles there); '#' and water are NOT walkable;
+ledges are one-way.
+
+GOAL_DIR says which way the next area is. EXIT_TILE, when given, is the door/edge tile that
+leaves toward the goal — heading to it (or onto it) is usually the right move; you MAY pick it
+directly, and SHOULD once you're close. WHY says what happened last.
+
+Pick a WALKABLE tile (path 'G' grass or a door) that is: (a) reachable from '@' WITHOUT crossing a
+'#'/water/NPC or going the wrong way up a ledge; (b) a real step toward GOAL_DIR / EXIT_TILE and NOT
+one you keep revisiting; (c) as far along a clear path toward the destination as you can see. TRACE
+the path tile-by-tile in your head first and make sure every step is walkable.
 
 Return ONLY JSON: {"path": "(x,y)->(x,y)->...", "x": <int>, "y": <int>, "reason": "..."}"""
 
 
 STRATEGIST_SYSTEM = """You are the STRATEGIC planner (tier 2) for an agent playing Pokémon Red,
-working toward the first gym (Brock, in Pewter City, north). The fast navigator is BLOCKED and
-cannot proceed on its own — usually a STORY GATE (an NPC who won't move, a locked path, a
-required item/errand). Work out the SEQUENCE of steps that unblocks progress.
+working toward the first gym (Brock, in Pewter City, north). You are called when the agent is
+BLOCKED or UNSURE and needs a plan: a STORY GATE (an NPC who won't move, a locked path, a required
+item/errand), OR a NEED it doesn't know how to satisfy — most commonly it must HEAL (party HP is
+low) but doesn't know WHERE the nearest Poké Center is or how to get there. Work out the SEQUENCE
+of steps that resolves the situation and routes the agent to the right place.
 
 TOOL — knowledge base: you can look things up in a Pokémon Red guide/knowledge base before you
 commit. To search, reply with ONLY {"search": ["query1", "query2"]} (1-3 queries); you'll get
 the results back in KNOWLEDGE_GATHERED and can search again or finalize. SEARCH FIRST to ground
-your plan in the guides rather than guessing, especially for story gates. SEARCH_ROUNDS_LEFT
-tells you how many more searches you may do; when it hits 0 you must output the final plan.
+your plan in the guides rather than guessing — especially WHERE things are (which map has the
+nearest Poké Center / Mart / the next objective) and story gates. SEARCH_ROUNDS_LEFT tells you how
+many more searches you may do; when it hits 0 you must output the final plan.
+
+HEALING: if WHY_BLOCKED says HP is low / needs to heal, plan to go to the nearest Poké Center map
+and talk to the nurse, with done_when "hp_frac>=0.95" on the talk step; then a final step to
+resume the main objective. Use the MAPS table to pick the correct Poké Center map id.
 
 You are given: WHY_BLOCKED, CURRENT_MAP (id + name), PARTY, ITEMS, BADGES, MAPS (an id→name
 table — use these exact ids), and KNOWLEDGE_GATHERED (results of your searches so far — TRUST
@@ -108,6 +130,7 @@ step is complete (like a quest objective), so a step can't be marked done premat
   "has_item:<name>"   — that item is now in the bag (talk to the Mart clerk -> has_item:Oak's Parcel).
   "no_item:<name>"    — that item is gone (delivered/used: give parcel to Oak -> no_item:Oak's Parcel).
   "level>=<N>"        — party reached level N.   "badges>=<N>" — earned N badges.
+  "hp_frac>=<F>"      — party healed to fraction F of max HP (talk to a Poké Center nurse -> hp_frac>=0.95).
   "talked"            — had a conversation on that map (only when nothing more specific fits).
   "verify:<yes/no question>" — a verifier judges it from game state, when none of the above fit.
 
@@ -250,25 +273,37 @@ class Planner:
             if low.startswith(pre):
                 num = s[len(pre):].strip()
                 return {key: f">={num}"} if num.isdigit() else None
+        if low.startswith("hp_frac>="):  # healed to a fraction of max HP (e.g. after a Poké Center)
+            num = s[len("hp_frac>="):].strip()
+            try:
+                return {"hp_frac": f">={float(num)}"}
+            except ValueError:
+                return None
         if low.startswith("verify:"):
             return {"verify": s[len("verify:"):].strip()}  # judged by the verifier (not RAM)
         return None
 
-    def _waypoint(self, emu, context: dict) -> tuple[int, int, str] | None:
-        """Ask LunaRoute for a concrete walkable tile on the CURRENT map to route toward, to
-        break a deterministic-pathfinder deadlock. VALIDATES the pick against the deterministic
-        reachable set (rejecting walls / unreachable / too-close picks) and retries once — so a
-        good presentation does the heavy lifting and a guardrail catches the occasional miss.
-        Returns (x, y, reason) or None."""
+    def next_waypoint(self, emu, context: dict) -> tuple[int, int, str] | None:
+        """L2 (tactical navigator): ask LunaRoute for the next grid tile on the CURRENT map to
+        head toward, given the ASCII map view + the goal direction / exit tile. BFS then routes
+        to it; this is called again on arrival or when BFS can't get closer. VALIDATES the pick
+        against the deterministic reachable set (rejecting walls / unreachable picks) and retries
+        once. Returns (x, y, reason) or None (caller falls back to the exit tile)."""
         if self.provider is None:
             return None
         player = context.get("player") or {}
         reachable = context.get("reachable")  # set[(x,y)] BFS-reachable, avoiding NPCs
+        exit_tile = context.get("exit_tile")  # (x,y) door/edge toward the goal, if known
         state = {
+            "objective": context.get("objective"),
+            "destination": context.get("destination"),
             "goal_dir": context.get("goal_dir"),
             "player": player,
             "map_view": context.get("map_view"),
-            "why_stuck": context.get("why", "the pathfinder is oscillating without progress"),
+            "exit_tile": list(exit_tile) if exit_tile else None,
+            "recent_trail": context.get("recent_trail"),
+            "recent_waypoints": context.get("recent_waypoints"),
+            "why": context.get("why", "pick the next tile toward the goal"),
         }
         for _ in range(2):  # one retry if the model picks an invalid tile
             try:
@@ -279,11 +314,17 @@ class Planner:
                 continue
             reason = str(data.get("reason") or "").strip() or "head toward the goal corridor"
             px, py = player.get("x"), player.get("y")
-            far_enough = px is None or (abs(x - px) + abs(y - py) >= 3)
-            ok = far_enough and (reachable is None or (x, y) in reachable)
+            # the pick must be reachable and not the tile we're already on; the exit tile is
+            # always a legal pick (heading onto the door is how you leave), even if it's close.
+            is_exit = exit_tile is not None and (x, y) == tuple(exit_tile)
+            progresses = (px is None) or (x, y) != (px, py)
+            ok = progresses and (is_exit or reachable is None or (x, y) in reachable)
             if ok:
                 return x, y, reason
         return None
+
+    # backward-compat alias (was the stuck-only deadlock breaker)
+    _waypoint = next_waypoint
 
     # --- travel: LLM picks the target map; graph does the geometry + fallback --
     def _travel(self, emu, memory, why: str) -> Directive:

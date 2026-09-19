@@ -274,6 +274,93 @@ class TypeSafeReasoner:
         )
         return step, latency, usage
 
+    # --- L3 PATHING via Jev: step-by-step direction choice toward a target tile ----
+    def path_step(self, *, player, target, neighbors, recent=None, blocked_dirs=None, objective="",
+                  bfs_suggestion=None, hp_frac=None):
+        """Jev as the pathfinder: choose ONE step direction (1-of-4) toward TARGET (x, y).
+
+        Context is deliberately MINIMAL — an A/B over map sizes showed the full map is
+        oversaturation (no accuracy gain, ~2x tokens, LOWER confidence). Jev gets only what an L3
+        step decision needs: the bearing to the target, its 4 immediate NEIGHBOR tiles (semantic
+        class), the BFS shortest-path suggestion, and a short trail. The global routing is BFS's
+        and L2's job. Returns (Direction | None, confidence, probabilities)."""
+        from typesafe_sdk import Choice
+        from ..core.models import Direction
+
+        blocked_dirs = set(blocked_dirs or ())
+        opts = {
+            "move_north": "step north — up, toward SMALLER y",
+            "move_south": "step south — down, toward LARGER y",
+            "move_east": "step east — right, toward LARGER x",
+            "move_west": "step west — left, toward SMALLER x",
+        }
+        criteria = {k: v for k, v in opts.items() if k[len("move_"):] not in blocked_dirs}
+        if not criteria:
+            return None, 0.0, None
+        dx, dy = int(target[0]) - int(player["x"]), int(target[1]) - int(player["y"])
+        compass = ("N" if dy < 0 else "S" if dy > 0 else "") + ("E" if dx > 0 else "W" if dx < 0 else "")
+        state = {
+            "task": "Move one tile toward TARGET on a walkable tile.",
+            "bearing": f"target is {compass or 'here'} (dx={dx:+d}, dy={dy:+d})",
+            "neighbors": neighbors or {},  # {north/south/east/west: floor|wall|grass|water|ledge_*|door|counter}
+            "bfs_suggestion": (f"move_{bfs_suggestion}" if bfs_suggestion else None),
+            "recent_trail": recent or [],
+            "objective": objective,
+        }
+        if hp_frac is not None:  # decision-relevant: whether it's safe to risk a wild encounter
+            state["party_hp_frac"] = round(float(hp_frac), 2)
+        instr = (
+            "You are the step-by-step NAVIGATOR. Pick the direction that moves one tile toward TARGET "
+            "(see BEARING) onto a walkable NEIGHBOR — 'floor'/'grass' are walkable, 'wall'/'water' are "
+            "not, ledges are one-way. BFS_SUGGESTION is the deterministic shortest-path hint: usually "
+            "take it. A 'grass' tile can trigger a WILD BATTLE. When PARTY_HP_FRAC is LOW (roughly "
+            "< 0.35), PREFER a non-grass walkable neighbor that still heads toward TARGET — override "
+            "BFS to avoid a fight you might lose. When HP is healthy, grass is fine (it also lets you "
+            "grind). Do NOT reverse your RECENT_TRAIL (no oscillating)."
+        )
+        t = time.time()
+        resp = self.client.system_one(state=state, questions={"dir": Choice(instructions=instr, criteria=criteria)})
+        latency = int((time.time() - t) * 1000)
+        ans = resp.answers["dir"]
+        conf = float(getattr(ans, "confidence", 0.0) or 0.0)
+        probs = getattr(ans, "probabilities", None)
+        choice = ans.choice if isinstance(ans.choice, str) else ""
+        try:
+            return Direction(choice[len("move_"):]), conf, probs
+        except Exception:
+            return None, conf, probs
+
+    # --- Jev picks the ROUTING POLICY for a leg (a calibrated 1-of-N objective choice) ----
+    def choose_policy(self, *, hp_frac=None, level=None, level_target=0, objective="",
+                      area="", grass_nearby=True):
+        """Jev chooses the routing OBJECTIVE for this leg — one meaningful call, not per-step. The
+        weighted router then executes it deterministically. Returns (policy, confidence)."""
+        from typesafe_sdk import Choice
+        criteria = {
+            "shortest": "take the shortest path; ignore grass (normal travelling)",
+            "dodge-grass": "avoid tall grass / wild battles — for when the party is HURT or you're "
+                           "on an important errand (delivering, low HP) and can't risk a fight",
+            "farm-exp": "deliberately route THROUGH grass to trigger wild battles and GRIND — for "
+                        "when the party is UNDER-LEVELED for what's ahead and healthy enough to fight",
+        }
+        state = {
+            "task": "Pick the routing objective for the next stretch toward the destination.",
+            "party_hp_frac": (round(float(hp_frac), 2) if hp_frac is not None else None),
+            "party_level": level, "level_target_for_next_gym": level_target or None,
+            "objective": objective, "area": area, "grass_on_this_map": bool(grass_nearby),
+        }
+        instr = (
+            "Choose the routing objective. Prefer 'dodge-grass' when PARTY_HP_FRAC is low or the "
+            "objective is a delivery/errand you shouldn't risk. Prefer 'farm-exp' when PARTY_LEVEL "
+            "is below LEVEL_TARGET_FOR_NEXT_GYM and HP is healthy (grind on the way). Otherwise "
+            "'shortest'. If GRASS_ON_THIS_MAP is false the choice barely matters — pick 'shortest'."
+        )
+        resp = self.client.system_one(state=state, questions={"pol": Choice(instructions=instr, criteria=criteria)})
+        ans = resp.answers["pol"]
+        conf = float(getattr(ans, "confidence", 0.0) or 0.0)
+        pol = ans.choice if isinstance(ans.choice, str) and ans.choice in criteria else "shortest"
+        return pol, conf
+
     # --- menu handling: choose an option in an open list/yes-no menu ---------
     def _menu_step(self, menu: dict, state: dict, previous):
         from typesafe_sdk import Choice

@@ -105,6 +105,9 @@ def main() -> None:
     ap.add_argument("--reflect-every", type=int, default=0,
                     help="run a vision planner every N steps (0 = off). Try 10.")
     ap.add_argument("--planner-model", default="glm-5.3-vision", help="vision model for reflection")
+    ap.add_argument("--pather", default="bfs", choices=["bfs", "jev", "policy"],
+                    help="overworld pathing: 'bfs' (deterministic shortest), 'jev' (calibrated per-step direction), "
+                         "or 'policy' (Jev picks a routing objective per leg — shortest/dodge-grass/farm-exp — a weighted router executes)")
     ap.add_argument("--strategist-model", default="glm-5.3",
                     help="strong text model for tier-2 quest planning when the path is story-gated")
     ap.add_argument("--orrery-workspace", default=None,
@@ -251,7 +254,7 @@ def main() -> None:
                              checkpoint_dir=(ckpt_dir if args.checkpoint_every else None),
                              goal_map=args.goal_map, level_target=args.level_target,
                              strategist_provider=strategist_provider, knowledge=knowledge,
-                             on_event=on_event_r)
+                             pather=args.pather, on_event=on_event_r)
         print(f"running REASON mode decider={args.decider} model={rmodel} vision={use_vision} goal={args.goal!r}")
         try:
             loop.run(max_steps=args.steps)

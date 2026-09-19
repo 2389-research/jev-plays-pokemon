@@ -45,17 +45,21 @@ class RunRecorder:
         to the next record. Wrap an existing on_event by calling this alongside it."""
         self._events.append({"kind": kind, **{k: v for k, v in payload.items() if k != "step"}})
 
-    def record(self, *, step: int, obs, action, result) -> None:
+    def record(self, *, step: int, obs, action, result, extra: dict | None = None) -> None:
         try:
             gs = obs.game_state or {}
             player = obs.player.model_dump() if obs.player else None
             mid = obs.player.map_id if obs.player else None
             shot_rel = self._maybe_shot(step)
             state_rel = self._maybe_state(step, mid)
+            mv = getattr(obs, "map_view", None)
             rec = {
                 "step": step, "t": round(time.time(), 2),
                 "map_id": mid, "map_name": getattr(obs.player, "map_name", None) if obs.player else None,
                 "player": player,
+                # the coordinate-labeled ASCII map the agent navigates on + what it's tracking now
+                "map_view": ("\n".join(mv) if isinstance(mv, list) else mv),
+                **(extra or {}),
                 "context": {k: gs.get("context", {}).get(k) for k in ("kind", "in_battle", "screen_text")},
                 "npcs": [{"x": n.get("x"), "y": n.get("y"), "sprite": n.get("sprite"),
                           "kind": n.get("kind"), "facing": n.get("facing")} for n in (gs.get("npcs") or [])],

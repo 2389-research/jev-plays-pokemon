@@ -240,11 +240,11 @@ def main() -> None:
                 print(f"--resume: no checkpoint at {ckpt_dir}, starting fresh")
         recorder = None
         if not args.no_record and args.mode == "reason":
-            from pokemon_agent.logging.run_recorder import RunRecorder
-            rec_dir = Path(args.record_dir) if args.record_dir else (
-                states_dir.parent / "runs" / f"rec-{time.strftime('%Y%m%d-%H%M%S')}")
+            from pokemon_agent.logging.run_recorder import RunRecorder, unique_run_dir
+            rec_dir = unique_run_dir(Path(args.record_dir) if args.record_dir else (
+                states_dir.parent / "runs" / f"rec-{time.strftime('%Y%m%d-%H%M%S')}"))
             recorder = RunRecorder(emu, rec_dir)
-            print(f"recording run -> {rec_dir}  (view: cd {rec_dir} && python -m http.server, open viewer.html)")
+            print(f"recording run -> {rec_dir}  (view: serve runs/ and open _viewer.html, or open {rec_dir}/viewer.html)")
 
         loop = ReasoningLoop(builder=ObservationBuilder(emu), controller=ActionController(emu),
                              reasoner=reasoner, session=session, logger=logger, recorder=recorder,

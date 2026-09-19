@@ -24,6 +24,23 @@ _VIEWER_SRC = Path(__file__).with_name("viewer.html")   # per-run viewer (this r
 _PLAYER_SRC = Path(__file__).with_name("player.html")   # multi-run player w/ run dropdown (runs/ root)
 
 
+def unique_run_dir(base: str | Path) -> Path:
+    """A run directory that never clobbers an existing one. If ``base`` is free, use it as-is
+    (so a first run keeps its nice name); otherwise append a timestamp (then a counter) so
+    re-running the same ``--record-dir`` writes a NEW dir instead of appending to / overwriting
+    the previous run's log and screenshots."""
+    base = Path(base)
+    if not base.exists():
+        return base
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    cand = base.parent / f"{base.name}-{stamp}"
+    n = 2
+    while cand.exists():
+        cand = base.parent / f"{base.name}-{stamp}-{n}"
+        n += 1
+    return cand
+
+
 class RunRecorder:
     def __init__(self, emu, run_dir: str | Path, *, shot_every: int = 1,
                  state_every: int = 0):

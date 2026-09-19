@@ -645,8 +645,9 @@ class ReasoningLoop:
 
     def _navigate_leg(self, directive: Directive, obs, blocked_dirs: set[str]):
         """UNIFIED within-map navigation: the mid-level proposer picks ONE typed target toward the
-        goal (held across frames), Jev picks the routing policy, and the deterministic router enacts
-        it. When a target can't make progress, RE-PROPOSE a different one (the get-unstuck job);
+        goal (held across frames), Jev picks the routing policy for tile targets (doors and edge
+        crossings route deterministically), and the router enacts it. When a target can't make
+        progress, RE-PROPOSE a different one (the get-unstuck job);
         only after that also fails do we return None so L1 (quest/strategize) escalates. The old
         'return None -> wait forever' freeze is gone: the default target is always 'exit' (leave)."""
         player = obs.player
@@ -1273,13 +1274,15 @@ class ReasoningLoop:
                                result=result, plan=None, screenshot=shot)
         if self.recorder is not None:  # full-fidelity record of everything the agent saw this step
             d = self._directive
+            tgt = self._target
             extra = {
                 "objective": (d.reason if d else None),
                 "directive": ({"intent": d.intent.value, "target": d.target, "success": d.success}
                               if d else None),
                 "in_quest": self._in_quest,
                 "quest_remaining": [q.reason for q in self._quest],
-                "waypoint": (list(self._leg_wp) if self._leg_wp else None),
+                "waypoint": ([tgt["x"], tgt["y"]] if tgt and tgt.get("kind") == "tile" else None),
+                "target": tgt,   # the unified mid-level typed target (kind/x/y/map/sprite)
                 "goal_map": self.goal_map,
                 "routing_policy": (self._policy if self.pather == "policy" else self.pather),
             }

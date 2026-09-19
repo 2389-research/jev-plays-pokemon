@@ -33,6 +33,23 @@ You must provide your **own legally-owned** copy of the Pokémon Red ROM:
 - Place it at `roms/pokemon-red.gb`, **or**
 - Pass its path explicitly with `--rom <path>`.
 
+## Before running the agent: play the intro yourself
+
+The agent boots from a **save state**, not from a cold cartridge — it does not
+handle the opening cutscene, the name-entry keyboards, or Oak's introduction. So
+before you hand control to the bot, play the beginning yourself and make the
+choices you want to live with for the whole run:
+
+- **Name your character** (and your rival) — the agent inherits whatever you pick.
+- Sit through Oak's intro and get to a point you want the bot to take over from
+  (e.g. standing in the lab, or already holding your starter).
+- Save a state there. The default natural save is `roms/pokemon_red.gb.state`
+  (auto-written by `scripts/play.py` when you close its window); the agent starts
+  from it via `run_agent.py --load-state`, or from any fixture in `states/`.
+
+If you skip this, the agent will be dropped into the naming keyboard / cutscene
+with no idea what to do. Name your character first.
+
 ## Secrets
 
 Copy your API keys into a `.env` file at the project root (e.g. `OPENAI_API_KEY=...`).

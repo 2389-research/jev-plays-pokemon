@@ -51,6 +51,7 @@ REPLAN_COOLDOWN = 8   # min steps between soft replans (stuck/low-conf) — enfo
 QUEST_STEP_BUDGET = 60  # steps to keep working one quest step before re-strategizing (anti-churn)
 JEV_OVERRIDE_CONF = 0.6  # Jev may override the BFS pathing suggestion only at/above this confidence
 POLICY_BUDGET = 15       # steps a Jev-chosen routing policy runs before it's re-selected for the area
+JEV_NPC_CONF = 0.4  # trust Jev's NPC pick only at/above this confidence (else fall back to nearest)
 WARP_BACK = 0xFF     # a warp's dest_map of 0xFF means "return to the map you came from" (wLastMap)
 TARGET_REPROPOSE_LIMIT = 2  # times the proposer may re-pick a DIFFERENT target to unstick before L1
 
@@ -845,15 +846,17 @@ class ReasoningLoop:
 
     def _approach_npc(self, target, directive, obs, blocked_dirs, occupied):
         """Resolve an ``approach_npc`` target: choose the person, reach them, interact when adjacent +
-        facing. Choice order (cheap+deterministic first): a pick already cached for this leg; a named
-        sprite (exact/substring); Jev's calibrated pick among MULTIPLE candidates against the objective;
-        else the nearest not-yet-talked. The pick is cached on the target so it's stable across frames."""
+        facing. Choice order (cheap+deterministic first): track the leg's already-chosen npc BY LOCALITY
+        (robust to moving / duplicate-labelled / anonymous NPCs); a named sprite (exact/substring);
+        Jev's calibrated pick among MULTIPLE candidates against the objective (only when confident);
+        else the nearest not-yet-talked. The pick is cached by POSITION on the target so Jev fires ~once
+        per leg and we keep following the same person as they move."""
         player = obs.player
         npcs = [n for n in ((obs.game_state or {}).get("npcs") or []) if "x" in n and "y" in n]
         if not npcs:
             return self._leave_via_nearest_exit(player, obs, blocked_dirs, occupied)
         sprite = target.get("sprite") if isinstance(target, dict) else target
-        cached = target.get("picked") if isinstance(target, dict) else None
+        picked_xy = target.get("picked") if isinstance(target, dict) else None
 
         def by_name(name):
             s = str(name).lower()
@@ -861,8 +864,8 @@ class ReasoningLoop:
             return hits[0] if hits else None
 
         npc = None
-        if cached:                              # stick with the leg's pick (match by sprite label)
-            npc = by_name(cached)
+        if picked_xy is not None:               # track the leg's chosen npc by locality (moves/dupes/anon ok)
+            npc = min(npcs, key=lambda n: abs(int(n["x"]) - picked_xy[0]) + abs(int(n["y"]) - picked_xy[1]))
         if npc is None and sprite:              # a named who -> exact/substring match
             npc = by_name(sprite)
             if npc is None:
@@ -873,15 +876,15 @@ class ReasoningLoop:
                       "talked_to": bool(n.get("talked_to"))} for n in npcs]
             idx, conf = self.reasoner.choose_npc(
                 objective=(directive.reason if directive else ""), candidates=cands)
-            if idx is not None:
+            if idx is not None and conf >= JEV_NPC_CONF:   # trust the calibrated pick only when confident
                 npc = npcs[idx]
                 self.on_event("npc_pick", {"step": self.session.step, "sprite": npc.get("sprite"),
                                            "conf": round(float(conf), 2), "n": len(npcs)})
         if npc is None:                         # fallback: nearest not-yet-talked
             fresh = [n for n in npcs if not n.get("talked_to")] or npcs
             npc = min(fresh, key=lambda n: abs(int(n["x"]) - player.x) + abs(int(n["y"]) - player.y))
-        if isinstance(target, dict) and npc.get("sprite"):
-            target["picked"] = npc.get("sprite")   # cache for the rest of the leg (stable, no re-pick)
+        if isinstance(target, dict):
+            target["picked"] = [int(npc["x"]), int(npc["y"])]   # cache BY POSITION (works for spriteless too)
 
         nx, ny = int(npc["x"]), int(npc["y"])
         adj = {Direction.NORTH: (nx, ny + 1), Direction.SOUTH: (nx, ny - 1),

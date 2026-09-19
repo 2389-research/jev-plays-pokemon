@@ -416,3 +416,26 @@ def test_approach_npc_single_candidate_skips_jev():
     d = Directive(intent=Intent.TALK_TO, target={"kind": "npc", "map": 0}, success={"talked_on_map": 0})
     move = loop._resolve_target({"kind": "approach_npc", "sprite": None}, d, obs, set(), set())
     assert isinstance(move, InteractAction)
+
+
+def test_approach_npc_caches_jev_pick_across_frames():
+    loop, _ = _nav_loop(0)
+    loop.world.ingest_collision(0, 6, 8, {(x, y) for x in range(6) for y in range(8)}, None, None)
+    calls = {"n": 0}
+
+    class R:
+        def choose_npc(self, *, objective, candidates):
+            calls["n"] += 1
+            return 1, 0.9  # Oak
+    loop.reasoner = R()
+    target = {"kind": "approach_npc", "sprite": None}
+    d = Directive(intent=Intent.TALK_TO, target={"kind": "npc", "map": 0}, success={"talked_on_map": 0})
+
+    def obs_at(px, py):
+        player = SimpleNamespace(x=px, y=py, map_id=0, facing="north")
+        return SimpleNamespace(player=player, map_dims=(6, 8),
+                               game_state={"npcs": [{"x": 3, "y": 2, "sprite": "Rival"},
+                                                    {"x": 3, "y": 6, "sprite": "Oak"}]}, exits=[])
+    loop._resolve_target(target, d, obs_at(3, 3), set(), set())  # frame 1: Jev picks
+    loop._resolve_target(target, d, obs_at(3, 4), set(), set())  # frame 2: uses the position cache, NOT Jev
+    assert calls["n"] == 1 and target.get("picked") is not None

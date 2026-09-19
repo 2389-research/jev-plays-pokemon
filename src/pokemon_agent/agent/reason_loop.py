@@ -450,6 +450,7 @@ class ReasoningLoop:
         self._recent_wps.clear()
         self._policy = None          # and re-picks the routing policy for the new objective
         self._target = None
+        self._target_map = None      # defensive: never pair a stale map with the (now cleared) target
         self._target_stuck = 0
         self._recent_targets.clear()
         self.on_event("directive", {"step": self.session.step, "intent": self._directive.intent.value,

@@ -99,6 +99,35 @@ Pure function, fully unit-testable. Rules:
 
 Stable ids: assign each quest step an `id` at creation (`q{n}`), so `remove`/status can reference it.
 
+#### Data model: the QuestStep ↔ Directive bridge (the canonical plan vs the executor queue)
+
+Today the executor has no per-step plan object — it holds `self._quest: deque[Directive]`, `popleft()`s
+FIFO, and one strategist step expands into 1–2 `Directive`s (a TRAVEL to the map + an optional
+TALK_TO). The reconciler needs a canonical plan to edit, so we introduce one and define the mapping
+explicitly:
+
+- **Canonical plan (new):** `self._plan_steps: list[QuestStep]` held on the loop and persisted in
+  `AgentMemory`. A `QuestStep` = `{id, map, talk, who, done_when, why, status}` with
+  `status ∈ {done, active, pending, wedged}`. This is the single source of truth L1 edits.
+- **Compiled view:** `self._quest` (deque[Directive]) is a *derived* compilation of the **pending**
+  steps. Each QuestStep compiles to its 1–2 Directives exactly as `strategize` does today (TRAVEL +
+  optional TALK_TO), and every compiled Directive carries a `quest_id` = its step's id (new field on
+  `Directive`, optional, default None — backward compatible).
+- **Status is derived, not stored redundantly:** the `active` step is the one whose Directive is the
+  live `self._directive`; steps whose Directives have all been satisfied/popped are `done`; the rest
+  are `pending`. A step becomes `wedged` when the wedge trigger fires on its active Directive.
+  `active_idx` for the reconciler = the index in `_plan_steps` of the active step (found via the live
+  Directive's `quest_id`).
+- **Reconcile → recompile cycle:** each L1 cycle: (1) L1 emits add/remove against `_plan_steps`;
+  (2) `reconcile_quests` merges into a new `_plan_steps` (preserving done + active per the rules);
+  (3) the **pending** region is re-compiled into a fresh `self._quest` deque; (4) the currently
+  active `self._directive` keeps running untouched (it is not recompiled mid-flight). So editing the
+  plan never interrupts the step in progress, and a wedged step is replaced by recompiling just that
+  step's directives from L1's replacement.
+- **Completion advance:** when the active Directive's `success` predicate fires (unchanged), the
+  loop marks that step `done` and pops the next Directive from the recompiled deque (as today), i.e.
+  `_directive = self._quest.popleft()`.
+
 ### Component 3 — Needs as signals + emergency reflex
 
 - A `signals(emu, state)` helper computes `hp_frac`, `min_level`, `blocked_for_n`, badge/key-item
@@ -106,10 +135,34 @@ Stable ids: assign each quest step an `id` at creation (`q{n}`), so `remove`/sta
   decisions** (it may add a `hp_frac>=0.95` heal quest or a `level>=N` grind step), not a hardcoded
   arbiter intent.
 - **One** deterministic reflex remains, for safety a slow L1 tick can't cover: **near-faint**
-  (`hp_frac < HEAL_EMERGENCY` (≈0.15) or any conscious party member at 0 HP) forces an immediate
-  heal directive that preempts, independent of L1. This is the only need still handled outside L1.
-- The `NeedsArbiter`'s role shrinks to: detect battle mode (owned by the battle controller) and the
-  emergency-heal reflex. Travel/grind/heal *planning* moves into L1. (BATTLE stays a mode controller.)
+  (`hp_frac < HEAL_EMERGENCY` (≈0.15) or any **fainted** party member — `needs.any_fainted`) forces
+  an immediate heal directive that preempts, independent of L1. This is the only need still handled
+  outside L1.
+
+### Directive management becomes plan-driven (what replaces `arbiter.intent`)
+
+Today `_manage_directive` is driven by `self.arbiter.intent(emu)` (TRAVEL/GRIND/HEAL) plus a
+priority-suspend stack (`_INTENT_PRIORITY`) and an intent-change replan trigger (`_should_replan`:
+replan when `intent != directive.intent`). Once L1 owns the plan, the executive is **always operating
+from the quest plan** (effectively always "in quest") and the intent no longer drives directives:
+
+- **The plan is the sole source of directives.** `_manage_directive` selects the active step's
+  Directive from the compiled queue; there is no separate arbiter-intent directive path. If
+  `_plan_steps` is ever empty, L1's next cycle fills it; as an interim floor the loop synthesizes a
+  single default step `{travel to goal_map, done_when: on_map:<goal>}` so there is always an active
+  directive.
+- **Replan trigger changes:** the old `intent != directive.intent` trigger is removed. A "replan" now
+  means **an L1 cycle changed the plan** (reconcile produced adds/removes/replacements) or **a step
+  wedged**. The `_replan_next`/servo-fail signals become *inputs to L1* (via `blocked_for_n`), not a
+  separate directive rewrite.
+- **Preemption changes:** the `_INTENT_PRIORITY` suspend/stack machinery is replaced by exactly one
+  preemption — the **emergency-heal reflex** injects a heal directive ahead of the plan and restores
+  the plan when HP is safe. All other "needs" are handled by L1 inserting steps, not by preemption.
+- **`NeedsArbiter` is NOT deleted and its unit tests stay green.** Its `intent()`/`needs.*` helpers
+  remain a pure library, reused for (a) computing the `signals` fed to L1 and (b) the emergency-heal
+  reflex. What changes is that **the executive stops calling `arbiter.intent` to drive directives** —
+  so `tests/unit/test_needs_arbiter.py` is unaffected, but the executive tests that assert
+  intent-driven behavior DO change (see Testing).
 
 ### Component 4 — Cadence & triggers
 
@@ -132,7 +185,8 @@ context gains the current `milestone` so its short-term targets are framed by L1
 2. **Emergency reflex:** if near-faint → force heal directive, skip L1 this step.
 3. **L1 gate:** if a cadence/event trigger fires → call `revise_quests` → `reconcile_quests` →
    update the queue + `AgentPlan`; emit `l1_review` (with `change`/assessment) + `quest` events.
-4. Directive management picks the active quest step (as today).
+4. Directive management picks the active step's Directive from the compiled queue (plan-driven; no
+   `arbiter.intent` path). On success, mark the step `done` and pop the next Directive.
 5. L2 `propose_target` (now also given `milestone`) → L3 Jev + router → move.
 
 ## Error handling
@@ -155,15 +209,30 @@ context gains the current `milestone` so its short-term targets are framed by L1
   deliver) → reconciler inserts → executor routes toward the Mart/Oak. Wedge one step → the rest of
   the plan survives.
 - **Live:** rival save + `--orrery-workspace` → Viridian → Mart → back to Oak → gate opens → north.
+- **Test impact of the plan-driven rewrite (call out explicitly in the plan):**
+  - `tests/unit/test_needs_arbiter.py` — **unchanged** (arbiter helpers stay a pure library).
+  - `tests/unit/test_executive.py` — the intent-driven tests **change**: `StubArbiter`/intent-based
+    directive selection, the priority-suspend test (`test_higher_need_suspends_current_directive_on_the_stack`),
+    the success→replan test, and the story-gate/quest tests are rewritten against the new
+    plan-driven `_manage_directive` (active step from `_plan_steps` + emergency-heal preemption).
+    The door/exit servo tests are unaffected. The plan must enumerate exactly which executive tests
+    are rewritten vs kept, and add reconciler + L1 + signals/reflex tests.
 
 ## Concrete surface (files)
 
 - `src/pokemon_agent/agent/planner_llm.py` — `revise_quests` + `L1_SYSTEM` (teaches the DSL);
   reuse `_parse_done_when`, `_llm_with_search`. Keep `strategize` or refactor it into `revise_quests`.
-- `src/pokemon_agent/agent/quest_reconciler.py` (new) — `reconcile_quests` + `QuestStep` id/status.
-- `src/pokemon_agent/agent/reason_loop.py` — the L1 gate (cadence/events), signals, emergency-heal
-  reflex, remove the `quest.clear()`-on-wedge path, feed `milestone` to L2, record L1 state.
-- `src/pokemon_agent/agent/needs_arbiter.py` — shrink to battle-mode + emergency-heal.
+- `src/pokemon_agent/agent/quest_reconciler.py` (new) — `QuestStep` (id/status), `reconcile_quests`,
+  and the QuestStep→Directive compilation (TRAVEL + optional TALK_TO, tagged with `quest_id`).
+- `src/pokemon_agent/agent/plan.py` — add optional `quest_id: str | None = None` to `Directive`
+  (backward compatible); `QuestStep` may live here or in `quest_reconciler.py`.
+- `src/pokemon_agent/agent/reason_loop.py` — hold `self._plan_steps`; the L1 gate (cadence/events);
+  signals; emergency-heal reflex; plan-driven `_manage_directive` (remove the `arbiter.intent`
+  directive path, the `_INTENT_PRIORITY` suspend/stack, and the intent-change `_should_replan`
+  trigger); remove the `quest.clear()`-on-wedge path (replace-step instead); feed `milestone` to L2;
+  record L1/plan state in the recorder `extra`.
+- `src/pokemon_agent/agent/needs_arbiter.py` — **kept as a pure library** (intent()/needs.* reused
+  for signals + emergency reflex); the executive simply stops driving directives from it.
 - `scripts/run_agent.py` — `--l1-every` flag (default 5).
 - Tests: `tests/unit/test_quest_reconciler.py`, `tests/unit/test_l1_planner.py`, additions to the
   executive tests + an integration fixture.

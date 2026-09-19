@@ -178,7 +178,6 @@ class ReasoningLoop:
         self._farm_age = 0
         self._steps_since_replan = REPLAN_COOLDOWN  # cooldown counter (bold commitment)
         self._prev_map: int | None = None  # last DISTINCT map (resolves 0xFF "return" warps)
-        self._collision_seen: set[int] = set()  # maps whose full RAM collision we've ingested
         self._recent: deque[str] = deque(maxlen=recent_max)
         self._prev: ReasonStep | None = None
         self._plan = self.memory.plan  # strategic AgentPlan (reflection), separate from the directive
@@ -188,24 +187,22 @@ class ReasoningLoop:
         want_shot = self.vision or bool(self.logger and getattr(self.logger, "wants_screenshot", False))
         obs, shot = self.builder.build(capture_screenshot=want_shot)
         self.session.record_position(obs.player)
-        # FULL-MAP collision from RAM (wOverworldMap): the RAM collision map is GROUND TRUTH for
-        # walkability — it already encodes walls, signs, trees, and ledges as non-walkable (verified
-        # against the game). We trust it and never overwrite it with bump-discovered guesses (those
-        # created permanent FALSE walls that wedged navigation). The only obstacles NOT in it are
-        # moving sprites (NPCs), which we read separately from sprite RAM each step.
-        # Guarded against STALE reads: after a map transition the buffer isn't settled for a few
-        # frames, so a read can decode the PREVIOUS map. We accept a decode only when the player
-        # stands on a walkable cell (always true for a correct read).
+        # FULL-MAP collision from RAM (wOverworldMap) is GROUND TRUTH for walkability — it already
+        # encodes walls, signs, trees, and ledges as non-walkable (verified against the game); the
+        # only obstacles NOT in it are moving sprites (NPCs), read separately from sprite RAM. We
+        # RE-READ it EVERY step (a full-map decode is cheap next to the LLM/Jev calls) rather than
+        # caching once per map: re-reading self-heals a STALE half-settled read on map-entry (it's
+        # overwritten on the next step) and picks up mid-map changes (cut trees, smashed rocks,
+        # opened doors). We reject only a decode that doesn't contain the player — a transition
+        # frame still showing the PREVIOUS map — so we never ingest a mismatched grid.
         if obs.player is not None:
             mid = obs.player.map_id
-            if mid not in self._collision_seen:
-                from ..games.pokemon_red.map_reader import read_collision_map
-                cm = read_collision_map(self.controller.emu)
-                if (cm is not None and cm["map_id"] == mid
-                        and (obs.player.x, obs.player.y) in cm["walkable"]):  # reject stale reads
-                    self.world.ingest_collision(cm["map_id"], cm["width"], cm["height"],
-                                                cm["walkable"], cm.get("counters"), cm.get("terrain"))
-                    self._collision_seen.add(mid)
+            from ..games.pokemon_red.map_reader import read_collision_map
+            cm = read_collision_map(self.controller.emu)
+            if (cm is not None and cm["map_id"] == mid
+                    and (obs.player.x, obs.player.y) in cm["walkable"]):  # reject stale/transition reads
+                self.world.ingest_collision(cm["map_id"], cm["width"], cm["height"],
+                                            cm["walkable"], cm.get("counters"), cm.get("terrain"))
         self.world.observe(obs.player, obs.walkability)
         # the SEMANTIC map (grass/water/ledges/doors + legend) is what the agent reasons on; fall
         # back to the plain floor/wall render before any collision has been ingested.

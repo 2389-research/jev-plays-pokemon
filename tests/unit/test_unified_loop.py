@@ -439,3 +439,28 @@ def test_approach_npc_caches_jev_pick_across_frames():
     loop._resolve_target(target, d, obs_at(3, 3), set(), set())  # frame 1: Jev picks
     loop._resolve_target(target, d, obs_at(3, 4), set(), set())  # frame 2: uses the position cache, NOT Jev
     assert calls["n"] == 1 and target.get("picked") is not None
+
+
+def test_collision_is_reread_every_step_not_cached(monkeypatch):
+    # regression: a STALE/truncated collision read on map-entry must not be cached forever. We
+    # re-read the RAM collision every step, so a later (settled) read corrects a bad earlier one.
+    import pokemon_agent.games.pokemon_red.map_reader as mr
+    calls = {"n": 0}
+
+    def fake_read(emu):
+        calls["n"] += 1
+        if calls["n"] == 1:  # first read: truncated 10-wide (stale map-entry decode)
+            return {"map_id": 0, "width": 10, "height": 18,
+                    "walkable": {(x, y) for x in range(10) for y in range(18)},
+                    "counters": set(), "terrain": {}}
+        return {"map_id": 0, "width": 20, "height": 18,   # settled: full 20-wide
+                "walkable": {(x, y) for x in range(20) for y in range(18)},
+                "counters": set(), "terrain": {}}
+    monkeypatch.setattr(mr, "read_collision_map", fake_read)
+
+    loop, _ = _nav_loop(0)
+    loop.step_once()
+    assert loop.world.bounds[0] == (10, 18)          # ingested the first read
+    loop.step_once()
+    assert loop.world.bounds[0] == (20, 18)           # re-read corrected it (not cached once)
+    assert calls["n"] >= 2                              # collision is read on EVERY step

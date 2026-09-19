@@ -6,7 +6,11 @@ Writes, into ``runs/<run_id>/``:
   * ``shots/NNNNNN.png`` — the screen each step (or every ``shot_every`` steps).
   * ``states/map<M>_step<N>.state`` — a reloadable emulator save state on ENTERING A NEW MAP
     (and periodically), so any newly-seen area can be reloaded and inspected offline.
-  * ``viewer.html`` — a self-contained local viewer to scrub steps (screen + state panel).
+  * ``viewer.html`` — a self-contained local viewer to scrub THIS run (screen + state panel).
+
+It also drops ``runs/_viewer.html`` (one level up) — the multi-run PLAYER with a run-picker
+dropdown, play/pause, speed, and live-follow — so serving ``runs/`` and opening ``_viewer.html``
+lets you browse and play back every run. Serve with ``python -m http.server`` from ``runs/``.
 
 Best-effort: any failure is swallowed so recording never breaks a run.
 """
@@ -16,7 +20,25 @@ import json
 import time
 from pathlib import Path
 
-_VIEWER_SRC = Path(__file__).with_name("viewer.html")
+_VIEWER_SRC = Path(__file__).with_name("viewer.html")   # per-run viewer (this run only)
+_PLAYER_SRC = Path(__file__).with_name("player.html")   # multi-run player w/ run dropdown (runs/ root)
+
+
+def unique_run_dir(base: str | Path) -> Path:
+    """A run directory that never clobbers an existing one. If ``base`` is free, use it as-is
+    (so a first run keeps its nice name); otherwise append a timestamp (then a counter) so
+    re-running the same ``--record-dir`` writes a NEW dir instead of appending to / overwriting
+    the previous run's log and screenshots."""
+    base = Path(base)
+    if not base.exists():
+        return base
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    cand = base.parent / f"{base.name}-{stamp}"
+    n = 2
+    while cand.exists():
+        cand = base.parent / f"{base.name}-{stamp}-{n}"
+        n += 1
+    return cand
 
 
 class RunRecorder:
@@ -37,6 +59,9 @@ class RunRecorder:
         try:
             if _VIEWER_SRC.exists():
                 (self.dir / "viewer.html").write_bytes(_VIEWER_SRC.read_bytes())
+            # drop the multi-run PLAYER at the runs/ root so a single URL browses every run
+            if _PLAYER_SRC.exists():
+                (self.dir.parent / "_viewer.html").write_bytes(_PLAYER_SRC.read_bytes())
         except Exception:
             pass
 

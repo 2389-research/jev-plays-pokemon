@@ -361,6 +361,32 @@ class TypeSafeReasoner:
         pol = ans.choice if isinstance(ans.choice, str) and ans.choice in criteria else "shortest"
         return pol, conf
 
+    def choose_npc(self, *, objective, candidates):
+        """Jev picks WHICH NPC on the map best fits the OBJECTIVE — a calibrated 1-of-N over the
+        candidate people (used to disambiguate when several are present and the name is ambiguous).
+        ``candidates`` is a list of {sprite, x, y, talked_to}. Returns (index | None, confidence)."""
+        from typesafe_sdk import Choice
+        if not candidates:
+            return None, 0.0
+        criteria = {
+            str(i): (f"{c.get('sprite') or 'person'} at ({c.get('x')},{c.get('y')})"
+                     + (" — already talked to" if c.get("talked_to") else ""))
+            for i, c in enumerate(candidates)
+        }
+        state = {"task": "Pick the person to walk up to and talk to for the current objective.",
+                 "objective": objective, "candidates": candidates}
+        instr = ("Choose the ONE person who best fits OBJECTIVE — the specific NPC the plan needs "
+                 "(e.g. Professor Oak for a lab errand, a shop CLERK to buy/collect, the NURSE to heal). "
+                 "Prefer someone NOT already talked to unless the objective needs them again.")
+        resp = self.client.system_one(state=state, questions={"npc": Choice(instructions=instr, criteria=criteria)})
+        ans = resp.answers["npc"]
+        conf = float(getattr(ans, "confidence", 0.0) or 0.0)
+        try:
+            idx = int(ans.choice)
+        except (TypeError, ValueError):
+            return None, conf
+        return (idx if 0 <= idx < len(candidates) else None), conf
+
     # --- menu handling: choose an option in an open list/yes-no menu ---------
     def _menu_step(self, menu: dict, state: dict, previous):
         from typesafe_sdk import Choice

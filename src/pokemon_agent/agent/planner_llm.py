@@ -97,6 +97,27 @@ the path tile-by-tile in your head first and make sure every step is walkable.
 Return ONLY JSON: {"path": "(x,y)->(x,y)->...", "x": <int>, "y": <int>, "reason": "..."}"""
 
 
+PROPOSER_SYSTEM = """You are the MID-LEVEL PROPOSER for a Pokémon Red agent. The strategic layer
+picked WHERE to go (a target map / errand). Each leg you look at the grid and propose ONE concrete,
+machine-usable SHORT-TERM TARGET toward that goal — a deterministic router then enacts it and asks
+you again when you REACH it, get STUCK, or the map changes. You are also the get-unstuck mechanism:
+when WHY says the last target was unreachable, propose something DIFFERENT (a new tile, or leave).
+
+Return ONLY ONE JSON object, one of these kinds:
+  {"kind":"tile","x":<int>,"y":<int>,"note":"..."}   head to a walkable coordinate on THIS map
+  {"kind":"exit","note":"..."}                        leave this building/area toward the goal
+  {"kind":"enter","map":<int>,"note":"..."}           step through the door leading to that map
+  {"kind":"approach_npc","sprite":"<name>","note":"..."}  reach and talk to that person
+
+COORDINATES: (x,y); x = column (increases EAST), y = row (increases SOUTH, y=0 north). The MAP_VIEW
+starts with a LEGEND naming every symbol (path, grass 'G' is walkable, '#'/water NOT walkable, one-way
+ledges, doors, counters, NPCs) — READ IT, never guess a tile. Pick a 'tile' that is in REACHABLE and a
+real step toward DESTINATION/GOAL_DIR, not one in RECENT_TARGETS you keep revisiting. Prefer EXIT_TILE
+(or {"kind":"exit"}) when the way forward is out a door. Use DEFAULT as a strong hint — it is what the
+deterministic layer would do; accept it unless you can do better or must get unstuck. NOTE is one short
+sentence of your reasoning (this becomes the agent's visible short-term objective)."""
+
+
 STRATEGIST_SYSTEM = """You are the STRATEGIC planner (tier 2) for an agent playing Pokémon Red,
 working toward the first gym (Brock, in Pewter City, north). You are called when the agent is
 BLOCKED or UNSURE and needs a plan: a STORY GATE (an NPC who won't move, a locked path, a required
@@ -134,9 +155,13 @@ step is complete (like a quest objective), so a step can't be marked done premat
   "talked"            — had a conversation on that map (only when nothing more specific fits).
   "verify:<yes/no question>" — a verifier judges it from game state, when none of the above fit.
 
+When "talk" is true, set "who" to the NPC you must talk to (e.g. "Oak", "the Mart clerk") so the
+agent approaches the RIGHT person, not the nearest one.
+
 Return ONLY JSON:
 {"plan": "one-line summary",
- "steps": [{"map": <int map id>, "talk": <true|false>, "done_when": "<criterion>", "why": "<short>"}]}"""
+ "steps": [{"map": <int map id>, "talk": <true|false>, "who": "<npc name to talk to, e.g. Oak>",
+            "done_when": "<criterion>", "why": "<short>"}]}"""
 
 
 class Planner:
@@ -209,9 +234,14 @@ class Planner:
                 if step.get("talk"):
                     # the talk step's acceptance is the MODEL-authored criterion (e.g. has_item:parcel)
                     # so it can't complete on a random dialog; default to talked_on_map only if unset.
-                    quest.append(Directive(intent=Intent.TALK_TO, target={"kind": "npc", "map": mp},
+                    who = str(step.get("who") or "").strip() or None
+                    tgt = {"kind": "npc", "map": mp}
+                    if who:
+                        tgt["sprite"] = who      # so approach_npc reaches the NAMED person, not the nearest
+                    quest.append(Directive(intent=Intent.TALK_TO, target=tgt,
                                            success=(done or {"talked_on_map": mp}),
-                                           reason=f"quest: talk in {map_name(mp)} [{step.get('done_when') or 'talked'}] — {why_s}"))
+                                           reason=f"quest: talk to {who or 'someone'} in {map_name(mp)} "
+                                                  f"[{step.get('done_when') or 'talked'}] — {why_s}"))
             return quest
         except Exception:
             return []
@@ -325,6 +355,81 @@ class Planner:
 
     # backward-compat alias (was the stuck-only deadlock breaker)
     _waypoint = next_waypoint
+
+    def propose_target(self, emu, context: dict) -> dict:
+        """The unified mid-level proposer: ONE typed short-term target toward the goal, and the
+        get-unstuck mechanism.
+
+        Failure policy (the important part): a CONFIGURED provider that can't produce a usable target
+        is a BUG we surface, not one we hide. So:
+          * no provider wired (offline / tests): return context['default'] — the deterministic target,
+            because running with no LLM is intentional there, not an error.
+          * a provider IS wired but the call errors / returns empty|garbage / names an unreachable tile
+            after the retry: return {"kind":"unresolved","reason":...} so the loop can flag it loudly
+            (a 'proposer_failed' event) and BREAK VISIBLY, instead of silently wandering deterministically.
+        Never returns None."""
+        default = context.get("default") or {"kind": "exit"}
+        if self.provider is None:
+            return default
+        reachable = context.get("reachable")
+        exit_tile = context.get("exit_tile")
+        state = {
+            "objective": context.get("objective"),
+            "destination": context.get("destination"),
+            "goal_dir": context.get("goal_dir"),
+            "player": context.get("player"),
+            "map_view": context.get("map_view"),
+            "exit_tile": list(exit_tile) if exit_tile else None,
+            "npcs": context.get("npcs"),
+            "recent_trail": context.get("recent_trail"),
+            "recent_targets": context.get("recent_targets"),
+            "default": default,
+            "why": context.get("why", "pick the next target toward the goal"),
+        }
+        reason = "no response"
+        last_raw = None
+        for _ in range(2):  # one retry on an invalid pick
+            try:
+                content, _, _ = self.provider.chat_json(PROPOSER_SYSTEM, state)
+                last_raw = content
+                data = json.loads(strip_fences(content))
+                kind = data.get("kind")
+            except Exception as e:
+                reason = f"call/parse failed: {e}"
+                continue
+            note = str(data.get("note") or "").strip()
+            if kind == "tile":
+                try:
+                    x, y = int(data["x"]), int(data["y"])
+                except (KeyError, TypeError, ValueError):
+                    reason = "tile missing x/y"
+                    continue
+                px = (context.get("player") or {}).get("x")
+                py = (context.get("player") or {}).get("y")
+                is_exit = exit_tile is not None and (x, y) == tuple(exit_tile)
+                progresses = (px is None) or (x, y) != (px, py)
+                if progresses and (is_exit or reachable is None or (x, y) in reachable):
+                    return {"kind": "tile", "x": x, "y": y, "note": note}
+                reason = f"tile ({x},{y}) unreachable / no-op"
+                continue
+            if kind == "enter":
+                try:
+                    return {"kind": "enter", "map": int(data["map"]), "note": note}
+                except (KeyError, TypeError, ValueError):
+                    reason = "enter missing map"
+                    continue
+            if kind == "approach_npc":
+                sprite = (data.get("sprite") or None)
+                if not sprite:
+                    reason = "approach_npc missing sprite"
+                    continue
+                return {"kind": "approach_npc", "sprite": sprite, "note": note}
+            if kind == "exit":
+                return {"kind": "exit", "note": note}
+            reason = f"unknown kind {kind!r}"
+        # a wired provider failed to produce a usable target -> surface it; do NOT guess deterministically
+        return {"kind": "unresolved", "reason": reason, "raw": (str(last_raw)[:300] if last_raw else None),
+                "note": f"proposer failed: {reason}"}
 
     # --- travel: LLM picks the target map; graph does the geometry + fallback --
     def _travel(self, emu, memory, why: str) -> Directive:

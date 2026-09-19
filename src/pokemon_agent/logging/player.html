@@ -1,0 +1,176 @@
+<!doctype html>
+<title>Pokémon Agent — Run Player</title>
+<meta charset="utf-8">
+<style>
+  :root { color-scheme: light dark; }
+  body { margin: 0; font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; background:#111; color:#ddd; }
+  header { padding: 8px 12px; background:#000; position:sticky; top:0; z-index:2; display:flex; gap:10px; align-items:center; flex-wrap:wrap;}
+  header input[type=range]{ flex:1; min-width:220px; height:22px; cursor:pointer; accent-color:#2fae68; }
+  select, button { background:#1a1a1a; color:#ddd; border:1px solid #444; border-radius:4px; padding:4px 9px; font:inherit; cursor:pointer; }
+  button:hover { border-color:#666; }
+  button.on { background:#1f6f43; border-color:#2fae68; color:#fff; }
+  button#playpause { min-width:60px; font-weight:bold; }
+  label.speed { color:#888; } label.speed select{ padding:2px 4px; }
+  .wrap { display:flex; gap:16px; padding:12px; align-items:flex-start; flex-wrap:wrap; }
+  img#screen { image-rendering: pixelated; width:360px; max-width:100%; background:#000; border:1px solid #333; }
+  .col { display:flex; flex-direction:column; gap:8px; }
+  #map { min-width:280px; }
+  #state { flex:1; min-width:300px; }
+  .k { color:#7aa2f7; } .v { color:#e0af68; } .muted{color:#888;} .go{color:#9ece6a;}
+  table { border-collapse:collapse; } td,th{ padding:1px 8px 1px 0; text-align:left; }
+  .ev { color:#9ece6a; } .badge{ background:#222; border:1px solid #444; border-radius:4px; padding:1px 6px; margin-right:6px; display:inline-block; margin-bottom:3px;}
+  h3 { margin: 10px 0 3px; color:#bb9af7; font-size:12px; text-transform:uppercase; letter-spacing:.5px;}
+  pre { white-space:pre; margin:2px 0; font-size:12px; line-height:1.15; }
+  pre#mapview { background:#0a0a0a; border:1px solid #333; padding:6px; overflow:auto; max-height:60vh;}
+  #live.on::before{ content:"● "; color:#ff5f5f; }
+  .pill{ background:#182030; border:1px solid #2a3550; border-radius:4px; padding:2px 6px; }
+</style>
+<header>
+  <label class=muted>run <select id=run></select></label>
+  <button id=first title="first step">⏮</button>
+  <button id=prev title="previous step (←)">◀</button>
+  <button id=playpause title="play / pause (space)">▶ play</button>
+  <button id=next title="next step (→)">▶</button>
+  <button id=last title="latest step">⏭</button>
+  <input type=range id=slider min=0 value=0 step=1>
+  <span id=pos class=muted></span>
+  <label class=speed>speed <select id=speed>
+    <option value=400>0.5x</option><option value=200 selected>1x</option>
+    <option value=100>2x</option><option value=40>5x</option><option value=16>fast</option>
+  </select></label>
+  <button id=live title="follow the latest run live">live</button>
+</header>
+<div class=wrap>
+  <div class=col>
+    <img id=screen alt="(no screenshot this step)">
+    <div id=objective></div>
+  </div>
+  <div class=col id=map>
+    <h3>ascii map (what the agent navigates)</h3>
+    <pre id=mapview>—</pre>
+  </div>
+  <div id=state></div>
+</div>
+<script>
+let steps = [], i = 0, runDir = '', runsMeta = [];
+let playing = false, follow = false, playTimer = null, refreshTimer = null, listTimer = null;
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const clamp = n => Math.max(0, Math.min(n, steps.length - 1));
+
+async function listRuns() {
+  let dirs = [];
+  try {
+    const html = await (await fetch('./', {cache:'no-store'})).text();
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    dirs = [...doc.querySelectorAll('a[href]')].map(a => a.getAttribute('href'))
+      .filter(h => h && h.endsWith('/') && !h.startsWith('/') && !h.startsWith('?') && h !== '../');
+  } catch (e) {}
+  const metas = await Promise.all(dirs.map(async d => {
+    try { const r = await fetch(d + 'log.jsonl', {method:'HEAD', cache:'no-store'});
+      return r.ok ? { dir:d, mtime: r.headers.get('Last-Modified') ? Date.parse(r.headers.get('Last-Modified')) : 0 } : null;
+    } catch { return null; }
+  }));
+  return metas.filter(Boolean).sort((a,b)=>b.mtime-a.mtime);
+}
+async function fetchSteps(dir) {
+  const txt = await (await fetch(dir + 'log.jsonl', {cache:'no-store'})).text();
+  return txt.trim().split('\n').filter(Boolean).map(l=>{try{return JSON.parse(l)}catch{return null}}).filter(Boolean);
+}
+async function loadRun(dir, toEnd) {
+  runDir = dir; $('run').value = dir;
+  steps = await fetchSteps(dir);
+  $('slider').max = Math.max(0, steps.length - 1);
+  i = toEnd ? steps.length - 1 : 0;
+  render();
+}
+function setPlaying(on){
+  playing = on;
+  $('playpause').textContent = on ? '⏸ pause' : '▶ play';
+  $('playpause').classList.toggle('on', on);
+  clearInterval(playTimer);
+  if (on) {
+    const ms = +$('speed').value;
+    playTimer = setInterval(() => {
+      if (i < steps.length - 1) { i = clamp(i+1); render(); }
+      else if (!follow) { setPlaying(false); }   // reached the end and not following live -> stop
+      // if following live, just wait here; the refresh loop will extend `steps` and we continue
+    }, ms);
+  }
+}
+function setFollow(on){ follow = on; $('live').classList.toggle('on', on); if(on){ i = clamp(steps.length-1); render(); } }
+function fmtTarget(t){ if(!t) return '—'; return ['kind','map','x','y'].filter(k=>t[k]!==undefined).map(k=>k+'='+t[k]).join(' '); }
+
+function render() {
+  if (!steps.length) { $('state').textContent = 'no steps yet'; $('screen').src=''; $('mapview').textContent='—'; return; }
+  i = clamp(i);
+  $('slider').value = i;
+  const r = steps[i];
+  $('pos').textContent = `step ${r.step} · ${i+1}/${steps.length}` + (follow?' · live':'');
+  $('screen').src = r.shot ? runDir + r.shot + '?' + r.step : '';
+  $('mapview').textContent = r.map_view || '(no map_view logged this step)';
+  const p = r.player || {}, d = r.directive || {}, quest = r.quest_remaining||[];
+  $('objective').innerHTML = `
+    <h3>objective</h3><div class=pill><span class=go>${esc(r.objective||'—')}</span></div>
+    <div style="margin-top:4px"><span class=k>intent</span> <span class=v>${esc(d.intent||'—')}</span>
+       &nbsp;<span class=k>target</span> ${esc(fmtTarget(d.target))}
+       &nbsp;<span class=k>done_when</span> ${esc(JSON.stringify(d.success||'—'))}</div>
+    <div><span class=k>goal map</span> <span class=v>${esc(r.goal_map)}</span>
+       &nbsp;<span class=k>L2 waypoint</span> <span class=v>${r.waypoint?('('+r.waypoint[0]+','+r.waypoint[1]+')'):'—'}</span>
+       &nbsp;<span class=k>routing policy</span> <span class=pill style="color:#ff9e64">${esc(r.routing_policy||'—')}</span></div>
+    ${r.in_quest ? `<h3>quest todo (${quest.length})</h3>`+quest.map(q=>`<div class=muted>• ${esc(q)}</div>`).join('') : ''}`;
+  const npcs = (r.npcs||[]).map(n=>`<tr><td>(${n.x},${n.y})</td><td>${esc(n.sprite)}</td><td class=muted>${esc(n.kind)}</td></tr>`).join('');
+  const evs = (r.events||[]).map(e=>`<span class="badge ev">${esc(e.kind)}${e.policy?': '+esc(e.policy)+' c'+e.conf:''}${e.dir?': '+esc(e.dir)+(e.bfs?'/bfs '+esc(e.bfs):'')+' c'+e.conf:''}${e.query?': '+esc(e.query):''}${e.reason?' — '+esc(e.reason):''}</span>`).join(' ');
+  $('state').innerHTML = `
+    <div><span class=k>map</span> <span class=v>${r.map_id}</span> ${esc(r.map_name||'')} &nbsp; <span class=k>pos</span> <span class=v>(${p.x},${p.y})</span> facing ${esc(p.facing)}</div>
+    <div><span class=k>ctx</span> ${esc((r.context||{}).kind)} ${(r.context||{}).screen_text?'· “'+esc((r.context).screen_text)+'”':''}</div>
+    <h3>action → result</h3><pre style="white-space:pre-wrap"><span class=v>${esc(JSON.stringify(r.action))}</span> → ${esc(r.result)} ${r.detail?'· '+esc(r.detail):''}</pre>
+    ${evs?'<h3>events this step</h3>'+evs:''}
+    <h3>party / items</h3><pre style="white-space:pre-wrap">${esc((r.party||[]).join(', ')||'—')}\nitems: ${esc((r.items||[]).join(', ')||'—')}</pre>
+    <h3>npcs (${(r.npcs||[]).length})</h3><table>${npcs||'<tr><td class=muted>none</td></tr>'}</table>`;
+}
+
+// --- controls: scrubbing/paging pause live-follow; play walks forward from where you are ---
+$('slider').oninput = e => { setFollow(false); i = +e.target.value; render(); };
+$('prev').onclick = () => { setFollow(false); setPlaying(false); i=clamp(i-1); render(); };
+$('next').onclick = () => { setFollow(false); setPlaying(false); i=clamp(i+1); render(); };
+$('first').onclick = () => { setFollow(false); setPlaying(false); i=0; render(); };
+$('last').onclick = () => { i=clamp(steps.length-1); render(); };
+$('playpause').onclick = () => { if(!playing && i>=steps.length-1 && !follow) i=0; setPlaying(!playing); };  // replay from start if at end
+$('speed').onchange = () => { if(playing) setPlaying(true); };  // restart interval at new speed
+$('live').onclick = () => setFollow(!follow);
+$('run').onchange = e => { setFollow(false); setPlaying(false); loadRun(e.target.value, false); };
+document.onkeydown = e => {
+  if (e.target.tagName === 'SELECT') return;
+  if (e.key===' ') { e.preventDefault(); $('playpause').click(); }
+  if (e.key==='ArrowLeft') $('prev').click();
+  if (e.key==='ArrowRight') $('next').click();
+};
+
+async function refresh(){
+  if (!runDir) return;
+  try {
+    const fresh = await fetchSteps(runDir);
+    if (fresh.length !== steps.length) {
+      const wasAtEnd = i >= steps.length - 1;
+      steps = fresh; $('slider').max = Math.max(0, steps.length-1);
+      if (follow || (playing && wasAtEnd)) i = clamp(steps.length-1);
+      render();
+    }
+  } catch(e){}
+}
+async function refreshList(){
+  runsMeta = await listRuns();
+  const fmtT = ms => ms ? new Date(ms).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '';
+  $('run').innerHTML = runsMeta.map((m,idx)=>`<option value="${m.dir}">${m.dir.replace(/\/$/,'')}${m.mtime?'  ·  '+fmtT(m.mtime):''}${idx===0?'  (newest)':''}</option>`).join('');
+  if (runDir) $('run').value = runDir;
+  if (follow && runsMeta[0] && runsMeta[0].dir !== runDir) await loadRun(runsMeta[0].dir, true);
+}
+(async function init(){
+  await refreshList();
+  if (!runsMeta.length){ $('state').textContent='no runs with a log.jsonl under ./'; return; }
+  await loadRun(runsMeta[0].dir, true);   // newest run, at its latest frame, paused (scrub or hit play)
+  refreshTimer = setInterval(refresh, 1500);
+  listTimer = setInterval(refreshList, 6000);
+})();
+</script>

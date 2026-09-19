@@ -62,7 +62,7 @@ def test_directive_has_optional_quest_id():
 
 **Files:** New `src/pokemon_agent/agent/quest_reconciler.py`; Test `tests/unit/test_quest_reconciler.py`.
 
-The compiler mirrors `strategize`'s expansion exactly: each step → a TRAVEL directive to `map`, then if `talk` a TALK_TO directive (target `{"kind":"npc","map":map[,"sprite":who]}`), both tagged with the step's id. `done_when` is parsed with the existing `Planner._parse_done_when`; the talk step (or the travel step if no talk) carries that as its `success`.
+The compiler follows `strategize`'s expansion shape: each step → a TRAVEL directive to `map`, then if `talk` a TALK_TO directive (target `{"kind":"npc","map":map[,"sprite":who]}`), both tagged with the step's id. `done_when` is parsed with the existing `Planner._parse_done_when`; the talk step (or the travel step if no talk) carries that as its `success`. Two **deliberate** differences from today's `strategize` (both improvements, not bugs): (a) a non-talk step carries its *parsed* criterion rather than being forced to `on_map`; (b) an unparseable `done_when` falls back to `on_map` (travel) — for a talk step you may keep `talked` semantics if preferred, but `on_map` is acceptable. Don't claim byte-for-byte parity with `strategize`.
 
 - [ ] **Step 1: Failing tests**
 ```python
@@ -314,16 +314,42 @@ def test_emergency_on_low_frac():
 
 Introduce the plan machinery WITHOUT yet ripping out the arbiter path — add the L1 gate + `_plan_steps` and a `_run_l1(obs)` that reconciles+recompiles, plus helpers, and unit-test them directly. (6b flips `_manage_directive` to use them and removes the old machinery.)
 
-- [ ] **Step 1: Failing tests** (drive the new helpers directly)
+- [ ] **Step 1: Failing tests** (concrete — use the existing `_loop` helper in `tests/unit/test_executive.py`, which returns `(loop, emu)`; stub `revise_quests` so no LLM runs):
 ```python
-def test_run_l1_inserts_parcel_quest_and_recompiles(monkeypatch):
-    # a fake strategist returns an add; _run_l1 must reconcile into _plan_steps and recompile _quest
-    ...
-    # assert loop._plan_steps has the new step and loop._quest (deque[Directive]) reflects it
-def test_l1_gate_fires_on_cadence_and_events():
-    # legs % N == 0 -> due; blocked_for_n >= BLOCK -> due; otherwise not due (within cooldown)
+from collections import deque
+from pokemon_agent.agent.plan import Intent
+
+def test_run_l1_inserts_and_recompiles():
+    loop, _ = _loop(map_id=1, goal_map=2)
+    loop.planner.revise_quests = lambda emu, ctx: {
+        "change": True, "mission": "reach Pewter", "milestone": "deliver parcel",
+        "add": [{"map": 42, "talk": True, "who": "clerk", "done_when": "has_item:Oak's Parcel", "why": "get parcel"}],
+        "remove": []}
+    obs, _ = loop.builder.build(capture_screenshot=False)
+    loop._run_l1(obs)
+    assert any(s.map == 42 and s.talk for s in loop._plan_steps)          # reconciled into the plan
+    assert isinstance(loop._quest, deque) and any(d.intent == Intent.TALK_TO for d in loop._quest)  # recompiled
+    assert loop._plan is not None and loop._plan.milestone == "deliver parcel"   # durable memory updated
+
+def test_run_l1_no_change_keeps_plan():
+    loop, _ = _loop(map_id=1, goal_map=2)
+    from pokemon_agent.agent.quest_reconciler import QuestStep
+    loop._plan_steps = [QuestStep(id="q1", map=2, done_when="on_map", status="active")]
+    loop.planner.revise_quests = lambda emu, ctx: {"change": False, "add": [], "remove": []}
+    obs, _ = loop.builder.build(capture_screenshot=False)
+    loop._run_l1(obs)
+    assert [s.id for s in loop._plan_steps] == ["q1"]                     # unchanged on no-change
+
+def test_l1_due_is_a_pure_predicate():
+    loop, _ = _loop(goal_map=2)
+    loop.l1_every = 5
+    loop._legs_since_l1, loop._blocked_for_n, loop._l1_event = 0, 0, False
+    assert loop._l1_due() is False
+    loop._legs_since_l1 = 5;  assert loop._l1_due() is True                # cadence
+    loop._legs_since_l1 = 0;  loop._blocked_for_n = 6;  assert loop._l1_due() is True   # blocked (>=BLOCK_TRIGGER)
+    loop._blocked_for_n = 0;  loop._l1_event = True;    assert loop._l1_due() is True   # event flag
 ```
-(Implementer: write concrete versions using `_nav_loop`/a stub strategist; assert `_plan_steps`/`_quest` contents and the `due` predicate.)
+Note: `_l1_due()` is a PURE predicate (no side effects); `_run_l1` resets `_legs_since_l1=0`, `_l1_event=False` after it runs, and ensures `self._plan` is an `AgentPlan` (create one if `None`) before writing `mission`/`milestone`.
 - [ ] **Step 2:** run → FAIL.
 - [ ] **Step 3:** implement, in `ReasoningLoop`:
   - `__init__`: `self._plan_steps: list[QuestStep] = []`, `self._qid = 0`, `self._legs_since_l1 = 0`, `self._blocked_for_n = 0`, `self._l1_event = False`.
@@ -345,17 +371,19 @@ def test_l1_gate_fires_on_cadence_and_events():
   - `test_success_predicate_triggers_replan` → success on the active directive marks its step `done` and advances to the next compiled directive.
   - `test_higher_need_suspends_current_directive_on_the_stack` → **replace** with `test_emergency_heal_preempts_then_restores_plan` (near-faint injects a heal directive ahead of the plan; when HP safe, the plan resumes).
   - `test_story_gate_escalates_to_quest_and_advances_in_order`, `test_wedged_quest_step_re_strategizes_instead_of_abandoning`, `test_low_escalation_score_does_not_quest` → **replace** with L1-driven equivalents: a wedged step is marked `wedged` and L1's next review replaces it (the rest of `_plan_steps` survives); no `_INTENT_PRIORITY`/escalation-score path remains.
+  - **`test_servo_walks_toward_same_map_tile_no_model_call` (test_executive.py:106) MUST be rewritten too** — it currently seeds `loop.arbiter = StubArbiter(TRAVEL)` + `loop.planner = StubPlanner(d)` and asserts `loop._directive is d` after `step_once`. Under plan-driven `_manage_directive` the arbiter/`planner.plan` path is gone and an empty `_plan_steps` synthesizes a default goal step, so both assertions fail. Rewrite it to **seed `loop._plan_steps` + recompile `loop._quest`** with the same on-map tile directive and assert the servo steps south (no model call). (Reviewer-caught unlisted break.)
   - Keep the door/exit servo tests (`test_warp_exit_dir_*`, `test_servo_steps_through_door_*`, `test_navigate_leg_*`) unchanged.
 - [ ] **Step 2:** run the rewritten tests → FAIL (old `_manage_directive` still intent-driven).
 - [ ] **Step 3:** rewrite `_manage_directive(obs)` to be plan-driven:
   1. `signals = game_signals(emu)`; `signals["blocked_for_n"] = self._blocked_for_n`.
-  2. **Emergency reflex:** if `needs_emergency_heal(party)` and the active directive isn't already the heal → set `self._directive` to a heal directive (`Intent.HEAL`, `success={"hp_frac": ">=0.95"}`) and return it (preempt). When HP safe again, drop back to the plan.
+  2. **Emergency reflex:** read `party = read_party(emu)` (or reuse `game_signals`'s party); if `needs_emergency_heal(party)` and the active directive isn't already the heal → set `self._directive` to a heal directive (`Intent.HEAL`, `success={"hp_frac": ">=0.95"}`) and return it (preempt). When HP safe again, drop back to the plan. (`signals.py`'s `needs_emergency_heal` takes a PARTY LIST — it implements its own fainted check; do NOT call `needs.any_fainted(emu)` here, which takes an emu.)
   3. **L1 gate:** if `_l1_due()` → `_run_l1(obs)`.
   4. **Bootstrap/normal:** if `_plan_steps` empty → synthesize a default step `QuestStep(id=_next_qid(), map=goal_map, done_when="on_map")` and recompile.
   5. **Termination/advance:** if `self._directive` is None or `_directive_satisfied(self._directive)` → mark the active step `done` (by `quest_id`), `self._directive = self._quest.popleft()` if any (mark its step `active`), else re-run L1 / keep default.
   6. **Wedge:** replace the `self._quest.clear()` path — when the active step is wedged (servo_fail / blocked_for_n over budget), mark its step `wedged` and set `self._l1_event = True` (L1 will replace it next gate). Do NOT clear the plan.
   - **Remove:** the `arbiter.intent`-driven directive selection, `_INTENT_PRIORITY`/`_dstack` suspend/stack, `_should_replan(intent)`'s intent-change branch, the HEAL errand branch, and `_try_quest`/`_should_escalate` escalation (superseded by periodic L1 + `blocked_for_n`). Keep `_directive_satisfied`, `_carry_plan` (now carrying `_plan_steps`), and the servo/L2/L3 path.
   - Track `blocked_for_n`: increment when a leg makes no progress (reuse the servo-fail/local-loop signal), reset on progress; feed L1.
+  - **Recorder safety (pull forward from Task 8):** `_finish`'s recorder `extra` currently reads `self._in_quest` (reason_loop.py ~1312), which this task removes. In THIS task, update that `extra` dict to drop `_in_quest` and instead record `mission`/`milestone` (from `self._plan`) and `plan_steps` (id/map/status from `self._plan_steps`); keep `quest_remaining` from `self._quest`. Otherwise a live run between 6b and 8 would `AttributeError` (executive tests won't catch it — recorder is None there). Task 8 then only ADDS the L2-milestone wiring + `l1_last`.
 - [ ] **Step 4:** run rewritten tests → PASS; then `uv run python -m pytest -q` → all green (fix any fallout in test_unified_loop/test_executive).
 - [ ] **Step 5:** commit `reason_loop: plan-driven _manage_directive (L1 owns the plan; emergency-heal reflex; no arbiter-intent/priority/escalation path)`.
 
@@ -376,7 +404,7 @@ def test_l1_gate_fires_on_cadence_and_events():
 
 **Files:** Modify `src/pokemon_agent/agent/reason_loop.py` (recorder `extra`, L2 `milestone`); Tests + fixture.
 
-- [ ] **Step 1:** Feed the current `milestone` into `_propose_target`'s context (so L2's targets are framed by L1). Add to the recorder `extra`: `plan_steps` (id/map/status), `mission`, `milestone`, `l1_last` (assessment + change). Unit-test that the recorder `extra` includes `mission`/`plan_steps`.
+- [ ] **Step 1:** Feed the current `milestone` into `_propose_target`'s context (so L2's targets are framed by L1). The recorder `extra` already carries `mission`/`milestone`/`plan_steps`/`quest_remaining` (moved into Task 6b); here just ADD `l1_last` (last review's assessment + change bool). Unit-test that the recorder `extra` includes `mission`/`plan_steps`/`l1_last`.
 - [ ] **Step 2: Integration fixture test** (no live LLM — use a stub strategist that returns the parcel add when `blocked_for_n` is high): assert that after `_run_l1`, `_plan_steps` contains the Mart→parcel→Lab→deliver steps and `_quest` compiles a TALK_TO to Oak with `no_item:Oak's Parcel`. Assert a wedged step is replaced (plan survives).
 - [ ] **Step 3:** `uv run python -m pytest -q` → all green. Report the final count.
 - [ ] **Step 4: Live validation** (manual; needs keys + KB):

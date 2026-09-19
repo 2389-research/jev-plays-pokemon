@@ -738,6 +738,101 @@ class ReasoningLoop:
         return self._bfs_move(player, tgt, interact=False, blocked_dirs=blocked_dirs,
                               occupied=(occupied - {tgt}))
 
+    def _route_to_tile(self, obs, xy, blocked_dirs, avoid):
+        """Route one step toward tile ``xy`` under the active pather (policy / jev / bfs)."""
+        if self.pather == "policy" and getattr(self.reasoner, "choose_policy", None) is not None:
+            return self._policy_route(obs, xy, avoid)
+        if self.pather == "jev" and getattr(self.reasoner, "path_step", None) is not None:
+            return self._jev_path(obs, xy, blocked_dirs, avoid)
+        return self._bfs_move(obs.player, xy, interact=False, blocked_dirs=blocked_dirs, occupied=avoid)
+
+    def _enter_map(self, next_map, obs, blocked_dirs, occupied):
+        """Resolve an ``enter(next_map)`` target: route to the door for that map and step through it.
+        Falls back to leaving via the nearest exit when the specific door isn't in view."""
+        player = obs.player
+        door = next((e for e in (obs.exits or []) if e.get("dest_map") == next_map), None)
+        if door is None:
+            return self._leave_via_nearest_exit(player, obs, blocked_dirs, occupied)
+        dxy = (int(door["x"]), int(door["y"]))
+        if (player.x, player.y) == dxy:  # step THROUGH (don't gate on blocked: the game warps you)
+            d = self._warp_exit_dir(dxy, obs.map_dims)
+            return MoveAction(direction=d) if d is not None else None
+        return self._bfs_move(player, dxy, interact=False, blocked_dirs=blocked_dirs, occupied=occupied)
+
+    def _cross_edge(self, goal_dir, next_map, obs, blocked_dirs, occupied):
+        """Resolve a map-EDGE crossing toward ``goal_dir``: BFS to the boundary edge (funnels through
+        the gap), then step off it."""
+        player = obs.player
+        if goal_dir is not None and self._on_goal_edge(player, obs.map_dims, goal_dir):
+            if goal_dir not in blocked_dirs:
+                return MoveAction(direction=Direction(goal_dir))
+        return self._edge_step(player, obs, goal_dir, next_map, blocked_dirs, occupied)
+
+    def _approach_npc(self, sprite, obs, blocked_dirs, occupied):
+        """Resolve an ``approach_npc`` target: reach the named sprite (or the nearest not-yet-talked
+        person) and interact when adjacent + facing it. Routes around other NPCs."""
+        player = obs.player
+        npcs = [n for n in ((obs.game_state or {}).get("npcs") or []) if "x" in n and "y" in n]
+        if not npcs:
+            return self._leave_via_nearest_exit(player, obs, blocked_dirs, occupied)
+        def pick():
+            if sprite:
+                named = [n for n in npcs if str(n.get("sprite") or "").lower() == str(sprite).lower()]
+                if named:
+                    return named[0]
+            fresh = [n for n in npcs if not n.get("talked_to")] or npcs
+            return min(fresh, key=lambda n: abs(int(n["x"]) - player.x) + abs(int(n["y"]) - player.y))
+        npc = pick()
+        nx, ny = int(npc["x"]), int(npc["y"])
+        adj = {Direction.NORTH: (nx, ny + 1), Direction.SOUTH: (nx, ny - 1),
+               Direction.EAST: (nx - 1, ny), Direction.WEST: (nx + 1, ny)}  # tile you stand on to face npc
+        facing_map = {"north": Direction.NORTH, "south": Direction.SOUTH,
+                      "east": Direction.EAST, "west": Direction.WEST}
+        for d, stand in adj.items():
+            if (player.x, player.y) == stand:
+                if facing_map.get(getattr(player, "facing", None)) == d:
+                    return InteractAction()          # adjacent AND facing -> talk
+                return MoveAction(direction=d)        # adjacent, turn to face (a blocked step turns you)
+        reachable_stand = min(adj.values(), key=lambda c: abs(c[0] - player.x) + abs(c[1] - player.y))
+        return self._bfs_move(player, reachable_stand, interact=False,
+                              blocked_dirs=blocked_dirs, occupied=(occupied - {(nx, ny)}))
+
+    def _resolve_target(self, target, directive, obs, blocked_dirs, occupied):
+        """Turn a typed target ({tile|exit|enter|approach_npc}) into ONE move. Returns a MoveAction /
+        InteractAction, or None when even this target can't make progress (caller then unsticks)."""
+        if not target:
+            return None
+        kind = target.get("kind")
+        player = obs.player
+        if kind == "tile":
+            xy = (int(target["x"]), int(target["y"]))
+            door = next((e for e in (obs.exits or []) if (int(e["x"]), int(e["y"])) == xy), None)
+            if (player.x, player.y) == xy:
+                # a model-named tile that IS an exit door: step THROUGH the warp (the model said "leave
+                # via (4,11)" — honor it), don't just stop on the doormat.
+                if door is not None:
+                    d = self._warp_exit_dir(xy, obs.map_dims)
+                    return MoveAction(direction=d) if d is not None else None
+                return InteractAction() if target.get("interact") else None
+            avoid = set(occupied)
+            return self._route_to_tile(obs, xy, blocked_dirs, avoid)
+        if kind == "enter":
+            return self._enter_map(int(target["map"]), obs, blocked_dirs, occupied)
+        if kind == "approach_npc":
+            return self._approach_npc(target.get("sprite"), obs, blocked_dirs, occupied)
+        if kind == "edge":
+            return self._cross_edge(target.get("dir"), target.get("next_map"), obs, blocked_dirs, occupied)
+        if kind != "exit":
+            return None  # unknown / unresolved kind -> no move (never silently wander)
+        # exit: leave via nearest door; if none, try a boundary-edge crossing toward the goal
+        move = self._leave_via_nearest_exit(player, obs, blocked_dirs, occupied)
+        if move is not None:
+            return move
+        goal_dir = target.get("dir")
+        if goal_dir is None and directive is not None and directive.target_map is not None:
+            goal_dir = next_direction(self.memory.graph, player.map_id, directive.target_map)
+        return self._cross_edge(goal_dir, None, obs, blocked_dirs, occupied)
+
     def _pick_waypoint(self, obs, directive, goal_dir, next_map, exit_tile, occupied):
         """L2: ask LunaRoute for the next grid tile to head toward on this map. It is given the
         current grid PLUS memory (its recent movement trail + its own recent picks) and an

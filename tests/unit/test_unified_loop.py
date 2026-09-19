@@ -1,4 +1,8 @@
+from types import SimpleNamespace
+
 from pokemon_agent.agent.planner_llm import Planner
+from pokemon_agent.agent.plan import Directive, Intent
+from pokemon_agent.core.models import Direction, InteractAction, MoveAction
 
 
 class FakeProvider:
@@ -62,3 +66,74 @@ def test_propose_target_unresolved_payload_has_reason_and_note():
     p = Planner(goal_map=0, provider=FakeProvider("not json"))
     t = p.propose_target(emu=None, context=_ctx())
     assert t["kind"] == "unresolved" and t.get("reason") and t.get("note")
+
+
+def _nav_loop(map_id=42):
+    from pokemon_agent.actions.controller import ActionController
+    from pokemon_agent.agent.reason_loop import ReasoningLoop
+    from pokemon_agent.agent.reasoner import ReasonStep, ReflectionPlan
+    from pokemon_agent.agent.session import Session
+    from pokemon_agent.core.models import GoalState, WaitAction
+    from pokemon_agent.emulator.fake_emulator import FakeEmulator
+    from pokemon_agent.observations.builder import ObservationBuilder
+
+    class Stub:
+        def reflect(self, **k): return ReflectionPlan(), 0, {}
+        def step(self, **k): return ReasonStep(location="", objective="", reasoning="", action=WaitAction(frames=1)), 0, {}
+    emu = FakeEmulator(map_id=map_id)
+    loop = ReasoningLoop(builder=ObservationBuilder(emu), controller=ActionController(emu),
+                         reasoner=Stub(), session=Session(GoalState(primary="p", current="p")),
+                         vision=False, reflect_every=100, goal_map=99)
+    return loop, emu
+
+
+def _d(intent=Intent.TRAVEL):
+    return Directive(intent=intent, target={"kind": "map", "map": 40}, success={"on_map": 40})
+
+
+def test_resolve_enter_steps_through_door_when_on_it():
+    loop, _ = _nav_loop(42)
+    player = SimpleNamespace(x=3, y=7, map_id=42, facing="east")
+    obs = SimpleNamespace(player=player, map_dims=(4, 8), game_state={},
+                          exits=[{"x": 3, "y": 7, "dest_map": 1}])
+    move = loop._resolve_target({"kind": "enter", "map": 1}, _d(), obs, set(), set())
+    assert isinstance(move, MoveAction) and move.direction == Direction.SOUTH
+
+
+def test_resolve_exit_routes_to_nearest_exit_door():
+    loop, _ = _nav_loop(42)
+    cells = {(x, y) for x in range(4) for y in range(8)}
+    loop.world.ingest_collision(42, 4, 8, cells, None, None)
+    player = SimpleNamespace(x=1, y=1, map_id=42, facing="south")
+    obs = SimpleNamespace(player=player, map_dims=(4, 8), game_state={},
+                          exits=[{"x": 3, "y": 7, "dest_map": 1}])
+    move = loop._resolve_target({"kind": "exit"}, _d(), obs, set(), set())
+    assert isinstance(move, MoveAction)
+
+
+def test_resolve_approach_npc_interacts_when_adjacent_and_facing():
+    loop, _ = _nav_loop(0)
+    player = SimpleNamespace(x=3, y=3, map_id=0, facing="north")
+    obs = SimpleNamespace(player=player, map_dims=(6, 6),
+                          game_state={"npcs": [{"x": 3, "y": 2, "sprite": "Oak"}]}, exits=[])
+    move = loop._resolve_target({"kind": "approach_npc", "sprite": "Oak"}, _d(Intent.TALK_TO),
+                                obs, set(), set())
+    assert isinstance(move, InteractAction)
+
+
+def test_resolve_tile_interacts_on_arrival_when_flagged():
+    loop, _ = _nav_loop(0)
+    player = SimpleNamespace(x=2, y=2, map_id=0, facing="south")
+    obs = SimpleNamespace(player=player, map_dims=(6, 6), game_state={}, exits=[])
+    move = loop._resolve_target({"kind": "tile", "x": 2, "y": 2, "interact": True}, _d(Intent.TALK_TO),
+                                obs, set(), set())
+    assert isinstance(move, InteractAction)
+
+
+def test_resolve_tile_that_is_an_exit_door_steps_through():
+    loop, _ = _nav_loop(42)
+    player = SimpleNamespace(x=3, y=7, map_id=42, facing="south")
+    obs = SimpleNamespace(player=player, map_dims=(4, 8), game_state={},
+                          exits=[{"x": 3, "y": 7, "dest_map": 1}])
+    move = loop._resolve_target({"kind": "tile", "x": 3, "y": 7}, _d(), obs, set(), set())
+    assert isinstance(move, MoveAction) and move.direction == Direction.SOUTH

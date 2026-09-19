@@ -366,3 +366,47 @@ def test_strategize_talk_step_without_who_has_no_sprite():
         m.read_party, m.read_items, m.read_badges = pl_party, pl_items, pl_badges
     talk = [d for d in quest if d.intent.name == "TALK_TO"]
     assert talk and "sprite" not in (talk[0].target or {})   # whitespace who -> no sprite key
+
+
+class NpcPickClient:
+    """Fake TypeSafe client: system_one returns a Choice answer selecting a fixed index."""
+    def __init__(self, index, conf=0.9): self._i, self._c = index, conf
+    def system_one(self, *, state, questions):
+        from types import SimpleNamespace as NS
+        return NS(answers={"npc": NS(choice=str(self._i), confidence=self._c, probabilities=None)},
+                  usage=None)
+
+
+def test_choose_npc_picks_index_against_objective():
+    from pokemon_agent.agent.typesafe_reasoner import TypeSafeReasoner
+    r = TypeSafeReasoner(client=NpcPickClient(1))
+    cands = [{"sprite": "Rival", "x": 5, "y": 7, "talked_to": False},
+             {"sprite": "Oak", "x": 3, "y": 2, "talked_to": False}]
+    idx, conf = r.choose_npc(objective="deliver Oak's Parcel to Professor Oak", candidates=cands)
+    assert idx == 1 and conf == 0.9
+
+
+def test_approach_npc_uses_jev_to_disambiguate_multiple(monkeypatch):
+    loop, _ = _nav_loop(0)
+
+    class R:
+        def choose_npc(self, *, objective, candidates):
+            return 1, 0.9  # pick the 2nd candidate (Oak at 3,2)
+    loop.reasoner = R()
+    player = SimpleNamespace(x=3, y=3, map_id=0, facing="north")
+    obs = SimpleNamespace(player=player, map_dims=(6, 6),
+                          game_state={"npcs": [{"x": 5, "y": 5, "sprite": "Rival"},
+                                               {"x": 3, "y": 2, "sprite": "Oak"}]}, exits=[])
+    d = Directive(intent=Intent.TALK_TO, target={"kind": "npc", "map": 0}, success={"talked_on_map": 0})
+    move = loop._resolve_target({"kind": "approach_npc", "sprite": None}, d, obs, set(), set())
+    assert isinstance(move, InteractAction)
+
+
+def test_approach_npc_single_candidate_skips_jev():
+    loop, _ = _nav_loop(0)
+    player = SimpleNamespace(x=3, y=3, map_id=0, facing="north")
+    obs = SimpleNamespace(player=player, map_dims=(6, 6),
+                          game_state={"npcs": [{"x": 3, "y": 2, "sprite": "Oak"}]}, exits=[])
+    d = Directive(intent=Intent.TALK_TO, target={"kind": "npc", "map": 0}, success={"talked_on_map": 0})
+    move = loop._resolve_target({"kind": "approach_npc", "sprite": None}, d, obs, set(), set())
+    assert isinstance(move, InteractAction)

@@ -843,25 +843,46 @@ class ReasoningLoop:
                 return MoveAction(direction=Direction(goal_dir))
         return self._edge_step(player, obs, goal_dir, next_map, blocked_dirs, occupied)
 
-    def _approach_npc(self, sprite, obs, blocked_dirs, occupied):
-        """Resolve an ``approach_npc`` target: reach the named sprite (or the nearest not-yet-talked
-        person) and interact when adjacent + facing it. Routes around other NPCs."""
+    def _approach_npc(self, target, directive, obs, blocked_dirs, occupied):
+        """Resolve an ``approach_npc`` target: choose the person, reach them, interact when adjacent +
+        facing. Choice order (cheap+deterministic first): a pick already cached for this leg; a named
+        sprite (exact/substring); Jev's calibrated pick among MULTIPLE candidates against the objective;
+        else the nearest not-yet-talked. The pick is cached on the target so it's stable across frames."""
         player = obs.player
         npcs = [n for n in ((obs.game_state or {}).get("npcs") or []) if "x" in n and "y" in n]
         if not npcs:
             return self._leave_via_nearest_exit(player, obs, blocked_dirs, occupied)
-        def pick():
-            if sprite:
-                s = str(sprite).lower()
-                named = [n for n in npcs
-                         if (nm := str(n.get("sprite") or "").lower()) and (nm in s or s in nm)]
-                if named:
-                    return named[0]
+        sprite = target.get("sprite") if isinstance(target, dict) else target
+        cached = target.get("picked") if isinstance(target, dict) else None
+
+        def by_name(name):
+            s = str(name).lower()
+            hits = [n for n in npcs if (nm := str(n.get("sprite") or "").lower()) and (nm in s or s in nm)]
+            return hits[0] if hits else None
+
+        npc = None
+        if cached:                              # stick with the leg's pick (match by sprite label)
+            npc = by_name(cached)
+        if npc is None and sprite:              # a named who -> exact/substring match
+            npc = by_name(sprite)
+            if npc is None:
                 self.on_event("approach_npc_miss", {"step": self.session.step, "sprite": sprite,
                                                     "seen": [n.get("sprite") for n in npcs]})
+        if npc is None and len(npcs) > 1 and getattr(self.reasoner, "choose_npc", None) is not None:
+            cands = [{"sprite": n.get("sprite"), "x": int(n["x"]), "y": int(n["y"]),
+                      "talked_to": bool(n.get("talked_to"))} for n in npcs]
+            idx, conf = self.reasoner.choose_npc(
+                objective=(directive.reason if directive else ""), candidates=cands)
+            if idx is not None:
+                npc = npcs[idx]
+                self.on_event("npc_pick", {"step": self.session.step, "sprite": npc.get("sprite"),
+                                           "conf": round(float(conf), 2), "n": len(npcs)})
+        if npc is None:                         # fallback: nearest not-yet-talked
             fresh = [n for n in npcs if not n.get("talked_to")] or npcs
-            return min(fresh, key=lambda n: abs(int(n["x"]) - player.x) + abs(int(n["y"]) - player.y))
-        npc = pick()
+            npc = min(fresh, key=lambda n: abs(int(n["x"]) - player.x) + abs(int(n["y"]) - player.y))
+        if isinstance(target, dict) and npc.get("sprite"):
+            target["picked"] = npc.get("sprite")   # cache for the rest of the leg (stable, no re-pick)
+
         nx, ny = int(npc["x"]), int(npc["y"])
         adj = {Direction.NORTH: (nx, ny + 1), Direction.SOUTH: (nx, ny - 1),
                Direction.EAST: (nx - 1, ny), Direction.WEST: (nx + 1, ny)}  # tile you stand on to face npc
@@ -903,7 +924,7 @@ class ReasoningLoop:
         if kind == "enter":
             return self._enter_map(int(target["map"]), obs, blocked_dirs, occupied)
         if kind == "approach_npc":
-            return self._approach_npc(target.get("sprite"), obs, blocked_dirs, occupied)
+            return self._approach_npc(target, directive, obs, blocked_dirs, occupied)
         if kind == "edge":
             return self._cross_edge(target.get("dir"), target.get("next_map"), obs, blocked_dirs, occupied)
         if kind != "exit":

@@ -52,7 +52,6 @@ MAX_GOTO_STEPS = 18  # safety bound on one navigation macro
 L1_EVERY_N_LEGS_DEFAULT = 5  # cadence: run the L1 strategic review every N legs by default
 BLOCK_TRIGGER = 6  # blocked-for-N legs at/above which L1 fires early (navigation deadlock)
 SERVO_FAIL_LIMIT = 6  # consecutive servo no-route steps before the directive is deemed impossible
-REPLAN_COOLDOWN = 8   # min steps between soft replans (stuck/low-conf) — enforces bold commitment
 JEV_OVERRIDE_CONF = 0.6  # Jev may override the BFS pathing suggestion only at/above this confidence
 POLICY_BUDGET = 15       # steps a Jev-chosen routing policy runs before it's re-selected for the area
 JEV_NPC_CONF = 0.4  # trust Jev's NPC pick only at/above this confidence (else fall back to nearest)
@@ -150,7 +149,6 @@ class ReasoningLoop:
         self._directive: Directive | None = None
         self._quest: deque[Directive] = deque()   # compiled plan steps, executed in order (FIFO)
         self._quest_step_age = 0                     # steps spent on the current directive (verify throttle)
-        self._replan_next = False       # a trigger (stuck / low-conf) asked for a replan
         self._servo_fail = 0            # consecutive servo no-route steps (impossibility)
         # L2 (tactical navigator) state: the grid waypoint LunaRoute picked to head toward on the
         # current map. BFS routes to it; it's re-picked on arrival or when BFS can't get closer.
@@ -169,7 +167,6 @@ class ReasoningLoop:
         self._policy_age = 0
         self._farm_last: Direction | None = None   # farm-exp pacing: last graze step (for back-and-forth)
         self._farm_age = 0
-        self._steps_since_replan = REPLAN_COOLDOWN  # cooldown counter (bold commitment)
         self._prev_map: int | None = None  # last DISTINCT map (resolves 0xFF "return" warps)
         self._recent: deque[str] = deque(maxlen=recent_max)
         self._prev: ReasonStep | None = None
@@ -264,7 +261,6 @@ class ReasoningLoop:
                 return self._act_servo(obs, directive, servo, shot)
             self._servo_fail += 1     # no clean route -> navigation deadlock (feeds the wedge + L1)
             self._blocked_for_n += 1  # consecutive blocked legs -> triggers L1 at BLOCK_TRIGGER
-            self._replan_next = True
         # awaiting a fresh target/plan from LunaRoute -> a brief wait; the next step re-plans.
         from ..core.models import WaitAction
         rstep = ReasonStep(location="await-plan",
@@ -318,7 +314,6 @@ class ReasoningLoop:
                 and conf < self.low_conf_reflect
                 and self.session.step - self._last_reflect_step >= self.reflect_cooldown):
             self._force_reflect = True
-            self._replan_next = True
         result = self._dispatch(rstep, obs, blocked_dirs, ctx_kind)
         return self._finish(obs, rstep, result, latency, usage, shot)
 
@@ -336,15 +331,31 @@ class ReasoningLoop:
                 or self._blocked_for_n >= BLOCK_TRIGGER)
 
     def _recompile_quest(self) -> None:
-        """Recompile the pending plan steps into the executable quest queue (deque of Directives)."""
-        self._quest = deque(compile_steps_to_directives(
-            [s for s in self._plan_steps if s.status == "pending"]))
+        """Recompile the pending plan steps into the executable quest queue (deque of Directives),
+        PRESERVING the active step's not-yet-run sub-directives. A talk/fetch step compiles to
+        TRAVEL + TALK_TO sharing one quest_id; once TRAVEL has been popped (step is `active`) the
+        TALK_TO still sits in `_quest`. Rebuilding from `pending` alone would drop it and the talk
+        would be skipped (the step falsely completing on the travel's on_map), so we keep the
+        active step's leftover directives at the head of the queue."""
+        active = next((s for s in self._plan_steps if s.status == "active"), None)
+        keep = [d for d in self._quest if active is not None and d.quest_id == active.id]
+        pending = compile_steps_to_directives([s for s in self._plan_steps if s.status == "pending"])
+        self._quest = deque(keep + pending)
 
-    def _run_l1(self, obs) -> None:
+    def _has_heal_step(self) -> bool:
+        """True if the plan already carries a heal quest (a pending/active step whose criterion is an
+        hp_frac threshold) — so a near-faint emergency doesn't re-force L1 every step once a heal
+        errand is in the plan."""
+        return any((s.done_when or "").startswith("hp_frac")
+                   for s in self._plan_steps if s.status in ("pending", "active"))
+
+    def _run_l1(self, obs, emergency: bool = False) -> None:
         """L1 strategic review: ask the planner whether the standing plan needs to change; if so,
         deterministically reconcile the proposal into the canonical plan (preserving progress) and
         recompile the quest queue. Durable strategy (mission/milestone/tried_failed) lives on the
-        AgentPlan in memory. Never raises: any failure emits ``l1_failed`` and changes nothing."""
+        AgentPlan in memory. ``emergency`` (near-faint) is surfaced in the context so L1 inserts a
+        routed heal quest. Never raises: any failure emits ``l1_failed`` and changes nothing. The
+        gate counters are cleared in ``finally`` so a failing review doesn't re-fire every step."""
         try:
             if self.planner is None:
                 return
@@ -353,6 +364,7 @@ class ReasoningLoop:
             emu = self.controller.emu
             signals = game_signals(emu)
             signals["blocked_for_n"] = self._blocked_for_n
+            signals["emergency_heal"] = emergency
             cur_mid = obs.player.map_id if obs.player else None
             context = {
                 "current_map": {"id": cur_mid,
@@ -393,10 +405,14 @@ class ReasoningLoop:
             else:
                 self.on_event("l1_review", {"step": self.session.step, "change": False,
                                             "assessment": prop.get("assessment")})
-            self._legs_since_l1 = 0
-            self._l1_event = False
         except Exception as e:  # never let a strategic review break the loop
             self.on_event("l1_failed", {"step": self.session.step, "error": str(e)})
+        finally:
+            # clear the cadence/event gate even on failure, so a raising review doesn't re-fire
+            # every step. (blocked_for_n is deliberately NOT reset here — it's cleared at the wedge
+            # and on commit; resetting it here would suppress wedge detection.)
+            self._legs_since_l1 = 0
+            self._l1_event = False
 
     # --------------------------------------------------- directive lifecycle
     def _mark_step(self, quest_id: str | None, status: str) -> None:
@@ -420,27 +436,32 @@ class ReasoningLoop:
         next gate (the plan is never cleared). There is no arbiter intent / priority stack /
         escalation-score path."""
         emu = self.controller.emu
-        signals = game_signals(emu)
-        signals["blocked_for_n"] = self._blocked_for_n
-        party = signals["party"]
+        party = game_signals(emu)["party"]     # L1 builds its own full signals in _run_l1
+        emergency = needs_emergency_heal(party)  # near-faint -> force an L1 heal ping (not a directive)
         if self._directive is not None:
             self._quest_step_age += 1
+        satisfied = self._directive is not None and self._directive_satisfied(self._directive)
 
-        # --- 1. emergency-heal reflex (the ONLY preemption) --------------------------------------
-        healing = self._directive is not None and self._directive.reason == "emergency heal"
-        if needs_emergency_heal(party):
-            if not healing:
-                self._directive = Directive(intent=Intent.HEAL, target=None,
-                                            success={"hp_frac": ">=0.95"}, reason="emergency heal")
-                self._servo_fail = 0
-                self.on_event("emergency_heal", {"step": self.session.step})
-            return self._directive   # keep healing until HP is safe (preempts the plan)
-        if healing:
-            self._directive = None   # HP safe again -> drop the reflex; the plan resumes below
+        # --- 1. wedge (BEFORE the L1 gate, so reconcile sees the `wedged` step and can replace it):
+        # the active step can't make progress -> mark it, reset the block/servo counters (the
+        # replacement starts fresh; L1 fires ONCE per wedge, not every step) and arm L1. Never
+        # clears the plan.
+        if (self._directive is not None and not satisfied
+                and (self._servo_fail >= SERVO_FAIL_LIMIT or self._blocked_for_n >= BLOCK_TRIGGER)):
+            if self._directive.quest_id is not None:
+                self._mark_step(self._directive.quest_id, "wedged")
+            self._blocked_for_n = 0
+            self._servo_fail = 0
+            self._l1_event = True     # L1 replaces just this step at the next gate (below)
+            self.on_event("quest_step_wedged", {"step": self.session.step,
+                                                "reason": self._directive.reason})
 
-        # --- 2. L1 gate: periodic / event / blocked strategic review ------------------------------
-        if self._l1_due():
-            self._run_l1(obs)
+        # --- 2. L1 gate: periodic / event / blocked review, OR an unhandled near-faint emergency
+        # (which makes L1 INSERT a routed heal quest — heal is an L1 ping, never a target-less
+        # directive that would freeze the agent). The heal-step guard stops it re-forcing L1 once a
+        # heal errand is already in the plan.
+        if self._l1_due() or (emergency and not self._has_heal_step()):
+            self._run_l1(obs, emergency=emergency)
 
         # --- 3. bootstrap: an empty plan synthesizes a default goal step -------------------------
         if not self._plan_steps:
@@ -456,7 +477,7 @@ class ReasoningLoop:
                 self._directive = None
 
         # --- 4. termination / advance -----------------------------------------------------------
-        if self._directive is None or self._directive_satisfied(self._directive):
+        if self._directive is None or satisfied:
             if self._directive is not None:
                 self.on_event("directive_done", {"step": self.session.step,
                                                  "intent": self._directive.intent.value,
@@ -469,15 +490,6 @@ class ReasoningLoop:
                 self._commit_directive(self._directive.reason)
                 return self._directive
             self._directive = None   # plan exhausted; the next gate / bootstrap refills
-            return self._carry_plan()
-
-        # --- 5. wedge: the active step can't make progress -> mark it, arm L1 (never clear) ------
-        if self._servo_fail >= SERVO_FAIL_LIMIT or self._blocked_for_n >= BLOCK_TRIGGER:
-            if self._directive.quest_id is not None:
-                self._mark_step(self._directive.quest_id, "wedged")
-            self._l1_event = True     # L1 replaces just this step at the next gate
-            self.on_event("quest_step_wedged", {"step": self.session.step,
-                                                "reason": self._directive.reason})
         return self._carry_plan()
 
     def _directive_satisfied(self, directive) -> bool:
@@ -503,9 +515,8 @@ class ReasoningLoop:
         return predicates.evaluate(success, self.controller.emu, memory=self.memory)
 
     def _commit_directive(self, note: str) -> None:
-        self._replan_next = False
         self._servo_fail = 0
-        self._steps_since_replan = 0
+        self._blocked_for_n = 0      # a fresh directive starts with a clean block counter
         self._quest_step_age = 0
         self._leg_wp = None          # a new directive -> the L2 navigator picks a fresh waypoint
         self._leg_wp_fail = 0
@@ -1286,8 +1297,9 @@ class ReasoningLoop:
         if stuck.setback:
             self.memory.note(f"setback at step {self.session.step}", source="observed", step=self.session.step)
         if stuck.stuck:
-            # trigger #3: hand stuck UP to the planner (replan) instead of a rival frontier heuristic.
-            self._replan_next = True
+            # a local loop / no-objective-progress leg counts toward the block budget that feeds
+            # the wedge trigger + the L1 gate (BLOCK_TRIGGER).
+            self._blocked_for_n += 1
         if stuck.stuck or stuck.setback:
             self.on_event("stuck", {"step": self.session.step, "kind": stuck.kind,
                                     "setback": stuck.setback, "repeat_count": stuck.repeat_count})

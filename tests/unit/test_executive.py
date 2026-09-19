@@ -122,35 +122,48 @@ def test_success_predicate_triggers_replan():
     assert steps["q1"] == "done" and steps["q2"] == "active"   # step statuses advanced in order
 
 
-def test_emergency_heal_preempts_then_restores_plan():
-    # the near-faint emergency reflex is the ONLY preemption: it injects a HEAL directive ahead of
-    # the plan; once HP is safe again the plan resumes exactly where it was.
+def test_emergency_heal_pings_l1_not_freeze():
+    # a near-faint party is NOT a target-less HEAL directive (that froze the agent on WaitAction) —
+    # it forces an L1 review that INSERTS a routed heal quest. The guard stops it re-forcing L1 once
+    # a heal errand is already in the plan.
     from collections import deque as _deque
     from pokemon_agent.agent.quest_reconciler import QuestStep
     import pokemon_agent.agent.reason_loop as rl
-    loop, emu = _loop(map_id=0)
-    d = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 9}, success={"on_map": 9},
+    loop, emu = _loop(map_id=1, goal_map=2)
+    d = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 2}, success={"on_map": 2},
                   quest_id="q1")
-    loop._plan_steps = [QuestStep(id="q1", map=9, done_when="on_map", status="active")]
-    loop._quest = _deque([d])
-    state = {"party": [{"hp": 0, "max_hp": 20}, {"hp": 3, "max_hp": 26}]}  # a fainted member
+    loop._plan_steps = [QuestStep(id="q1", map=2, done_when="on_map", status="active")]
+    loop._quest = _deque([])
+    loop._directive = d
+    calls = {"n": 0}
+
+    def fake_revise(emu, ctx):
+        calls["n"] += 1
+        assert ctx["signals"].get("emergency_heal") is True     # L1 is told it's an emergency
+        return {"change": True, "mission": "", "milestone": "heal",
+                "add": [{"map": 3, "talk": True, "who": "nurse", "done_when": "hp_frac>=0.95",
+                         "why": "heal at the center"}], "remove": []}
+    loop.planner.revise_quests = fake_revise
+    faint = [{"hp": 0, "max_hp": 20}]                            # a fainted member
     orig = rl.game_signals
-    rl.game_signals = lambda emu: {"party": state["party"], "hp_frac": 0.0, "min_level": 5,
+    rl.game_signals = lambda emu: {"party": faint, "hp_frac": 0.0, "min_level": 5,
                                    "badges": 0, "items": []}
     try:
         obs = loop.builder.build(capture_screenshot=False)[0]
         out = loop._manage_directive(obs)
-        assert out.intent == Intent.HEAL and loop._directive.intent == Intent.HEAL  # preempted
-        state["party"] = [{"hp": 26, "max_hp": 26}]                                 # HP safe again
-        out2 = loop._manage_directive(obs)
-        assert out2 is d and loop._directive is d                                   # plan resumed
+        assert calls["n"] == 1                                    # L1 fired for the emergency
+        assert any((s.done_when or "").startswith("hp_frac") for s in loop._plan_steps)  # heal step landed
+        assert not (out is not None and out.intent == Intent.HEAL and out.target is None)  # NO freeze
+        # guard: a heal step is now in the plan -> a second near-faint call does NOT re-force L1
+        loop._manage_directive(obs)
+        assert calls["n"] == 1
     finally:
         rl.game_signals = orig
 
 
-def test_wedged_step_marked_and_replaced_by_l1_next_gate():
-    # a wedged step is marked `wedged` and L1's next review replaces just that step; the rest of the
-    # plan survives (no quest.clear(), no escalation-score path).
+def test_wedged_step_replaced_by_l1():
+    # a wedged step is marked `wedged`; wedge runs BEFORE the L1 gate so L1's reconcile sees it and
+    # replaces just that step in the SAME gate. The rest of the plan survives (no quest.clear()).
     from collections import deque as _deque
     from pokemon_agent.agent.quest_reconciler import QuestStep
     from pokemon_agent.agent.reason_loop import SERVO_FAIL_LIMIT
@@ -165,25 +178,83 @@ def test_wedged_step_marked_and_replaced_by_l1_next_gate():
     loop._directive = d_active
     loop._qid = 10                                    # so L1's fresh step ids don't reuse "q1"/"q2"
     loop._servo_fail = SERVO_FAIL_LIMIT               # the active step is wedged (no route)
-
-    obs = loop.builder.build(capture_screenshot=False)[0]
-    loop._manage_directive(obs)
-    assert any(s.id == "q1" and s.status == "wedged" for s in loop._plan_steps)  # marked, not cleared
-    assert loop._l1_event is True                                                # L1 armed for next gate
-    assert any(s.id == "q2" for s in loop._plan_steps)                           # plan NOT cleared
-
-    # next gate: L1 replaces the wedged step (remove q1, add a fresh retry step); q2 survives.
     loop.planner.revise_quests = lambda emu, ctx: {
         "change": True,
         "add": [{"map": 5, "talk": False, "done_when": "on_map", "why": "retry via another route"}],
         "remove": ["q1"]}
-    loop._manage_directive(obs)
+
+    loop._manage_directive(loop.builder.build(capture_screenshot=False)[0])
     ids = [s.id for s in loop._plan_steps]
     assert "q1" not in ids                                          # the wedged step was replaced
     assert "q2" in ids                                              # the rest of the plan survived
     assert all(s.status != "wedged" for s in loop._plan_steps)     # nothing left wedged
     # a fresh retry step for map 5 replaced the wedged one; the plan advanced onto it (now active)
     assert any(s.map == 5 and s.status in ("pending", "active") for s in loop._plan_steps)
+
+
+def test_wedge_resets_block_and_fires_l1_once():
+    # a hard block marks the step wedged, RESETS the block counter (so L1 doesn't re-fire every
+    # step), and fires L1 exactly once for the wedge.
+    from collections import deque as _deque
+    from pokemon_agent.agent.quest_reconciler import QuestStep
+    from pokemon_agent.agent.reason_loop import BLOCK_TRIGGER
+    loop, emu = _loop(map_id=1, goal_map=2)
+    loop._plan_steps = [QuestStep(id="q1", map=5, done_when="on_map", status="active"),
+                        QuestStep(id="q2", map=9, done_when="on_map", status="pending")]
+    d_active = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 5}, success={"on_map": 5},
+                         quest_id="q1")
+    d_pending = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 9}, success={"on_map": 9},
+                          quest_id="q2")
+    loop._quest = _deque([d_pending])
+    loop._directive = d_active
+    loop._blocked_for_n = BLOCK_TRIGGER               # navigation deadlock over budget
+    calls = {"n": 0}
+
+    def no_change(emu, ctx):
+        calls["n"] += 1
+        return {"change": False, "add": [], "remove": []}
+    loop.planner.revise_quests = no_change
+
+    obs = loop.builder.build(capture_screenshot=False)[0]
+    loop._manage_directive(obs)
+    assert any(s.id == "q1" and s.status == "wedged" for s in loop._plan_steps)  # marked wedged
+    assert loop._blocked_for_n == 0                                              # counter reset
+    assert calls["n"] == 1                                                       # L1 fired for the wedge
+    # a second call must NOT re-fire L1 (the block counter was reset; the plan advanced)
+    loop._manage_directive(obs)
+    assert calls["n"] == 1
+
+
+def test_recompile_preserves_active_talk_leftover():
+    # a talk step's TRAVEL was already popped (step active) with its TALK_TO still queued; a recompile
+    # must keep that TALK_TO or the talk is skipped (the step falsely completing on the travel on_map).
+    from collections import deque as _deque
+    from pokemon_agent.agent.quest_reconciler import QuestStep
+    loop, _ = _loop(map_id=40, goal_map=2)
+    loop._plan_steps = [QuestStep(id="q1", map=40, talk=True, who="Oak",
+                                  done_when="no_item:Oak's Parcel", status="active"),
+                        QuestStep(id="q2", map=9, done_when="on_map", status="pending")]
+    talk = Directive(intent=Intent.TALK_TO, target={"kind": "npc", "map": 40, "sprite": "Oak"},
+                     success={"no_item": "Oak's Parcel"}, quest_id="q1")
+    loop._quest = _deque([talk])
+    loop._recompile_quest()
+    pairs = [(d.intent, d.quest_id) for d in loop._quest]
+    assert (Intent.TALK_TO, "q1") in pairs             # active step's leftover TALK_TO survived
+    assert any(d.quest_id == "q2" for d in loop._quest)  # the pending step compiled after it
+
+
+def test_run_l1_resets_counters_on_exception():
+    # a raising revise_quests must not leave the gate counters set (else L1 retries + re-raises
+    # every step). The resets live in a finally.
+    loop, _ = _loop(map_id=1, goal_map=2)
+    loop._legs_since_l1 = 5
+    loop._l1_event = True
+
+    def boom(emu, ctx):
+        raise RuntimeError("kaboom")
+    loop.planner.revise_quests = boom
+    loop._run_l1(loop.builder.build(capture_screenshot=False)[0])
+    assert loop._legs_since_l1 == 0 and loop._l1_event is False
 
 
 # --- L1 strategic planner (Task 6a) ---

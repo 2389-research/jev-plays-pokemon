@@ -157,3 +157,142 @@ def test_resolve_edge_steps_off_boundary_toward_goal_dir():
     obs = SimpleNamespace(player=player, map_dims=(4, 8), game_state={}, exits=[])
     move = loop._resolve_target({"kind": "edge", "dir": "south", "next_map": 0}, _d(), obs, set(), set())
     assert isinstance(move, MoveAction) and move.direction == Direction.SOUTH
+
+
+def test_default_target_cross_map_no_hop_is_exit():
+    loop, _ = _nav_loop(42)
+    loop.memory.graph.next_hop = lambda a, b: None
+    player = SimpleNamespace(x=1, y=1, map_id=42, facing="south")
+    obs = SimpleNamespace(player=player, map_dims=(4, 8), game_state={}, exits=[])
+    assert loop._default_target(_d(), obs)["kind"] == "exit"
+
+
+def test_default_target_cross_map_with_door_is_enter():
+    loop, _ = _nav_loop(42)
+    loop.memory.graph.next_hop = lambda a, b: (1, (3, 7))
+    player = SimpleNamespace(x=1, y=1, map_id=42, facing="south")
+    obs = SimpleNamespace(player=player, map_dims=(4, 8), game_state={},
+                          exits=[{"x": 3, "y": 7, "dest_map": 1}])
+    t = loop._default_target(_d(), obs)
+    assert t["kind"] == "enter" and t["map"] == 1
+
+
+def test_navigate_leg_never_freezes_without_hop_uses_exit():
+    # the lab-freeze case: no known route out (0xFF door unresolved) -> must MOVE, not return None
+    loop, _ = _nav_loop(42)
+    loop.memory.graph.next_hop = lambda a, b: None
+    cells = {(x, y) for x in range(4) for y in range(8)}
+    loop.world.ingest_collision(42, 4, 8, cells, None, None)
+    player = SimpleNamespace(x=1, y=1, map_id=42, facing="south")
+    obs = SimpleNamespace(player=player, map_dims=(4, 8), game_state={},
+                          exits=[{"x": 3, "y": 7, "dest_map": 1}])
+    move = loop._navigate_leg(_d(), obs, set())
+    assert isinstance(move, MoveAction)  # routed toward the exit door, not frozen
+
+
+def test_navigate_leg_door_step_through_still_works():
+    loop, _ = _nav_loop(42)
+    loop.memory.graph.next_hop = lambda a, b: (1, (3, 7))
+    player = SimpleNamespace(x=3, y=7, map_id=42, facing="east")
+    obs = SimpleNamespace(player=player, map_dims=(4, 8), game_state={},
+                          exits=[{"x": 3, "y": 7, "dest_map": 1}])
+    move = loop._navigate_leg(_d(), obs, set())
+    assert isinstance(move, MoveAction) and move.direction == Direction.SOUTH
+
+
+class FailProvider:
+    def chat_json(self, system, state, image=None):
+        raise RuntimeError("boom")
+
+
+def test_navigate_leg_configured_failure_ungrounded_stalls_and_flags():
+    loop, _ = _nav_loop(42)
+    loop.planner.provider = FailProvider()
+    loop.memory.graph.next_hop = lambda a, b: None
+    cells = {(x, y) for x in range(4) for y in range(8)}
+    loop.world.ingest_collision(42, 4, 8, cells, None, None)
+    events = []
+    loop.on_event = lambda k, p: events.append((k, p))
+    player = SimpleNamespace(x=1, y=1, map_id=42, facing="south")
+    obs = SimpleNamespace(player=player, map_dims=(4, 8), game_state={}, map_view=["x"],
+                          exits=[{"x": 3, "y": 7, "dest_map": 1}])
+    move = loop._navigate_leg(_d(), obs, set())
+    assert move is None
+    assert any(k == "proposer_failed" for k, _ in events)
+
+
+def test_navigate_leg_configured_failure_grounded_proceeds_and_flags():
+    loop, _ = _nav_loop(42)
+    loop.planner.provider = FailProvider()
+    loop.memory.graph.next_hop = lambda a, b: (1, (3, 7))
+    player = SimpleNamespace(x=3, y=7, map_id=42, facing="east")
+    obs = SimpleNamespace(player=player, map_dims=(4, 8), game_state={}, map_view=["x"],
+                          exits=[{"x": 3, "y": 7, "dest_map": 1}])
+    events = []
+    loop.on_event = lambda k, p: events.append((k, p))
+    move = loop._navigate_leg(_d(), obs, set())
+    assert isinstance(move, MoveAction) and move.direction == Direction.SOUTH
+    assert any(k == "proposer_failed" for k, _ in events)
+
+
+# --- THE REGRESSION TESTS: a reflect/proposer model's stated target is actually navigated to ---
+import json as _json
+
+_DELTA = {Direction.NORTH: (0, -1), Direction.SOUTH: (0, 1), Direction.EAST: (1, 0), Direction.WEST: (-1, 0)}
+
+
+def _manhattan(a, b):
+    return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
+
+def _applied(player, move):
+    dx, dy = _DELTA[move.direction]
+    return (player.x + dx, player.y + dy)
+
+
+class ProposerProvider:
+    """A provider whose chat_json emits the exact target a reflect/proposer model would name."""
+    def __init__(self, obj): self._obj = obj
+    def chat_json(self, system, state, image=None): return _json.dumps(self._obj), 0, {}
+
+
+def _lab_like_obs(px, py):
+    player = SimpleNamespace(x=px, y=py, map_id=42, facing="south")
+    return SimpleNamespace(player=player, map_dims=(4, 8), game_state={}, map_view=["room"],
+                           exits=[{"x": 3, "y": 7, "dest_map": 1}])
+
+
+def test_reflect_style_exit_proposal_is_navigated_toward_the_door():
+    loop, _ = _nav_loop(42)
+    loop.planner.provider = ProposerProvider({"kind": "exit", "note": "head south to the exit and leave"})
+    loop.memory.graph.next_hop = lambda a, b: None
+    loop.world.ingest_collision(42, 4, 8, {(x, y) for x in range(4) for y in range(8)}, None, None)
+    obs = _lab_like_obs(1, 1)
+    move = loop._navigate_leg(_d(), obs, set())
+    assert isinstance(move, MoveAction)
+    assert _manhattan(_applied(obs.player, move), (3, 7)) < _manhattan((1, 1), (3, 7))
+
+
+def test_reflect_style_named_tile_proposal_is_navigated_toward():
+    loop, _ = _nav_loop(42)
+    loop.planner.provider = ProposerProvider({"kind": "tile", "x": 3, "y": 7, "note": "go to the exit at (3,7)"})
+    loop.memory.graph.next_hop = lambda a, b: None
+    loop.world.ingest_collision(42, 4, 8, {(x, y) for x in range(4) for y in range(8)}, None, None)
+    obs = _lab_like_obs(1, 1)
+    move = loop._navigate_leg(_d(), obs, set())
+    assert isinstance(move, MoveAction)
+    assert _manhattan(_applied(obs.player, move), (3, 7)) < _manhattan((1, 1), (3, 7))
+
+
+def test_reflect_style_proposal_emits_target_event_and_folds_note():
+    from pokemon_agent.agent.reasoner import ReflectionPlan
+    loop, _ = _nav_loop(42)
+    loop._plan = ReflectionPlan()  # ensure the note is assignable in the fake setup
+    loop.planner.provider = ProposerProvider({"kind": "exit", "note": "leave the lab, gym is north"})
+    loop.memory.graph.next_hop = lambda a, b: None
+    loop.world.ingest_collision(42, 4, 8, {(x, y) for x in range(4) for y in range(8)}, None, None)
+    events = []
+    loop.on_event = lambda k, p: events.append((k, p))
+    loop._navigate_leg(_d(), _lab_like_obs(1, 1), set())
+    assert any(k == "target" for k, _ in events)
+    assert loop._plan is not None and "leave the lab" in (loop._plan.next_objective or "")

@@ -121,9 +121,12 @@ explicitly:
 - **Reconcile → recompile cycle:** each L1 cycle: (1) L1 emits add/remove against `_plan_steps`;
   (2) `reconcile_quests` merges into a new `_plan_steps` (preserving done + active per the rules);
   (3) the **pending** region is re-compiled into a fresh `self._quest` deque; (4) the currently
-  active `self._directive` keeps running untouched (it is not recompiled mid-flight). So editing the
-  plan never interrupts the step in progress, and a wedged step is replaced by recompiling just that
-  step's directives from L1's replacement.
+  active `self._directive` keeps running untouched (it is not recompiled mid-flight). **This applies
+  only to a step whose status is `active`.** A step that has transitioned to `wedged` is no longer
+  active: its directive IS abandoned and replaced — the reconciler recompiles just that step's
+  directives from L1's replacement (this is the fix for the original `quest.clear()` bug; never leave
+  a wedged directive "running untouched"). So editing the plan never interrupts a healthy in-progress
+  step, but a stuck one is always swapped out.
 - **Completion advance:** when the active Directive's `success` predicate fires (unchanged), the
   loop marks that step `done` and pops the next Directive from the recompiled deque (as today), i.e.
   `_directive = self._quest.popleft()`.

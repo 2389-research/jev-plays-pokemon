@@ -975,7 +975,187 @@ git commit -m "planner: strategist names the talk NPC (who) so approach_npc reac
 
 ---
 
-## Task 6: Live validation from the rival-battle save (manual, not a unit test)
+## Task 6: Jev picks WHICH NPC to talk to (calibrated, against the plan)
+
+**Why:** the substring name-match (Task 5) is a cheap first pass, but when several NPCs are on the
+map and the plan says "talk to someone", the robust disambiguator is Jev — a calibrated 1-of-N
+choice over the candidate NPCs, scored against the objective (the user's ask: "have Jev pick who to
+talk to if there is a list against the plan"). Deterministic checks stay first; Jev only breaks the
+tie. The pick is held for the leg (no per-frame Jev call, no oscillation).
+
+**Files:**
+- Modify: `src/pokemon_agent/agent/typesafe_reasoner.py` (add `choose_npc`)
+- Modify: `src/pokemon_agent/agent/reason_loop.py` (`_approach_npc` uses it; `_resolve_target` passes the target/directive)
+- Test: `tests/unit/test_unified_loop.py`
+
+- [ ] **Step 1: Write failing tests**
+
+```python
+# add to tests/unit/test_unified_loop.py
+
+class NpcPickClient:
+    """Fake TypeSafe client: system_one returns a Choice answer selecting a fixed index."""
+    def __init__(self, index, conf=0.9): self._i, self._c = index, conf
+    def system_one(self, *, state, questions):
+        from types import SimpleNamespace as NS
+        return NS(answers={"npc": NS(choice=str(self._i), confidence=self._c, probabilities=None)},
+                  usage=None)
+
+
+def test_choose_npc_picks_index_against_objective():
+    from pokemon_agent.agent.typesafe_reasoner import TypeSafeReasoner
+    r = TypeSafeReasoner(client=NpcPickClient(1))
+    cands = [{"sprite": "Rival", "x": 5, "y": 7, "talked_to": False},
+             {"sprite": "Oak", "x": 3, "y": 2, "talked_to": False}]
+    idx, conf = r.choose_npc(objective="deliver Oak's Parcel to Professor Oak", candidates=cands)
+    assert idx == 1 and conf == 0.9
+
+
+def test_approach_npc_uses_jev_to_disambiguate_multiple(monkeypatch):
+    # two NPCs, no usable name -> Jev picks index 1 (Oak) against the objective; we approach Oak.
+    loop, _ = _nav_loop(0)
+
+    class R:
+        def choose_npc(self, *, objective, candidates):
+            return 1, 0.9  # pick the 2nd candidate (Oak at 3,2)
+    loop.reasoner = R()
+    player = SimpleNamespace(x=3, y=3, map_id=0, facing="north")
+    obs = SimpleNamespace(player=player, map_dims=(6, 6),
+                          game_state={"npcs": [{"x": 5, "y": 5, "sprite": "Rival"},
+                                               {"x": 3, "y": 2, "sprite": "Oak"}]}, exits=[])
+    d = Directive(intent=Intent.TALK_TO, target={"kind": "npc", "map": 0}, success={"talked_on_map": 0})
+    move = loop._resolve_target({"kind": "approach_npc", "sprite": None}, d, obs, set(), set())
+    # player at (3,3) facing north, Oak at (3,2): adjacent+facing -> interact with the JEV-picked NPC
+    assert isinstance(move, InteractAction)
+
+
+def test_approach_npc_single_candidate_skips_jev():
+    # one NPC -> no Jev call needed (reasoner has no choose_npc); still reaches it.
+    loop, _ = _nav_loop(0)
+    player = SimpleNamespace(x=3, y=3, map_id=0, facing="north")
+    obs = SimpleNamespace(player=player, map_dims=(6, 6),
+                          game_state={"npcs": [{"x": 3, "y": 2, "sprite": "Oak"}]}, exits=[])
+    d = Directive(intent=Intent.TALK_TO, target={"kind": "npc", "map": 0}, success={"talked_on_map": 0})
+    move = loop._resolve_target({"kind": "approach_npc", "sprite": None}, d, obs, set(), set())
+    assert isinstance(move, InteractAction)
+```
+
+- [ ] **Step 2: Run to verify fail** (`choose_npc` missing; the disambiguate test picks nearest instead of Jev's index).
+
+- [ ] **Step 3: Implement**
+
+(a) Add `choose_npc` to `TypeSafeReasoner` (typesafe_reasoner.py), mirroring `choose_policy`'s shape:
+
+```python
+def choose_npc(self, *, objective, candidates):
+    """Jev picks WHICH NPC on the map best fits the OBJECTIVE — a calibrated 1-of-N over the
+    candidate people (used to disambiguate when several are present and the name is ambiguous).
+    ``candidates`` is a list of {sprite, x, y, talked_to}. Returns (index | None, confidence)."""
+    from typesafe_sdk import Choice
+    if not candidates:
+        return None, 0.0
+    criteria = {
+        str(i): (f"{c.get('sprite') or 'person'} at ({c.get('x')},{c.get('y')})"
+                 + (" — already talked to" if c.get("talked_to") else ""))
+        for i, c in enumerate(candidates)
+    }
+    state = {"task": "Pick the person to walk up to and talk to for the current objective.",
+             "objective": objective, "candidates": candidates}
+    instr = ("Choose the ONE person who best fits OBJECTIVE — the specific NPC the plan needs "
+             "(e.g. Professor Oak for a lab errand, a shop CLERK to buy/collect, the NURSE to heal). "
+             "Prefer someone NOT already talked to unless the objective needs them again.")
+    resp = self.client.system_one(state=state, questions={"npc": Choice(instructions=instr, criteria=criteria)})
+    ans = resp.answers["npc"]
+    conf = float(getattr(ans, "confidence", 0.0) or 0.0)
+    try:
+        idx = int(ans.choice)
+    except (TypeError, ValueError):
+        return None, conf
+    return (idx if 0 <= idx < len(candidates) else None), conf
+```
+
+(b) In `reason_loop.py`, change `_resolve_target`'s approach_npc branch to pass the target + directive:
+
+```python
+    if kind == "approach_npc":
+        return self._approach_npc(target, directive, obs, blocked_dirs, occupied)
+```
+
+(c) Rewrite `_approach_npc` to take `(self, target, directive, obs, blocked_dirs, occupied)` and add the Jev tie-break, held for the leg via a `picked` key cached ON the target dict:
+
+```python
+def _approach_npc(self, target, directive, obs, blocked_dirs, occupied):
+    """Resolve an ``approach_npc`` target: choose the person, reach them, interact when adjacent +
+    facing. Choice order (cheap+deterministic first): a pick already cached for this leg; a named
+    sprite (exact/substring); Jev's calibrated pick among MULTIPLE candidates against the objective;
+    else the nearest not-yet-talked. The pick is cached on the target so it's stable across frames."""
+    player = obs.player
+    npcs = [n for n in ((obs.game_state or {}).get("npcs") or []) if "x" in n and "y" in n]
+    if not npcs:
+        return self._leave_via_nearest_exit(player, obs, blocked_dirs, occupied)
+    sprite = target.get("sprite") if isinstance(target, dict) else target
+    cached = target.get("picked") if isinstance(target, dict) else None
+
+    def by_name(name):
+        s = str(name).lower()
+        hits = [n for n in npcs if (nm := str(n.get("sprite") or "").lower()) and (nm in s or s in nm)]
+        return hits[0] if hits else None
+
+    npc = None
+    if cached:                              # stick with the leg's pick (match by sprite label)
+        npc = by_name(cached)
+    if npc is None and sprite:              # a named who -> exact/substring match
+        npc = by_name(sprite)
+        if npc is None:
+            self.on_event("approach_npc_miss", {"step": self.session.step, "sprite": sprite,
+                                                "seen": [n.get("sprite") for n in npcs]})
+    if npc is None and len(npcs) > 1 and getattr(self.reasoner, "choose_npc", None) is not None:
+        cands = [{"sprite": n.get("sprite"), "x": int(n["x"]), "y": int(n["y"]),
+                  "talked_to": bool(n.get("talked_to"))} for n in npcs]
+        idx, conf = self.reasoner.choose_npc(
+            objective=(directive.reason if directive else ""), candidates=cands)
+        if idx is not None:
+            npc = npcs[idx]
+            self.on_event("npc_pick", {"step": self.session.step, "sprite": npc.get("sprite"),
+                                       "conf": round(float(conf), 2), "n": len(npcs)})
+    if npc is None:                         # fallback: nearest not-yet-talked
+        fresh = [n for n in npcs if not n.get("talked_to")] or npcs
+        npc = min(fresh, key=lambda n: abs(int(n["x"]) - player.x) + abs(int(n["y"]) - player.y))
+    if isinstance(target, dict) and npc.get("sprite"):
+        target["picked"] = npc.get("sprite")   # cache for the rest of the leg (stable, no re-pick)
+
+    nx, ny = int(npc["x"]), int(npc["y"])
+    adj = {Direction.NORTH: (nx, ny + 1), Direction.SOUTH: (nx, ny - 1),
+           Direction.EAST: (nx - 1, ny), Direction.WEST: (nx + 1, ny)}
+    facing_map = {"north": Direction.NORTH, "south": Direction.SOUTH,
+                  "east": Direction.EAST, "west": Direction.WEST}
+    for d, stand in adj.items():
+        if (player.x, player.y) == stand:
+            if facing_map.get(getattr(player, "facing", None)) == d:
+                return InteractAction()
+            return MoveAction(direction=d)
+    others = occupied - {(nx, ny)}
+    for stand in sorted(adj.values(), key=lambda c: abs(c[0] - player.x) + abs(c[1] - player.y)):
+        mv = self._bfs_move(player, stand, interact=False, blocked_dirs=blocked_dirs, occupied=others)
+        if mv is not None:
+            return mv
+    return None
+```
+
+Note: `_default_target` still returns `{"kind":"approach_npc","sprite":...}` (unchanged). The `picked` key is added at runtime and is naturally cleared when the target is re-proposed (a fresh dict). The `_recent_targets` snapshot only reads kind/x/y/map/sprite, so `picked` doesn't leak there.
+
+- [ ] **Step 4: Run** — new tests pass; `uv run python -m pytest -q` all green (expect 219). Confirm the existing approach_npc tests (`test_resolve_approach_npc_interacts_when_adjacent_and_facing`, `test_approach_npc_substring_matches_named_sprite`) still pass with the new signature (they call `_resolve_target`, which now passes the target/directive through — verify).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/pokemon_agent/agent/typesafe_reasoner.py src/pokemon_agent/agent/reason_loop.py tests/unit/test_unified_loop.py
+git commit -m "jev: choose_npc — calibrated pick of WHICH npc to talk to, held per leg; approach_npc uses it"
+```
+
+---
+
+## Task 7: Live validation from the rival-battle save (manual, not a unit test)
 
 **Files:**
 - Use: `roms/pokemon_red.gb.state` (the natural save — paused INSIDE the scripted rival battle).

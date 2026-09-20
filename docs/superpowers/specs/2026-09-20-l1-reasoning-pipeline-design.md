@@ -140,6 +140,10 @@ high-frequency) and **`strategist` for BRAINSTORM + DECIDE + REPAIR** (the reaso
   - `kind == "action"`: `done_when` must be present AND parse to a non-`on_map` predicate. A
     missing, unparseable, or `on_map` criterion on an action step is a validation **error** →
     repair-once-then-break.
+  - `kind == "travel"` **but** the step also declares `talk`/`who`, or carries a non-`on_map`
+    criterion: contradictory (travel = "nothing happens on arrival") → validation **error** →
+    repair-once-then-break. (Anything that talks/picks up/delivers/heals/grinds must be
+    `kind:action`.)
   This is the exact bug class the effort exists to kill: a "deliver parcel" step is `kind:action`,
   so an `on_map:40` criterion on it is rejected outright — it can never false-complete on arrival.
 - Canonical mappings the prompt teaches by example: pickup → `has_item:<item>`; deliver → the
@@ -212,7 +216,10 @@ of situations, and scores the emitted `done_when`:
 - **Semantic grade (deterministic via expected-class):** each fixture declares the expected
   predicate *family* for its objective; assert the emitted criterion is in that family
   (deliver→`no_item`, heal→`hp_frac`, pickup→`has_item`, reach-town→`travel`/`on_map`,
-  grind→`level`). No LLM judge needed — stable and cheap.
+  grind→`level`). No LLM judge needed — stable and cheap. For the **parcel fixtures specifically**
+  (the exact bug class this effort exists to kill), the fixture asserts the full criterion including
+  its argument (`has_item:oaks_parcel` / `no_item:oaks_parcel`), not just the family — still fully
+  deterministic. A fixture may declare either an expected family or an exact criterion.
 - **Output:** a scorecard (pass rate per fixture + the offending criteria) via
   `scripts/eval_criteria.py`. This is the prompt-tuning loop: run, read failures, adjust prompt,
   re-run. Fixtures reuse situations we already have — "holding undelivered parcel in Viridian,"

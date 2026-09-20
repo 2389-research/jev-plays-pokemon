@@ -233,7 +233,7 @@ def test_recompile_preserves_active_talk_leftover():
     loop, _ = _loop(map_id=40, goal_map=2)
     loop._plan_steps = [QuestStep(id="q1", map=40, talk=True, who="Oak",
                                   done_when="no_item:Oak's Parcel", status="active"),
-                        QuestStep(id="q2", map=9, done_when="on_map", status="pending")]
+                        QuestStep(id="q2", map=9, done_when="on_map", status="pending", kind="travel")]
     talk = Directive(intent=Intent.TALK_TO, target={"kind": "npc", "map": 40, "sprite": "Oak"},
                      success={"no_item": "Oak's Parcel"}, quest_id="q1")
     loop._quest = _deque([talk])
@@ -301,7 +301,8 @@ def test_l1_due_is_a_pure_predicate():
 def test_recorder_extra_has_l1_fields():
     loop, _ = _loop(map_id=1, goal_map=2)
     loop.planner.revise_quests = lambda emu, ctx: {"change": True, "mission": "reach Pewter",
-        "milestone": "deliver parcel", "add": [{"map": 42, "talk": False, "done_when": "on_map", "why": "mart"}], "remove": []}
+        "milestone": "deliver parcel",
+        "add": [{"map": 42, "talk": False, "done_when": "on_map", "kind": "travel", "why": "mart"}], "remove": []}
     obs, _ = loop.builder.build(capture_screenshot=False)
     loop._run_l1(obs)
     assert loop._l1_last is not None and loop._l1_last["change"] is True

@@ -72,7 +72,8 @@ hid the `on_map` default).
 run_l1_pipeline(emu, context, planner, *, hard_event: bool) -> proposal | None
   │
   ├─ 1. READ STATE (deterministic)
-  │      game_signals(emu): map, party, hp_frac, min_level, badges, items  (no LLM)
+  │      game_signals(emu): party, hp_frac, min_level, badges, items  (no LLM)
+  │      + current map id/name (from obs.player; game_signals does NOT include map)
   │
   ├─ 2. TRIAGE  (cheap, 1 call, deepseek-4.1-flash)  — SKIPPED if hard_event
   │      inputs: current plan + state signals
@@ -85,8 +86,9 @@ run_l1_pipeline(emu, context, planner, *, hard_event: bool) -> proposal | None
   │
   ├─ 4. DECIDE  (glm-5.3)
   │      inputs: state signals + brainstorm output + current plan + the DSL grammar
-  │      -> proposal {add:[{map, talk?, who?, done_when, why}], remove:[ids],
+  │      -> proposal {add:[{kind, map, talk?, who?, done_when, why}], remove:[ids],
   │                   mission?, milestone?, assessment}
+  │      each added step declares kind = "travel" | "action" (see contract below).
   │      anchored to the existing plan: prefer minimal edits; the reconciler preserves progress.
   │
   ├─ 5. VALIDATE  (deterministic)
@@ -105,8 +107,13 @@ run_l1_pipeline(emu, context, planner, *, hard_event: bool) -> proposal | None
   gained/lost, wedge (`BLOCK_TRIGGER`), HP emergency (`HEAL_EMERGENCY`), plan exhausted, level-up
   past target.
 
-**Model roles:** triage = `deepseek-4.1-flash` (cheap); brainstorm + decide + repair = `glm-5.3`
-(the strategist). All calls stream, `reasoning_effort="none"`.
+**Model roles (mapped onto the existing `Planner` providers).** `Planner` already holds two
+providers: `provider` (the fast text model, `deepseek-4.1-flash` under `--decider typesafe
+--no-vision`) and `strategist` (`glm-5.3`). The pipeline uses **`provider` for TRIAGE** (cheap,
+high-frequency) and **`strategist` for BRAINSTORM + DECIDE + REPAIR** (the reasoning calls). No new
+"deepseek" provider is introduced — these are the two providers `Planner` already constructs. If
+`strategist` is unconfigured, the deep pipeline degrades to `provider`. All calls stream,
+`reasoning_effort="none"`.
 
 ### Acceptance-criteria contract
 
@@ -114,15 +121,28 @@ run_l1_pipeline(emu, context, planner, *, hard_event: bool) -> proposal | None
   every step it emits. Grammar (unchanged): `on_map`, `talked`, `has_item:<name>`,
   `no_item:<name>`, `level>=<N>`, `badges>=<N>`, `hp_frac>=<F>`, `verify:<free-text>` (LLM-judged
   for facts not in RAM).
-- **`on_map` is a valid criterion only for a pure-travel step** (a leg whose entire purpose is
-  "reach map X"). For any action step (talk / pickup / deliver / heal / grind) a missing or
-  `on_map` criterion is a validation error → repair-once-then-break.
+- **The travel/action discriminator is explicit, not inferred.** Every emitted step carries a
+  required `kind` field: `"travel"` (the leg's *entire* purpose is "reach map X"; nothing happens on
+  arrival) or `"action"` (talk / pickup / deliver / heal / grind / any objective that is *done*
+  by a state change, not by arrival). The planner declares `kind`; the validator does **not** guess
+  it from `talk`/`map` (which is why the old code could not tell a grind step, `talk=false`, from a
+  travel leg). `QuestStep` gains a `kind: str = "action"` field (default `"action"`, the safe side —
+  a step with no declared kind is treated as an action and must justify its criterion).
+- **Validation rule (step 5), the load-bearing check:**
+  - `kind == "travel"`: `done_when` must be `on_map` (or empty → normalized to `on_map:<map>`).
+    `on_map` is legal *only here*.
+  - `kind == "action"`: `done_when` must be present AND parse to a non-`on_map` predicate. A
+    missing, unparseable, or `on_map` criterion on an action step is a validation **error** →
+    repair-once-then-break.
+  This is the exact bug class the effort exists to kill: a "deliver parcel" step is `kind:action`,
+  so an `on_map:40` criterion on it is rejected outright — it can never false-complete on arrival.
 - Canonical mappings the prompt teaches by example: pickup → `has_item:<item>`; deliver → the
   post-state `no_item:<item>`; heal → `hp_frac>=1.0`; grind → `level>=<N>`; gym badge →
   `badges>=<N>`; story beat not in RAM → `verify:<statement>`.
-- The reconciler's `_criterion` **stops defaulting to `on_map`**: it takes the (now-guaranteed)
-  parsed criterion. A `None` criterion reaching compile is a bug and raises (belt-and-suspenders;
-  validation in step 5 should prevent it).
+- The reconciler's `_criterion` **stops defaulting to `on_map`** for action steps: it takes the
+  (now-guaranteed) parsed criterion. `on_map` is synthesized only for `kind == "travel"` steps. A
+  `kind == "action"` step reaching compile with a `None`/`on_map` criterion is a bug and raises
+  (belt-and-suspenders; validation in step 5 should prevent it ever getting here).
 
 ## Testing strategy
 
@@ -133,8 +153,9 @@ RAM and are deterministic. Split them and test each where it is cheap.
 New test double `RamEmulator` (a dict of `address → value` with `set_party_hp`, `set_bag_item`,
 `set_map`, `set_badges`, `set_level`) — today's `FakeEmulator` only serves X/Y/map.
 - DSL round-trip: every `done_when` form parses to the right predicate; malformed → `None`.
-- **Anti-regression:** compiling an *action* step with no criterion (or `on_map`) raises; a travel
-  step may keep `on_map`.
+- **Anti-regression (the discriminator):** compiling a `kind:action` step whose `done_when` is
+  missing / unparseable / `on_map` raises; a `kind:travel` step with `on_map` compiles fine. Cover
+  a grind step (`kind:action`, `talk=false`) explicitly — the case the old inference missed.
 - **Heal lifecycle (the spine):** a step with `done_when="hp_frac>=1.0"` is *not* satisfied at low
   HP, *is* satisfied after `set_party_hp` to full → step marks `done`.
 - **Parcel lifecycle (anti-regression for the exact bug):** `has_item:oaks_parcel` unsatisfied
@@ -179,10 +200,14 @@ Enablers in scope: the `RamEmulator` double, and a thin **`write_memory`** on th
 - **Create:** `src/pokemon_agent/agent/l1_pipeline.py` — triage / brainstorm / decide / validate+repair.
 - **Create:** `tests/unit/test_l1_pipeline.py` — Layer-2 wiring (stubbed LLM).
 - **Create/extend test double:** `RamEmulator` (in `tests/conftest.py` or `tests/support/`).
-- **Modify:** `agent/reason_loop.py` — `_run_l1` calls the pipeline; two-tier triage/deep gating;
-  completion-provenance events; emit `l1_invalid_criterion`.
-- **Modify:** `agent/quest_reconciler.py` — `_criterion` no longer defaults to `on_map`; `None`
-  criterion for an action step raises.
+- **Modify:** `agent/reason_loop.py` — `_run_l1` calls `run_l1_pipeline` and reconciles its
+  proposal; two-tier triage/deep gating; completion-provenance events; emit `l1_invalid_criterion`.
+  **Wiring note:** `run_l1_pipeline` returns `None` for "no change" (triage said false, or
+  validation broke and we keep the prior plan) and a proposal dict otherwise — replacing today's
+  `prop.get("change")` branch (`reason_loop.py:385`). A `None` return means reconcile nothing.
+- **Modify:** `agent/quest_reconciler.py` — `QuestStep` gains `kind: str = "action"`; `_criterion`
+  synthesizes `on_map` only for `kind == "travel"`; a `kind == "action"` step with a `None`/`on_map`
+  criterion raises. Adds carry `kind` through `reconcile_quests`.
 - **Modify:** `agent/planner_llm.py` — DECIDE/brainstorm/triage prompts + repair prompt; reuse
   `_llm_with_search`; keep `_parse_done_when` (extend tests).
 - **Modify:** `emulator/interface.py`, `emulator/pyboy_adapter.py`, `emulator/fake_emulator.py` —

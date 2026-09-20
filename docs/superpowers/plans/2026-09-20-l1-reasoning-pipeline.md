@@ -69,7 +69,7 @@ def test_write_memory_round_trips():
 
 - [ ] **Step 3: Implement.**
   - `interface.py`: add abstract `def write_memory(self, address: int, value: int, bank: int | None = None) -> None: ...` next to `read_memory`.
-  - `pyboy_adapter.py`: implement `def write_memory(self, address, value, bank=None): self.pyboy.memory[address] = value` (mirror how `read_memory` accesses `self.pyboy.memory`).
+  - `pyboy_adapter.py`: implement `def write_memory(self, address, value, bank=None): self._pyboy.memory[address] = value` (the attribute is `self._pyboy`, per `pyboy_adapter.py:96` — mirror exactly how `read_memory` accesses it).
   - `fake_emulator.py`: add `self._ram: dict[int,int] = {}` in `__init__`; `write_memory` sets `self._ram[address] = value`; extend `read_memory` to consult `self._ram` first (falling back to the existing X/Y/map dict): `return self._ram.get(address, {ADDR_PLAYER_X: self.x, ...}.get(address, 0))`.
 
 - [ ] **Step 4: Run, verify pass.** Then full suite `uv run python -m pytest -q` — still green.
@@ -146,7 +146,7 @@ The core fix. `on_map` completion becomes legal only for `kind == "travel"`.
 
 ```python
 import pytest
-from pokemon_agent.agent.quest_reconciler import QuestStep, compile_steps_to_directives
+from pokemon_agent.agent.quest_reconciler import QuestStep, compile_steps_to_directives, reconcile_quests
 
 def test_travel_step_keeps_on_map():
     d = compile_steps_to_directives([QuestStep(id="t", map=2, kind="travel")])
@@ -206,8 +206,11 @@ def _criterion(done_when: str | None, map_id: int, kind: str) -> dict:
     `(map, done_when)` — `kind` does not participate.
 
 - [ ] **Step 4: Run, verify pass.** Full suite — expect failures in call sites that build action
-  steps without criteria (the bootstrap); those are fixed in Task 4. If any *other* test breaks,
-  it revealed a real complete-on-arrival step — fix the test's step to declare `kind`/criterion.
+  steps without criteria (the bootstrap); those are fixed in Task 4. **Known pre-existing break:**
+  `tests/unit/test_quest_reconciler.py::test_compile_travel_only_step` builds
+  `QuestStep(..., done_when="on_map")` which now defaults to `kind="action"` and will raise in
+  `_criterion` — add `kind="travel"` to that test's step. If any *other* test breaks, it revealed a
+  real complete-on-arrival step — fix that test's step to declare `kind`/criterion.
 
 - [ ] **Step 5: Commit** — `feat(quests): kind travel|action; on_map completion only for travel`.
 
@@ -532,7 +535,9 @@ Grader (deterministic, no LLM):
 - Create: a minimal `tests/integration/test_l1_live_smoke.py` marked `@pytest.mark.live`
 
 - [ ] **Step 1:** Add the `live` marker registration and a skip hook (skip unless `RUN_LIVE=1` or
-  `--run-live`). Follow any existing marker pattern in `conftest.py`.
+  `--run-live`). Note: `tests/conftest.py` currently holds only a `sys.path` insert — there is no
+  existing marker pattern to follow; create the `pytest_configure` marker registration +
+  `pytest_collection_modifyitems` skip hook from scratch.
 - [ ] **Step 2:** Add a single `@pytest.mark.live` smoke: load `viridian_stuck.state`, run a handful
   of L1 deep reviews, assert the plan gains at least one action step with a checkable criterion.
 - [ ] **Step 3:** Confirm `uv run python -m pytest -q` SKIPS it by default; `RUN_LIVE=1 uv run

@@ -219,8 +219,10 @@ Enablers in scope: the `RamEmulator` double, and a thin **`write_memory`** on th
   `prop.get("change")` branch (`reason_loop.py:385`). A `None` return means reconcile nothing.
 - **Modify:** `agent/quest_reconciler.py` — `QuestStep` gains `kind: str = "action"`; `_criterion`
   signature becomes `_criterion(done_when, map_id, kind)` and synthesizes `on_map` only for
-  `kind == "travel"`; a `kind == "action"` step with a `None`/`on_map` criterion raises. `add`
-  entries carry `kind` through `reconcile_quests` (default `"action"` when absent).
+  `kind == "travel"`; a `kind == "action"` step with a `None`/`on_map` criterion raises.
+  `compile_steps_to_directives` passes `s.kind` into `_criterion`. `add` entries carry `kind`
+  through `reconcile_quests` (default `"action"` when absent); the dedup key stays
+  `(map, done_when)` — `kind` does not participate.
 - **Modify:** `agent/planner_llm.py` — DECIDE/brainstorm/triage prompts + repair prompt; reuse
   `_llm_with_search`; keep `_parse_done_when` (extend tests).
 - **Modify:** `emulator/interface.py`, `emulator/pyboy_adapter.py`, `emulator/fake_emulator.py` —

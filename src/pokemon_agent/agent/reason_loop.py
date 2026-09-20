@@ -457,8 +457,10 @@ class ReasoningLoop:
             if s.id == quest_id:
                 s.status = status
                 if status == "done":
+                    # NB: key is "step_kind", not "kind" — the recorder's on_event stamps the event
+                    # type under "kind" ("step_done"), so a payload "kind" would clobber that marker.
                     self.on_event("step_done", {"step": self.session.step, "id": s.id,
-                                                "done_when": s.done_when, "kind": s.kind})
+                                                "done_when": s.done_when, "step_kind": s.kind})
                 elif status == "wedged":
                     self.on_event("step_wedged", {"step": self.session.step, "id": s.id,
                                                   "done_when": s.done_when,

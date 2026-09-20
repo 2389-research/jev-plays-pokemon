@@ -508,7 +508,9 @@ def test_mark_step_done_emits_provenance_event():
     assert len(matches) == 1
     assert matches[0]["id"] == "q1"
     assert matches[0]["done_when"] == "on_map"
-    assert matches[0]["kind"] == "travel"
+    # "step_kind" (not "kind"): the recorder stamps the event type under "kind", so the step's own
+    # kind is carried under a distinct key to avoid clobbering the "step_done" marker in the log.
+    assert matches[0]["step_kind"] == "travel"
 
 
 def test_mark_step_wedged_emits_provenance_event_with_reason():

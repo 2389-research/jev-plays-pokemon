@@ -97,6 +97,12 @@ class PyBoyEmulator:
             return self._pyboy.memory[address]
         return self._pyboy.memory[bank, address]
 
+    def write_memory(self, address: int, value: int, bank: int | None = None) -> None:
+        if bank is None:
+            self._pyboy.memory[address] = value
+        else:
+            self._pyboy.memory[bank, address] = value
+
     def save_state(self, path: Path) -> None:
         with open(path, "wb") as f:
             self._pyboy.save_state(f)

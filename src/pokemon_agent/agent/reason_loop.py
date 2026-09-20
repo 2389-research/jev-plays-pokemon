@@ -491,7 +491,7 @@ class ReasoningLoop:
             if not self._plan_steps:
                 gm = self.goal_map if self.goal_map is not None else (obs.player.map_id if obs.player else 0)
                 self._plan_steps.append(QuestStep(id=self._next_qid(), map=gm, done_when="on_map",
-                                                  status="pending", provisional=True))
+                                                  status="pending", provisional=True, kind="travel"))
                 self._recompile_quest()
 
         # --- 3b. the active directive's step was removed/replaced by L1 -> advance to the plan ----

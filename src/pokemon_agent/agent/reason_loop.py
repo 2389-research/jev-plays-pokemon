@@ -38,6 +38,7 @@ from ..games.pokemon_red.progress import progress_vector
 from ..games.pokemon_red.routes import next_direction
 from ..games.pokemon_red.state import detect_mode, read_player
 from ..observations.builder import ObservationBuilder
+from .l1_pipeline import run_l1_pipeline
 from .memory import AgentMemory
 from .navigator import Navigator
 from .plan import AgentPlan, Directive, Intent
@@ -352,13 +353,16 @@ class ReasoningLoop:
         return any((s.done_when or "").startswith("hp_frac")
                    for s in self._plan_steps if s.status in ("pending", "active"))
 
-    def _run_l1(self, obs, emergency: bool = False) -> None:
-        """L1 strategic review: ask the planner whether the standing plan needs to change; if so,
-        deterministically reconcile the proposal into the canonical plan (preserving progress) and
-        recompile the quest queue. Durable strategy (mission/milestone/tried_failed) lives on the
-        AgentPlan in memory. ``emergency`` (near-faint) is surfaced in the context so L1 inserts a
-        routed heal quest. Never raises: any failure emits ``l1_failed`` and changes nothing. The
-        gate counters are cleared in ``finally`` so a failing review doesn't re-fire every step."""
+    def _run_l1(self, obs, emergency: bool = False, hard_event: bool = False) -> None:
+        """L1 strategic review: run the L1 pipeline (triage/brainstorm/decide/validate) to see
+        whether the standing plan needs to change; if so, deterministically reconcile the proposal
+        into the canonical plan (preserving progress) and recompile the quest queue. Durable
+        strategy (mission/milestone/tried_failed) lives on the AgentPlan in memory. ``emergency``
+        (near-faint) is surfaced in the context so L1 inserts a routed heal quest. ``hard_event``
+        tells the pipeline this review was forced by an event (wedge/emergency/plan-exhausted)
+        rather than the periodic cadence, so it skips the cheap triage gate. Never raises: any
+        failure emits ``l1_failed`` and changes nothing. The gate counters are cleared in
+        ``finally`` so a failing review doesn't re-fire every step."""
         try:
             if self.planner is None:
                 return
@@ -381,8 +385,9 @@ class ReasoningLoop:
                 "mission": self._plan.mission,
                 "milestone": self._plan.milestone,
             }
-            prop = self.planner.revise_quests(emu, context) or {}
-            if prop.get("change"):
+            prop = run_l1_pipeline(emu, context, self.planner, hard_event=(hard_event or emergency),
+                                   on_trace=None)
+            if prop is not None:
                 removed_ids = set(prop.get("remove") or [])
                 removed = [s for s in self._plan_steps if s.id in removed_ids]
                 self._plan_steps = reconcile_quests(
@@ -417,9 +422,9 @@ class ReasoningLoop:
                 self.on_event("quest", {"step": self.session.step, "len": len(self._quest),
                                         "plan": [d.reason for d in self._quest]})
             else:
-                self._l1_last = {"change": False, "assessment": prop.get("assessment")}
+                self._l1_last = {"change": False, "assessment": ""}
                 self.on_event("l1_review", {"step": self.session.step, "change": False,
-                                            "assessment": prop.get("assessment")})
+                                            "assessment": ""})
         except Exception as e:  # never let a strategic review break the loop
             self._l1_last = {"change": False, "assessment": "l1_failed"}
             self.on_event("l1_failed", {"step": self.session.step, "error": str(e)})
@@ -478,7 +483,10 @@ class ReasoningLoop:
         # heal errand is already in the plan.
         ran_l1 = False
         if self._l1_due() or (emergency and not self._has_heal_step()):
-            self._run_l1(obs, emergency=emergency)
+            # event-driven (wedge / near-faint / navigation deadlock) -> hard_event, so the pipeline
+            # skips its cheap triage gate; a review firing ONLY off the periodic cadence is not.
+            hard_event = bool(self._l1_event) or self._blocked_for_n >= BLOCK_TRIGGER or emergency
+            self._run_l1(obs, emergency=emergency, hard_event=hard_event)
             ran_l1 = True
 
         # --- 3. bootstrap: L1 owns the plan. On an empty plan, let L1 populate it FIRST (so we don't
@@ -487,7 +495,8 @@ class ReasoningLoop:
         # default — which _run_l1 drops the moment L1 supplies real steps.
         if not self._plan_steps:
             if not ran_l1 and self.planner is not None and (self.planner.strategist or self.planner.provider):
-                self._run_l1(obs)
+                # bootstrap on an empty plan is plan-exhausted, not a periodic cadence tick -> hard_event
+                self._run_l1(obs, hard_event=True)
             if not self._plan_steps:
                 gm = self.goal_map if self.goal_map is not None else (obs.player.map_id if obs.player else 0)
                 self._plan_steps.append(QuestStep(id=self._next_qid(), map=gm, done_when="on_map",

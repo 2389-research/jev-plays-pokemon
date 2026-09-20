@@ -137,13 +137,15 @@ def test_emergency_heal_pings_l1_not_freeze():
     loop._directive = d
     calls = {"n": 0}
 
-    def fake_revise(emu, ctx):
+    def fake_pipeline(emu, ctx, planner, *, hard_event, on_trace=None):
         calls["n"] += 1
         assert ctx["signals"].get("emergency_heal") is True     # L1 is told it's an emergency
-        return {"change": True, "mission": "", "milestone": "heal",
+        assert hard_event is True                                # emergency implies hard_event
+        return {"mission": "", "milestone": "heal",
                 "add": [{"map": 3, "talk": True, "who": "nurse", "done_when": "hp_frac>=0.95",
                          "why": "heal at the center"}], "remove": []}
-    loop.planner.revise_quests = fake_revise
+    orig_pipeline = rl.run_l1_pipeline
+    rl.run_l1_pipeline = fake_pipeline
     faint = [{"hp": 0, "max_hp": 20}]                            # a fainted member
     orig = rl.game_signals
     rl.game_signals = lambda emu: {"party": faint, "hp_frac": 0.0, "min_level": 5,
@@ -159,6 +161,7 @@ def test_emergency_heal_pings_l1_not_freeze():
         assert calls["n"] == 1
     finally:
         rl.game_signals = orig
+        rl.run_l1_pipeline = orig_pipeline
 
 
 def test_wedged_step_replaced_by_l1():
@@ -167,6 +170,7 @@ def test_wedged_step_replaced_by_l1():
     from collections import deque as _deque
     from pokemon_agent.agent.quest_reconciler import QuestStep
     from pokemon_agent.agent.reason_loop import SERVO_FAIL_LIMIT
+    import pokemon_agent.agent.reason_loop as rl
     loop, emu = _loop(map_id=1, goal_map=2)
     loop._plan_steps = [QuestStep(id="q1", map=5, done_when="on_map", status="active"),
                         QuestStep(id="q2", map=9, done_when="on_map", status="pending")]
@@ -178,18 +182,20 @@ def test_wedged_step_replaced_by_l1():
     loop._directive = d_active
     loop._qid = 10                                    # so L1's fresh step ids don't reuse "q1"/"q2"
     loop._servo_fail = SERVO_FAIL_LIMIT               # the active step is wedged (no route)
-    loop.planner.revise_quests = lambda emu, ctx: {
-        "change": True,
+    orig_pipeline = rl.run_l1_pipeline
+    rl.run_l1_pipeline = lambda emu, ctx, planner, *, hard_event, on_trace=None: {
         "add": [{"map": 5, "talk": False, "done_when": "on_map", "why": "retry via another route"}],
         "remove": ["q1"]}
-
-    loop._manage_directive(loop.builder.build(capture_screenshot=False)[0])
-    ids = [s.id for s in loop._plan_steps]
-    assert "q1" not in ids                                          # the wedged step was replaced
-    assert "q2" in ids                                              # the rest of the plan survived
-    assert all(s.status != "wedged" for s in loop._plan_steps)     # nothing left wedged
-    # a fresh retry step for map 5 replaced the wedged one; the plan advanced onto it (now active)
-    assert any(s.map == 5 and s.status in ("pending", "active") for s in loop._plan_steps)
+    try:
+        loop._manage_directive(loop.builder.build(capture_screenshot=False)[0])
+        ids = [s.id for s in loop._plan_steps]
+        assert "q1" not in ids                                          # the wedged step was replaced
+        assert "q2" in ids                                              # the rest of the plan survived
+        assert all(s.status != "wedged" for s in loop._plan_steps)     # nothing left wedged
+        # a fresh retry step for map 5 replaced the wedged one; the plan advanced onto it (now active)
+        assert any(s.map == 5 and s.status in ("pending", "active") for s in loop._plan_steps)
+    finally:
+        rl.run_l1_pipeline = orig_pipeline
 
 
 def test_wedge_resets_block_and_fires_l1_once():
@@ -198,6 +204,7 @@ def test_wedge_resets_block_and_fires_l1_once():
     from collections import deque as _deque
     from pokemon_agent.agent.quest_reconciler import QuestStep
     from pokemon_agent.agent.reason_loop import BLOCK_TRIGGER
+    import pokemon_agent.agent.reason_loop as rl
     loop, emu = _loop(map_id=1, goal_map=2)
     loop._plan_steps = [QuestStep(id="q1", map=5, done_when="on_map", status="active"),
                         QuestStep(id="q2", map=9, done_when="on_map", status="pending")]
@@ -210,19 +217,22 @@ def test_wedge_resets_block_and_fires_l1_once():
     loop._blocked_for_n = BLOCK_TRIGGER               # navigation deadlock over budget
     calls = {"n": 0}
 
-    def no_change(emu, ctx):
+    def no_change(emu, ctx, planner, *, hard_event, on_trace=None):
         calls["n"] += 1
-        return {"change": False, "add": [], "remove": []}
-    loop.planner.revise_quests = no_change
-
-    obs = loop.builder.build(capture_screenshot=False)[0]
-    loop._manage_directive(obs)
-    assert any(s.id == "q1" and s.status == "wedged" for s in loop._plan_steps)  # marked wedged
-    assert loop._blocked_for_n == 0                                              # counter reset
-    assert calls["n"] == 1                                                       # L1 fired for the wedge
-    # a second call must NOT re-fire L1 (the block counter was reset; the plan advanced)
-    loop._manage_directive(obs)
-    assert calls["n"] == 1
+        return None
+    orig_pipeline = rl.run_l1_pipeline
+    rl.run_l1_pipeline = no_change
+    try:
+        obs = loop.builder.build(capture_screenshot=False)[0]
+        loop._manage_directive(obs)
+        assert any(s.id == "q1" and s.status == "wedged" for s in loop._plan_steps)  # marked wedged
+        assert loop._blocked_for_n == 0                                              # counter reset
+        assert calls["n"] == 1                                                       # L1 fired for the wedge
+        # a second call must NOT re-fire L1 (the block counter was reset; the plan advanced)
+        loop._manage_directive(obs)
+        assert calls["n"] == 1
+    finally:
+        rl.run_l1_pipeline = orig_pipeline
 
 
 def test_recompile_preserves_active_talk_leftover():
@@ -244,17 +254,22 @@ def test_recompile_preserves_active_talk_leftover():
 
 
 def test_run_l1_resets_counters_on_exception():
-    # a raising revise_quests must not leave the gate counters set (else L1 retries + re-raises
+    # a raising run_l1_pipeline must not leave the gate counters set (else L1 retries + re-raises
     # every step). The resets live in a finally.
+    import pokemon_agent.agent.reason_loop as rl
     loop, _ = _loop(map_id=1, goal_map=2)
     loop._legs_since_l1 = 5
     loop._l1_event = True
 
-    def boom(emu, ctx):
+    def boom(emu, ctx, planner, *, hard_event, on_trace=None):
         raise RuntimeError("kaboom")
-    loop.planner.revise_quests = boom
-    loop._run_l1(loop.builder.build(capture_screenshot=False)[0])
-    assert loop._legs_since_l1 == 0 and loop._l1_event is False
+    orig_pipeline = rl.run_l1_pipeline
+    rl.run_l1_pipeline = boom
+    try:
+        loop._run_l1(loop.builder.build(capture_screenshot=False)[0])
+        assert loop._legs_since_l1 == 0 and loop._l1_event is False
+    finally:
+        rl.run_l1_pipeline = orig_pipeline
 
 
 # --- L1 strategic planner (Task 6a) ---
@@ -263,26 +278,37 @@ from pokemon_agent.agent.plan import Intent
 
 
 def test_run_l1_inserts_and_recompiles():
+    import pokemon_agent.agent.reason_loop as rl
     loop, _ = _loop(map_id=1, goal_map=2)
-    loop.planner.revise_quests = lambda emu, ctx: {
-        "change": True, "mission": "reach Pewter", "milestone": "deliver parcel",
+    orig_pipeline = rl.run_l1_pipeline
+    rl.run_l1_pipeline = lambda emu, ctx, planner, *, hard_event, on_trace=None: {
+        "mission": "reach Pewter", "milestone": "deliver parcel",
         "add": [{"map": 42, "talk": True, "who": "clerk", "done_when": "has_item:Oak's Parcel", "why": "get parcel"}],
         "remove": []}
-    obs, _ = loop.builder.build(capture_screenshot=False)
-    loop._run_l1(obs)
-    assert any(s.map == 42 and s.talk for s in loop._plan_steps)          # reconciled into the plan
-    assert isinstance(loop._quest, deque) and any(d.intent == Intent.TALK_TO for d in loop._quest)  # recompiled
-    assert loop._plan is not None and loop._plan.milestone == "deliver parcel"   # durable memory updated
+    try:
+        obs, _ = loop.builder.build(capture_screenshot=False)
+        loop._run_l1(obs)
+        assert any(s.map == 42 and s.talk for s in loop._plan_steps)          # reconciled into the plan
+        assert isinstance(loop._quest, deque) and any(d.intent == Intent.TALK_TO for d in loop._quest)  # recompiled
+        assert loop._plan is not None and loop._plan.milestone == "deliver parcel"   # durable memory updated
+    finally:
+        rl.run_l1_pipeline = orig_pipeline
 
 
 def test_run_l1_no_change_keeps_plan():
+    import pokemon_agent.agent.reason_loop as rl
     loop, _ = _loop(map_id=1, goal_map=2)
     from pokemon_agent.agent.quest_reconciler import QuestStep
     loop._plan_steps = [QuestStep(id="q1", map=2, done_when="on_map", status="active")]
-    loop.planner.revise_quests = lambda emu, ctx: {"change": False, "add": [], "remove": []}
-    obs, _ = loop.builder.build(capture_screenshot=False)
-    loop._run_l1(obs)
-    assert [s.id for s in loop._plan_steps] == ["q1"]                     # unchanged on no-change
+    orig_pipeline = rl.run_l1_pipeline
+    rl.run_l1_pipeline = lambda emu, ctx, planner, *, hard_event, on_trace=None: None
+    try:
+        obs, _ = loop.builder.build(capture_screenshot=False)
+        loop._run_l1(obs)
+        assert [s.id for s in loop._plan_steps] == ["q1"]                     # unchanged on no-change
+        assert loop._l1_last["change"] is False
+    finally:
+        rl.run_l1_pipeline = orig_pipeline
 
 
 def test_l1_due_is_a_pure_predicate():
@@ -299,64 +325,138 @@ def test_l1_due_is_a_pure_predicate():
 
 
 def test_recorder_extra_has_l1_fields():
+    import pokemon_agent.agent.reason_loop as rl
     loop, _ = _loop(map_id=1, goal_map=2)
-    loop.planner.revise_quests = lambda emu, ctx: {"change": True, "mission": "reach Pewter",
-        "milestone": "deliver parcel",
+    orig_pipeline = rl.run_l1_pipeline
+    rl.run_l1_pipeline = lambda emu, ctx, planner, *, hard_event, on_trace=None: {
+        "mission": "reach Pewter", "milestone": "deliver parcel",
         "add": [{"map": 42, "talk": False, "done_when": "on_map", "kind": "travel", "why": "mart"}], "remove": []}
-    obs, _ = loop.builder.build(capture_screenshot=False)
-    loop._run_l1(obs)
-    assert loop._l1_last is not None and loop._l1_last["change"] is True
-    assert loop._plan.milestone == "deliver parcel"
-    assert "assessment" in loop._l1_last
+    try:
+        obs, _ = loop.builder.build(capture_screenshot=False)
+        loop._run_l1(obs)
+        assert loop._l1_last is not None and loop._l1_last["change"] is True
+        assert loop._plan.milestone == "deliver parcel"
+        assert "assessment" in loop._l1_last
+    finally:
+        rl.run_l1_pipeline = orig_pipeline
 
 
 def test_l1_plans_parcel_errand_end_to_end():
+    import pokemon_agent.agent.reason_loop as rl
     from pokemon_agent.agent.plan import Intent
     loop, _ = _loop(map_id=1, goal_map=2)   # in Viridian, goal Pewter
     loop._qid = 50
     # stub L1: when blocked at Viridian, insert the parcel errand (Mart -> get parcel -> Lab -> deliver)
-    loop.planner.revise_quests = lambda emu, ctx: {"change": True, "mission": "reach Pewter",
-        "milestone": "deliver Oak's Parcel",
+    orig_pipeline = rl.run_l1_pipeline
+    rl.run_l1_pipeline = lambda emu, ctx, planner, *, hard_event, on_trace=None: {
+        "mission": "reach Pewter", "milestone": "deliver Oak's Parcel",
         "add": [
             {"map": 42, "talk": True, "who": "clerk", "done_when": "has_item:Oak's Parcel", "why": "get parcel"},
             {"map": 40, "talk": True, "who": "Oak", "done_when": "no_item:Oak's Parcel", "why": "deliver"},
         ], "remove": []}
-    obs, _ = loop.builder.build(capture_screenshot=False)
-    loop._run_l1(obs)
-    maps = [s.map for s in loop._plan_steps]
-    assert 42 in maps and 40 in maps                       # Mart + Lab planned
-    # the compiled queue contains a TALK_TO to Oak whose success checks the parcel is gone
-    talk_oak = [d for d in loop._quest if d.intent == Intent.TALK_TO and (d.target or {}).get("sprite") == "Oak"]
-    assert talk_oak and "no_item" in talk_oak[0].success   # deliver step is machine-checkable
+    try:
+        obs, _ = loop.builder.build(capture_screenshot=False)
+        loop._run_l1(obs)
+        maps = [s.map for s in loop._plan_steps]
+        assert 42 in maps and 40 in maps                       # Mart + Lab planned
+        # the compiled queue contains a TALK_TO to Oak whose success checks the parcel is gone
+        talk_oak = [d for d in loop._quest if d.intent == Intent.TALK_TO and (d.target or {}).get("sprite") == "Oak"]
+        assert talk_oak and "no_item" in talk_oak[0].success   # deliver step is machine-checkable
+    finally:
+        rl.run_l1_pipeline = orig_pipeline
 
 
 def test_l1_plan_supersedes_bootstrap_default():
     # regression: a synthesized bootstrap "travel to goal_map" step must NOT stay the active
     # directive once L1 supplies a real plan. In the live bug it stayed travel->Route 2 (a
     # story-gated hop) for 300+ steps while L1's parcel errand sat behind it (planned-not-executed).
+    import pokemon_agent.agent.reason_loop as rl
     from pokemon_agent.agent.plan import Intent
     from pokemon_agent.agent.quest_reconciler import QuestStep
     loop, _ = _loop(map_id=1, goal_map=2)
     loop.planner.strategist = object()      # a provider is available (so bootstrap defers to L1)
     obs = loop.builder.build(capture_screenshot=False)[0]
+    orig_pipeline = rl.run_l1_pipeline
+    try:
+        # 1) bug precondition: L1 declines on the empty plan -> a PROVISIONAL default is committed.
+        rl.run_l1_pipeline = lambda emu, ctx, planner, *, hard_event, on_trace=None: None
+        d0 = loop._manage_directive(obs)
+        assert d0 is not None and d0.target_map == 2                  # committed the goal-travel default
+        prov = [s for s in loop._plan_steps if s.provisional]
+        assert len(prov) == 1 and prov[0].status == "active"         # the default is provisional + active
 
-    # 1) bug precondition: L1 declines on the empty plan -> a PROVISIONAL default is committed.
-    loop.planner.revise_quests = lambda emu, ctx: {"change": False, "add": [], "remove": []}
-    d0 = loop._manage_directive(obs)
-    assert d0 is not None and d0.target_map == 2                  # committed the goal-travel default
-    prov = [s for s in loop._plan_steps if s.provisional]
-    assert len(prov) == 1 and prov[0].status == "active"         # the default is provisional + active
+        # 2) L1 now supplies the real parcel errand -> the provisional default must be superseded.
+        loop._l1_event = True                                         # force the L1 gate this call
+        rl.run_l1_pipeline = lambda emu, ctx, planner, *, hard_event, on_trace=None: {
+            "mission": "reach Pewter", "milestone": "deliver Oak's Parcel",
+            "add": [
+                {"map": 42, "talk": True, "who": "clerk", "done_when": "has_item:Oak's Parcel", "why": "get parcel"},
+                {"map": 40, "talk": True, "who": "Oak", "done_when": "no_item:Oak's Parcel", "why": "deliver"},
+            ], "remove": []}
+        out = loop._manage_directive(obs)
+        assert not any(s.provisional for s in loop._plan_steps)      # provisional default dropped
+        assert all(s.map != 2 for s in loop._plan_steps)            # no lingering goal-travel default
+        assert out is not None and out.target_map == 42             # active directive now leads to the Mart
+        assert loop._directive is out and out.quest_id is not None  # it's L1's first real step
+    finally:
+        rl.run_l1_pipeline = orig_pipeline
 
-    # 2) L1 now supplies the real parcel errand -> the provisional default must be superseded.
-    loop._l1_event = True                                         # force the L1 gate this call
-    loop.planner.revise_quests = lambda emu, ctx: {"change": True, "mission": "reach Pewter",
-        "milestone": "deliver Oak's Parcel",
-        "add": [
-            {"map": 42, "talk": True, "who": "clerk", "done_when": "has_item:Oak's Parcel", "why": "get parcel"},
-            {"map": 40, "talk": True, "who": "Oak", "done_when": "no_item:Oak's Parcel", "why": "deliver"},
-        ], "remove": []}
-    out = loop._manage_directive(obs)
-    assert not any(s.provisional for s in loop._plan_steps)      # provisional default dropped
-    assert all(s.map != 2 for s in loop._plan_steps)            # no lingering goal-travel default
-    assert out is not None and out.target_map == 42             # active directive now leads to the Mart
-    assert loop._directive is out and out.quest_id is not None  # it's L1's first real step
+
+# --- Task 8: _run_l1 wired to run_l1_pipeline ---
+
+def test_run_l1_uses_pipeline_heal_proposal_and_compiles():
+    # run_l1_pipeline's proposal shape (add/remove/mission/milestone/assessment, no "change" key) —
+    # a dict return always means "apply it": a heal action step must land in the plan and compile
+    # into the quest queue without raising.
+    import pokemon_agent.agent.reason_loop as rl
+    loop, _ = _loop(map_id=1, goal_map=2)
+    orig_pipeline = rl.run_l1_pipeline
+    rl.run_l1_pipeline = lambda emu, ctx, planner, *, hard_event, on_trace=None: {
+        "add": [{"kind": "action", "map": 41, "done_when": "hp_frac>=1.0", "talk": True,
+                 "who": "Nurse", "why": "heal"}],
+        "remove": [], "mission": "", "milestone": "", "assessment": "heal"}
+    try:
+        obs, _ = loop.builder.build(capture_screenshot=False)
+        loop._run_l1(obs)   # must not raise
+        assert any((s.done_when or "").startswith("hp_frac") for s in loop._plan_steps)
+        assert isinstance(loop._quest, deque) and len(loop._quest) > 0
+        assert loop._l1_last["change"] is True
+    finally:
+        rl.run_l1_pipeline = orig_pipeline
+
+
+def test_run_l1_uses_pipeline_none_leaves_plan_untouched():
+    # a None return (triage said no-change, or decide was unsalvageable) -> NO reconcile at all;
+    # the standing plan is kept exactly as-is and _l1_last reflects "no change".
+    import pokemon_agent.agent.reason_loop as rl
+    from pokemon_agent.agent.quest_reconciler import QuestStep
+    loop, _ = _loop(map_id=1, goal_map=2)
+    loop._plan_steps = [QuestStep(id="q1", map=2, done_when="on_map", status="active")]
+    before = list(loop._plan_steps)
+    orig_pipeline = rl.run_l1_pipeline
+    rl.run_l1_pipeline = lambda emu, ctx, planner, *, hard_event, on_trace=None: None
+    try:
+        obs, _ = loop.builder.build(capture_screenshot=False)
+        loop._run_l1(obs)
+        assert loop._plan_steps == before                # untouched
+        assert loop._l1_last["change"] is False
+    finally:
+        rl.run_l1_pipeline = orig_pipeline
+
+
+def test_run_l1_passes_hard_event_flag_through():
+    # the periodic cadence call is NOT a hard event; a wedge/event-driven call IS.
+    import pokemon_agent.agent.reason_loop as rl
+    loop, _ = _loop(map_id=1, goal_map=2)
+    seen = []
+    orig_pipeline = rl.run_l1_pipeline
+    rl.run_l1_pipeline = lambda emu, ctx, planner, *, hard_event, on_trace=None: (
+        seen.append(hard_event) or None)
+    try:
+        obs, _ = loop.builder.build(capture_screenshot=False)
+        loop._run_l1(obs, hard_event=False)
+        loop._run_l1(obs, hard_event=True)
+        loop._run_l1(obs, emergency=True)   # emergency implies hard_event even if caller forgets
+        assert seen == [False, True, True]
+    finally:
+        rl.run_l1_pipeline = orig_pipeline

@@ -1,6 +1,8 @@
 """RAM success/impossibility predicates (pure, no ROM)."""
 from pokemon_agent.games.pokemon_red import predicates
 
+from tests.support.ram_emulator import RamEmulator
+
 B = 0xD16B
 
 
@@ -98,3 +100,25 @@ def test_talked_on_map():
     assert predicates.evaluate({"talked_on_map": 42}, MemFake({}), memory=Mem())
     assert not predicates.evaluate({"talked_on_map": 7}, MemFake({}), memory=Mem())
     assert not predicates.evaluate({"talked_on_map": 42}, MemFake({}))  # no memory -> False
+
+
+def test_hp_frac_predicate_via_ram_emulator():
+    emu = RamEmulator()
+    emu.set_map(41)
+    emu.set_party([("SQUIRTLE", 7, 3, 23)])  # (species, level, cur_hp, max_hp)
+    assert not predicates.evaluate({"hp_frac": ">=1.0"}, emu)
+    emu.set_party([("SQUIRTLE", 7, 23, 23)])
+    assert predicates.evaluate({"hp_frac": ">=1.0"}, emu)
+
+
+def test_has_no_item_predicate_via_ram_emulator():
+    emu = RamEmulator()
+    emu.set_bag_items([])
+    from pokemon_agent.agent.planner_llm import Planner
+
+    # "oaks_parcel" resolves via resolve_item_id's alnum-lowercase fuzzy match to the
+    # same id (70) as "Oak's Parcel" / "Oaks Parcel" — see game_state.resolve_item_id.
+    crit = Planner._parse_done_when("no_item:oaks_parcel", 0)  # -> {"no_item": 70}
+    assert crit is not None and predicates.evaluate(crit, emu)  # deliver-done when not held
+    emu.set_bag_items(["oaks_parcel"])
+    assert not predicates.evaluate(crit, emu)  # still holding -> NOT done

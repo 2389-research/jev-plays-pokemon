@@ -26,3 +26,50 @@ def validate_step(step: dict) -> tuple[bool, str | None]:
     if parsed == {"on_map": map_id}:
         return False, "action step cannot complete on arrival (on_map)"
     return True, None
+
+
+def run_l1_pipeline(emu, context: dict, planner, *, hard_event: bool, on_trace=None) -> dict | None:
+    """Orchestrate the L1 reasoning pipeline: triage (gated unless hard_event) -> brainstorm ->
+    decide -> validate/repair-once-then-break for each proposed step. Returns a proposal dict
+    ({"add", "remove", "mission", "milestone", "assessment"}) or None if there's nothing to do
+    (triage said no change) or the decide output can't be salvaged (a step fails validation even
+    after repair -- keep the standing plan rather than partially apply a broken decision).
+
+    Decoupled from any recorder: callers that want to record the trace pass ``on_trace``."""
+    if not hard_event:
+        t = planner.l1_triage(context)
+        if on_trace:
+            on_trace({"stage": "triage", **t})
+        if not t.get("change"):
+            return None
+
+    b = planner.l1_brainstorm(emu, context)
+    if on_trace:
+        on_trace({"stage": "brainstorm", "assessment": b.get("assessment", "")})
+
+    d = planner.l1_decide(context, b)
+    if on_trace:
+        on_trace({"stage": "decide", "add": len(d.get("add", [])), "remove": d.get("remove", [])})
+
+    validated_add = []
+    for step in d.get("add", []):
+        ok, err = validate_step(step)
+        if ok:
+            validated_add.append(step)
+            continue
+        fixed = planner.l1_repair(context, step, err)
+        ok2, err2 = validate_step(fixed)
+        if ok2:
+            validated_add.append(fixed)
+        else:
+            if on_trace:
+                on_trace({"stage": "invalid_criterion", "step": step, "error": err2 or err})
+            return None
+
+    return {
+        "add": validated_add,
+        "remove": d.get("remove", []),
+        "mission": d.get("mission"),
+        "milestone": d.get("milestone"),
+        "assessment": d.get("assessment"),
+    }

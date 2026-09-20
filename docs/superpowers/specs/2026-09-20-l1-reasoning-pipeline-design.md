@@ -150,6 +150,28 @@ high-frequency) and **`strategist` for BRAINSTORM + DECIDE + REPAIR** (the reaso
   `kind == "action"` step reaching compile with a `None`/`on_map` criterion is a bug and raises
   (belt-and-suspenders; validation in step 5 should prevent it ever getting here).
 
+### DECIDE prompt contract
+
+The exact prompt wording is authored during implementation and tuned against the criteria-quality
+eval (below) — but the spec pins what the prompt **must** contain, so any implementer produces an
+equivalent prompt:
+
+- The full `done_when` DSL grammar, verbatim, with the `kind: travel|action` rule and that `on_map`
+  is legal only for `travel`.
+- **Canonical worked examples**, one per objective class: pickup → `has_item:<item>`; deliver →
+  `no_item:<item>`; heal → `hp_frac>=1.0`; grind → `level>=<N>`; earn badge → `badges>=<N>`;
+  reach a place → `kind:travel` + `on_map`; a story beat not in RAM → `verify:<statement>`.
+- An instruction to **prefer RAM-checkable predicates over `verify:`** (use `verify:` only when the
+  fact genuinely is not in RAM).
+- The required output schema (`add:[{kind, map, talk?, who?, done_when, why}], remove, mission?,
+  milestone?, assessment`) and the rule that every step declares a `kind` and a criterion.
+- The **repair-call format**: on a validation failure the repair prompt gets the grammar again plus
+  the exact parse error and the offending step, and must re-emit only a corrected criterion.
+
+Prompt *iteration* is manual for now: author, run the eval, read failures, adjust, re-run. The
+`simmer` skill (automated prompt refinement with the eval as judge) is a **deferred fallback** — used
+only if manual prompting cannot reach acceptable criteria quality after basic testing, not up front.
+
 ## Testing strategy
 
 Hard constraint: L1 calls are non-deterministic and cost credits; acceptance-criteria checks read
@@ -180,6 +202,23 @@ returning canned triage/brainstorm/decide outputs; assert the control flow:
   bad → `l1_invalid_criterion` logged, plan unchanged (never `on_map`).
 - brainstorm actually issues `search_kb` queries (assert the KB tool-loop ran).
 
+**Layer 2.5 — Criteria-quality eval (real LunaRoute, ISOLATED, gated, NOT in CI).** This is the
+layer that answers "is the model actually good at writing acceptance criteria, and is the prompt
+good enough?" — the gap the stubbed Layer 2 and the confounded Layer 3 do not cover. It exercises
+**only the decide + repair calls** (no game loop, so failures are unambiguous) against a fixture set
+of situations, and scores the emitted `done_when`:
+- **Hard grade (deterministic, no judge):** every emitted criterion parses and satisfies the `kind`
+  rule. Pure pass/fail.
+- **Semantic grade (deterministic via expected-class):** each fixture declares the expected
+  predicate *family* for its objective; assert the emitted criterion is in that family
+  (deliver→`no_item`, heal→`hp_frac`, pickup→`has_item`, reach-town→`travel`/`on_map`,
+  grind→`level`). No LLM judge needed — stable and cheap.
+- **Output:** a scorecard (pass rate per fixture + the offending criteria) via
+  `scripts/eval_criteria.py`. This is the prompt-tuning loop: run, read failures, adjust prompt,
+  re-run. Fixtures reuse situations we already have — "holding undelivered parcel in Viridian,"
+  "low HP in a town," "clerk has Oak's parcel," "need to reach Pewter," "under-leveled for Brock."
+- Gated behind `@pytest.mark.live` (or run as the script directly); consumes credits; opt-in.
+
 **Layer 3 — Live end-to-end (real LunaRoute + real emulator, `@pytest.mark.live`, NOT in CI).**
 Skipped by default; run manually when credits are up. Load `viridian_stuck.state` / `pc_stuck.state`,
 run the loop, confirm the *real* model chooses sane quests and they complete; plus the full viewer
@@ -205,6 +244,9 @@ Enablers in scope: the `RamEmulator` double, and a thin **`write_memory`** on th
 
 - **Create:** `src/pokemon_agent/agent/l1_pipeline.py` — triage / brainstorm / decide / validate+repair.
 - **Create:** `tests/unit/test_l1_pipeline.py` — Layer-2 wiring (stubbed LLM).
+- **Create:** `scripts/eval_criteria.py` + `tests/fixtures/criteria_cases.py` — Layer-2.5
+  criteria-quality eval (real decide/repair calls, isolated, gated) + the situation fixtures with
+  their expected predicate families.
 - **Create/extend test double:** `RamEmulator` (in `tests/conftest.py` or `tests/support/`).
 - **Modify:** `agent/reason_loop.py` — `_run_l1` calls `run_l1_pipeline` and reconciles its
   proposal; two-tier triage/deep gating; completion-provenance events; emit `l1_invalid_criterion`.
@@ -251,3 +293,6 @@ Enablers in scope: the `RamEmulator` double, and a thin **`write_memory`** on th
 - No step ever completes by arrival unless it is an explicit travel leg.
 - CI (Layers 1–2) is green and spends **zero** API credits; the log/viewer show each step's
   criterion and why it completed.
+- The criteria-quality eval (Layer 2.5) runs and reports a scorecard; the real model produces
+  valid, in-family criteria on the fixture situations (target pass rate set during tuning). If it
+  cannot after basic prompt iteration, `simmer` is the escalation.

@@ -126,8 +126,14 @@ high-frequency) and **`strategist` for BRAINSTORM + DECIDE + REPAIR** (the reaso
   arrival) or `"action"` (talk / pickup / deliver / heal / grind / any objective that is *done*
   by a state change, not by arrival). The planner declares `kind`; the validator does **not** guess
   it from `talk`/`map` (which is why the old code could not tell a grind step, `talk=false`, from a
-  travel leg). `QuestStep` gains a `kind: str = "action"` field (default `"action"`, the safe side —
-  a step with no declared kind is treated as an action and must justify its criterion).
+  travel leg). `QuestStep` gains a `kind: str = "action"` field (default `"action"`, the safe side
+  for *L1-emitted* steps — a step with no declared kind is treated as an action and must justify its
+  criterion). **The one in-loop exception:** the bootstrap provisional default (see below) is a pure
+  travel leg and is constructed with `kind="travel"` explicitly, so it never trips the action rule.
+- Any step that talks / picks up / delivers / heals / grinds is `kind:action` by definition; the
+  DECIDE prompt and the validator treat a `travel` step as "nothing happens on arrival," so a
+  `kind:travel` step with `talk=true` (or any non-`on_map` criterion) is contradictory and cannot be
+  emitted — the validator rejects it like any other malformed step.
 - **Validation rule (step 5), the load-bearing check:**
   - `kind == "travel"`: `done_when` must be `on_map` (or empty → normalized to `on_map:<map>`).
     `on_map` is legal *only here*.
@@ -202,12 +208,19 @@ Enablers in scope: the `RamEmulator` double, and a thin **`write_memory`** on th
 - **Create/extend test double:** `RamEmulator` (in `tests/conftest.py` or `tests/support/`).
 - **Modify:** `agent/reason_loop.py` — `_run_l1` calls `run_l1_pipeline` and reconciles its
   proposal; two-tier triage/deep gating; completion-provenance events; emit `l1_invalid_criterion`.
+  **Bootstrap fix (required):** the provisional default step at `reason_loop.py:493-494` must be
+  built with `kind="travel"` (it is a pure "reach the goal map" leg). It runs *outside* the
+  `_run_l1` try/except and calls `_recompile_quest` → `compile_steps_to_directives` → `_criterion`;
+  without `kind="travel"` the new action-raise rule would crash the loop on every empty-plan
+  bootstrap (run start and plan-exhaustion refill). The pipeline's empty→`on_map` normalization
+  applies only to L1-*emitted* steps, not this in-loop default.
   **Wiring note:** `run_l1_pipeline` returns `None` for "no change" (triage said false, or
   validation broke and we keep the prior plan) and a proposal dict otherwise — replacing today's
   `prop.get("change")` branch (`reason_loop.py:385`). A `None` return means reconcile nothing.
 - **Modify:** `agent/quest_reconciler.py` — `QuestStep` gains `kind: str = "action"`; `_criterion`
-  synthesizes `on_map` only for `kind == "travel"`; a `kind == "action"` step with a `None`/`on_map`
-  criterion raises. Adds carry `kind` through `reconcile_quests`.
+  signature becomes `_criterion(done_when, map_id, kind)` and synthesizes `on_map` only for
+  `kind == "travel"`; a `kind == "action"` step with a `None`/`on_map` criterion raises. `add`
+  entries carry `kind` through `reconcile_quests` (default `"action"` when absent).
 - **Modify:** `agent/planner_llm.py` — DECIDE/brainstorm/triage prompts + repair prompt; reuse
   `_llm_with_search`; keep `_parse_done_when` (extend tests).
 - **Modify:** `emulator/interface.py`, `emulator/pyboy_adapter.py`, `emulator/fake_emulator.py` —

@@ -180,7 +180,8 @@ class ReasoningLoop:
         self._legs_since_l1 = 0                  # legs since the last L1 review (cadence trigger)
         self._blocked_for_n = 0                  # consecutive legs blocked (>= BLOCK_TRIGGER fires L1)
         self._l1_event = False                   # a one-shot event asked for an L1 review next gate
-        self._l1_last = None                     # last L1 review's {change, assessment} (for the recorder)
+        self._l1_last = None                     # last L1 review's {change, assessment, trace} (for the recorder)
+        self._l1_trace: list[dict] = []          # current/last review's pipeline stage events
 
     # ------------------------------------------------------------------ step
     def step_once(self) -> ActionResult:
@@ -353,6 +354,13 @@ class ReasoningLoop:
         return any((s.done_when or "").startswith("hp_frac")
                    for s in self._plan_steps if s.status in ("pending", "active"))
 
+    def _record_l1_trace(self, event: dict) -> None:
+        """``on_trace`` callback for ``run_l1_pipeline``: append each pipeline stage event
+        (triage/brainstorm/decide/invalid_criterion) to the current review's trace. ``_run_l1``
+        resets ``_l1_trace`` at the start of each review and merges it into ``_l1_last`` so the
+        recorder captures WHY L1 decided what it decided, not just the final change/assessment."""
+        self._l1_trace.append(event)
+
     def _run_l1(self, obs, emergency: bool = False, hard_event: bool = False) -> None:
         """L1 strategic review: run the L1 pipeline (triage/brainstorm/decide/validate) to see
         whether the standing plan needs to change; if so, deterministically reconcile the proposal
@@ -363,6 +371,7 @@ class ReasoningLoop:
         rather than the periodic cadence, so it skips the cheap triage gate. Never raises: any
         failure emits ``l1_failed`` and changes nothing. The gate counters are cleared in
         ``finally`` so a failing review doesn't re-fire every step."""
+        self._l1_trace: list[dict] = []   # reset per review; _record_l1_trace appends pipeline stages
         try:
             if self.planner is None:
                 return
@@ -386,7 +395,7 @@ class ReasoningLoop:
                 "milestone": self._plan.milestone,
             }
             prop = run_l1_pipeline(emu, context, self.planner, hard_event=(hard_event or emergency),
-                                   on_trace=None)
+                                   on_trace=self._record_l1_trace)
             if prop is not None:
                 removed_ids = set(prop.get("remove") or [])
                 removed = [s for s in self._plan_steps if s.id in removed_ids]
@@ -414,7 +423,8 @@ class ReasoningLoop:
                         self._directive = None   # the committed default is gone -> advance to L1's first real step
                     self._plan_steps = [s for s in self._plan_steps if not s.provisional]
                 self._recompile_quest()
-                self._l1_last = {"change": True, "assessment": prop.get("assessment")}
+                self._l1_last = {"change": True, "assessment": prop.get("assessment"),
+                                 "trace": self._l1_trace}
                 self.on_event("l1_review", {"step": self.session.step, "change": True,
                                             "assessment": prop.get("assessment"),
                                             "add": len(prop.get("add", [])),
@@ -422,11 +432,11 @@ class ReasoningLoop:
                 self.on_event("quest", {"step": self.session.step, "len": len(self._quest),
                                         "plan": [d.reason for d in self._quest]})
             else:
-                self._l1_last = {"change": False, "assessment": ""}
+                self._l1_last = {"change": False, "assessment": "", "trace": self._l1_trace}
                 self.on_event("l1_review", {"step": self.session.step, "change": False,
                                             "assessment": ""})
         except Exception as e:  # never let a strategic review break the loop
-            self._l1_last = {"change": False, "assessment": "l1_failed"}
+            self._l1_last = {"change": False, "assessment": "l1_failed", "trace": self._l1_trace}
             self.on_event("l1_failed", {"step": self.session.step, "error": str(e)})
         finally:
             # clear the cadence/event gate even on failure, so a raising review doesn't re-fire
@@ -436,13 +446,23 @@ class ReasoningLoop:
             self._l1_event = False
 
     # --------------------------------------------------- directive lifecycle
-    def _mark_step(self, quest_id: str | None, status: str) -> None:
-        """Set the status of the plan step tagged ``quest_id`` (no-op if it's not in the plan)."""
+    def _mark_step(self, quest_id: str | None, status: str, reason: str | None = None) -> None:
+        """Set the status of the plan step tagged ``quest_id`` (no-op if it's not in the plan) and
+        emit a completion-provenance event naming WHY the step transitioned — the log alone should
+        show a step's acceptance criterion + fate, no RAM forensics required. ``reason`` is the
+        best-available explanation for a ``wedged`` transition (falls back to a static string)."""
         if quest_id is None:
             return
         for s in self._plan_steps:
             if s.id == quest_id:
                 s.status = status
+                if status == "done":
+                    self.on_event("step_done", {"step": self.session.step, "id": s.id,
+                                                "done_when": s.done_when, "kind": s.kind})
+                elif status == "wedged":
+                    self.on_event("step_wedged", {"step": self.session.step, "id": s.id,
+                                                  "done_when": s.done_when,
+                                                  "reason": reason or "no route / blocked"})
                 return
 
     def _step_by_qid(self, quest_id: str | None) -> QuestStep | None:
@@ -470,7 +490,7 @@ class ReasoningLoop:
         if (self._directive is not None and not satisfied
                 and (self._servo_fail >= SERVO_FAIL_LIMIT or self._blocked_for_n >= BLOCK_TRIGGER)):
             if self._directive.quest_id is not None:
-                self._mark_step(self._directive.quest_id, "wedged")
+                self._mark_step(self._directive.quest_id, "wedged", reason=self._directive.reason)
             self._blocked_for_n = 0
             self._servo_fail = 0
             self._l1_event = True     # L1 replaces just this step at the next gate (below)
@@ -1356,7 +1376,9 @@ class ReasoningLoop:
                               if d else None),
                 "mission": (self._plan.mission if self._plan else None),
                 "milestone": (self._plan.milestone if self._plan else None),
-                "plan_steps": [{"id": s.id, "map": s.map, "status": s.status}
+                "plan_steps": [{"id": s.id, "map": s.map, "status": s.status,
+                               "done_when": s.done_when, "kind": s.kind, "why": s.why,
+                               "talk": s.talk, "who": s.who}
                                for s in self._plan_steps],
                 "l1_last": self._l1_last,
                 "quest_remaining": [q.reason for q in self._quest],

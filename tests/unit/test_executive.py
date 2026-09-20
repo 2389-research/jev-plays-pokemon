@@ -460,3 +460,152 @@ def test_run_l1_passes_hard_event_flag_through():
         assert seen == [False, True, True]
     finally:
         rl.run_l1_pipeline = orig_pipeline
+
+
+# --- Task 9: completion-provenance events + full quest serialization + L1 trace ---
+
+def test_recorder_plan_steps_include_done_when_and_kind():
+    # the recorder's plan_steps must carry the acceptance criterion (done_when/kind/why/talk/who),
+    # not just {id, map, status} — otherwise diagnosing a wedged run needs RAM forensics.
+    from collections import deque as _deque
+    from pokemon_agent.agent.quest_reconciler import QuestStep
+    loop, _ = _loop(map_id=0)
+    d = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 0, "x": 2, "y": 4},
+                  success={"on_map": 99}, quest_id="q1")
+    loop._plan_steps = [QuestStep(id="q1", map=0, talk=True, who="Oak", done_when="on_map",
+                                  why="scripted stop", status="active", kind="travel")]
+    loop._quest = _deque([d])
+
+    class StubRecorder:
+        def __init__(self):
+            self.calls = []
+
+        def on_event(self, kind, payload):
+            pass
+
+        def record(self, **kw):
+            self.calls.append(kw)
+
+    stub = StubRecorder()
+    loop.recorder = stub
+    loop.step_once()
+    assert stub.calls, "recorder.record was never called"
+    steps = stub.calls[0]["extra"]["plan_steps"]
+    assert len(steps) == 1
+    s = steps[0]
+    assert s["id"] == "q1" and s["map"] == 0 and s["status"] == "active"
+    assert s["done_when"] == "on_map" and s["kind"] == "travel"
+    assert s["why"] == "scripted stop" and s["talk"] is True and s["who"] == "Oak"
+
+
+def test_mark_step_done_emits_provenance_event():
+    from pokemon_agent.agent.quest_reconciler import QuestStep
+    events = []
+    loop, _ = _loop(events=events)
+    loop._plan_steps = [QuestStep(id="q1", map=0, done_when="on_map", status="active", kind="travel")]
+    loop._mark_step("q1", "done")
+    matches = [p for k, p in events if k == "step_done"]
+    assert len(matches) == 1
+    assert matches[0]["id"] == "q1"
+    assert matches[0]["done_when"] == "on_map"
+    assert matches[0]["kind"] == "travel"
+
+
+def test_mark_step_wedged_emits_provenance_event_with_reason():
+    from pokemon_agent.agent.quest_reconciler import QuestStep
+    events = []
+    loop, _ = _loop(events=events)
+    loop._plan_steps = [QuestStep(id="q1", map=5, done_when="has_item:Potion", status="active",
+                                  kind="action")]
+    loop._mark_step("q1", "wedged", reason="no route / blocked")
+    matches = [p for k, p in events if k == "step_wedged"]
+    assert len(matches) == 1
+    assert matches[0]["id"] == "q1"
+    assert matches[0]["done_when"] == "has_item:Potion"
+    assert matches[0]["reason"]   # non-empty, provenance for the wedge
+
+
+def test_wedge_via_manage_directive_emits_step_wedged():
+    # end-to-end: the real wedge path (_manage_directive) must ALSO surface step_wedged, not just
+    # a direct _mark_step call.
+    from collections import deque as _deque
+    from pokemon_agent.agent.quest_reconciler import QuestStep
+    from pokemon_agent.agent.reason_loop import BLOCK_TRIGGER
+    import pokemon_agent.agent.reason_loop as rl
+    events = []
+    loop, _ = _loop(map_id=1, goal_map=2, events=events)
+    loop._plan_steps = [QuestStep(id="q1", map=5, done_when="on_map", status="active"),
+                        QuestStep(id="q2", map=9, done_when="on_map", status="pending")]
+    d_active = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 5}, success={"on_map": 5},
+                         quest_id="q1", reason="heading to route 5")
+    d_pending = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 9}, success={"on_map": 9},
+                          quest_id="q2")
+    loop._quest = _deque([d_pending])
+    loop._directive = d_active
+    loop._blocked_for_n = BLOCK_TRIGGER
+    orig_pipeline = rl.run_l1_pipeline
+    rl.run_l1_pipeline = lambda emu, ctx, planner, *, hard_event, on_trace=None: None
+    try:
+        obs = loop.builder.build(capture_screenshot=False)[0]
+        loop._manage_directive(obs)
+        matches = [p for k, p in events if k == "step_wedged"]
+        assert len(matches) == 1
+        assert matches[0]["id"] == "q1" and matches[0]["done_when"] == "on_map"
+        assert matches[0]["reason"]
+    finally:
+        rl.run_l1_pipeline = orig_pipeline
+
+
+def test_l1_trace_recorded_into_l1_last():
+    # once Task 8's run_l1_pipeline is patched to invoke on_trace with stage events, _run_l1 must
+    # thread those events into self._l1_last so the recorder captures WHY, not just the outcome.
+    import json
+    import pokemon_agent.agent.reason_loop as rl
+    loop, _ = _loop(map_id=1, goal_map=2)
+    orig_pipeline = rl.run_l1_pipeline
+
+    def fake_pipeline(emu, ctx, planner, *, hard_event, on_trace=None):
+        if on_trace is not None:
+            on_trace({"stage": "triage", "change": True, "why": "blocked"})
+            on_trace({"stage": "decide", "add": 1, "remove": []})
+        return {"mission": "reach Pewter", "milestone": "m", "assessment": "ok",
+                "add": [{"map": 42, "talk": False, "done_when": "on_map", "kind": "travel", "why": "x"}],
+                "remove": []}
+    rl.run_l1_pipeline = fake_pipeline
+    try:
+        obs, _ = loop.builder.build(capture_screenshot=False)
+        loop._run_l1(obs)
+        assert loop._l1_last is not None and loop._l1_last["change"] is True
+        trace = loop._l1_last.get("trace")
+        assert isinstance(trace, list) and len(trace) == 2
+        assert trace[0] == {"stage": "triage", "change": True, "why": "blocked"}
+        assert trace[1] == {"stage": "decide", "add": 1, "remove": []}
+        json.dumps(loop._l1_last)   # must stay JSON-serializable for the recorder
+    finally:
+        rl.run_l1_pipeline = orig_pipeline
+
+
+def test_l1_trace_resets_between_reviews():
+    # a stale trace from a previous review must not bleed into the next one.
+    import pokemon_agent.agent.reason_loop as rl
+    loop, _ = _loop(map_id=1, goal_map=2)
+    orig_pipeline = rl.run_l1_pipeline
+
+    def first(emu, ctx, planner, *, hard_event, on_trace=None):
+        if on_trace is not None:
+            on_trace({"stage": "triage", "change": False, "why": "first"})
+        return None
+
+    def second(emu, ctx, planner, *, hard_event, on_trace=None):
+        if on_trace is not None:
+            on_trace({"stage": "triage", "change": False, "why": "second"})
+        return None
+    try:
+        obs, _ = loop.builder.build(capture_screenshot=False)
+        rl.run_l1_pipeline = first
+        loop._run_l1(obs)
+        rl.run_l1_pipeline = second
+        loop._run_l1(obs)
+        assert loop._l1_last["trace"] == [{"stage": "triage", "change": False, "why": "second"}]
+    finally:
+        rl.run_l1_pipeline = orig_pipeline

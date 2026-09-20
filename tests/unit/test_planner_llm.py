@@ -197,3 +197,100 @@ def test_strategize_uses_model_acceptance_criteria():
     talk_successes = [d.success for d in quest if d.intent.value == "talk_to"]
     assert talk_successes[0] == {"has_item": 70}   # get-parcel step
     assert talk_successes[1] == {"no_item": 70}    # delivered step
+
+
+# --- L1 pipeline call methods (triage / brainstorm / decide / repair) ---
+
+def test_l1_triage_parses_change_and_why():
+    prov = FakeProvider('{"change": true, "why": "stuck too long"}')
+    p = Planner(goal_map=2, provider=prov)
+    result = p.l1_triage({"plan": [], "signals": {}, "mission": "m", "milestone": "ms"})
+    assert result == {"change": True, "why": "stuck too long"}
+
+
+def test_l1_triage_no_provider_returns_safe_default():
+    p = Planner(goal_map=2)
+    assert p.l1_triage({}) == {"change": False, "why": ""}
+
+
+def test_l1_triage_garbage_returns_safe_default():
+    p = Planner(goal_map=2, provider=FakeProvider("not json"))
+    assert p.l1_triage({}) == {"change": False, "why": ""}
+
+
+def test_l1_decide_returns_add_remove_structure():
+    payload = ('{"assessment": "need to deliver parcel", '
+               '"add": [{"kind": "action", "map": 0, "talk": true, "who": "Oak", '
+               '"done_when": "no_item:Oak\'s Parcel", "why": "deliver parcel"}], '
+               '"remove": ["step-3"], "mission": "reach Pewter", "milestone": "deliver parcel"}')
+    prov = FakeProvider(payload)
+    p = Planner(goal_map=2, strategist=prov)
+    result = p.l1_decide({"plan": [], "signals": {}, "mission": "m", "milestone": "ms"},
+                          {"assessment": "go deliver the parcel"})
+    assert result["add"] == [{"kind": "action", "map": 0, "talk": True, "who": "Oak",
+                               "done_when": "no_item:Oak's Parcel", "why": "deliver parcel"}]
+    assert result["remove"] == ["step-3"]
+    assert result["mission"] == "reach Pewter"
+    assert result["milestone"] == "deliver parcel"
+    # brainstorm assessment + maps table were passed through to the model
+    assert prov.state["brainstorm"] == "go deliver the parcel"
+    assert "0" in prov.state["maps"]
+
+
+def test_l1_decide_no_provider_returns_safe_default():
+    p = Planner(goal_map=2)
+    assert p.l1_decide({}, {}) == {"add": [], "remove": []}
+
+
+def test_l1_decide_garbage_returns_safe_default():
+    p = Planner(goal_map=2, strategist=FakeProvider("not json"))
+    assert p.l1_decide({}, {}) == {"add": [], "remove": []}
+
+
+def test_l1_brainstorm_returns_assessment():
+    prov = FakeProvider('{"assessment": "should deliver the parcel to Oak"}')
+    p = Planner(goal_map=2, strategist=prov)
+    result = p.l1_brainstorm(FakeEmulator(map_id=1), {"current_map": {"id": 1}, "signals": {}})
+    assert result == {"assessment": "should deliver the parcel to Oak"}
+
+
+def test_l1_brainstorm_uses_search_tool():
+    prov = SeqProvider('{"search": ["where is oak parcel"]}',
+                       '{"assessment": "go get the parcel from the mart"}')
+    kb = FakeKB(["the parcel is in the Viridian Mart"])
+    searches = []
+    p = Planner(goal_map=2, strategist=prov, knowledge=kb)
+    p.on_search = lambda q, n: searches.append((q, n))
+    result = p.l1_brainstorm(FakeEmulator(map_id=1), {"current_map": {"id": 1}, "signals": {}})
+    assert kb.last_q == "where is oak parcel"
+    assert searches == [("where is oak parcel", 1)]
+    assert result == {"assessment": "go get the parcel from the mart"}
+
+
+def test_l1_brainstorm_no_provider_returns_safe_default():
+    p = Planner(goal_map=2)
+    assert p.l1_brainstorm(FakeEmulator(map_id=1), {}) == {"assessment": ""}
+
+
+def test_l1_repair_returns_corrected_step():
+    corrected = ('{"kind": "action", "map": 41, "talk": true, "who": "the Nurse", '
+                 '"done_when": "hp_frac>=1.0", "why": "heal the party"}')
+    prov = FakeProvider(corrected)
+    p = Planner(goal_map=2, strategist=prov)
+    bad_step = {"kind": "travel", "map": 41, "talk": True, "who": "the Nurse",
+                "done_when": "hp_frac>=1.0", "why": "heal the party"}
+    result = p.l1_repair({}, bad_step, "travel step cannot talk; use kind:action")
+    assert result == {"kind": "action", "map": 41, "talk": True, "who": "the Nurse",
+                       "done_when": "hp_frac>=1.0", "why": "heal the party"}
+
+
+def test_l1_repair_no_provider_returns_bad_step_unchanged():
+    p = Planner(goal_map=2)
+    bad = {"kind": "bad"}
+    assert p.l1_repair({}, bad, "err") == bad
+
+
+def test_l1_repair_garbage_returns_bad_step_unchanged():
+    p = Planner(goal_map=2, strategist=FakeProvider("not json"))
+    bad = {"kind": "bad"}
+    assert p.l1_repair({}, bad, "err") == bad

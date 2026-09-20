@@ -203,6 +203,129 @@ story gate, a step that can never complete) propose `add` steps to fix it and `r
 steps that should go. Every added step MUST have a done_when from the list above."""
 
 
+TRIAGE_SYSTEM = """You are the L1 TRIAGE gate for an agent playing Pokémon Red. This is a CHEAP,
+FAST check that runs every periodic review, before any expensive reasoning: look at the standing
+PLAN (steps + statuses), the current MISSION/MILESTONE, and the SIGNALS (blocked duration, low
+HP, emergency_heal, etc.) and decide ONLY whether the plan needs to change at all. Do NOT propose
+what to change — that is a separate, more expensive step. You have NO knowledge-base access here;
+answer from what's given, do not search.
+
+Usually the plan is fine — say so. Say change=true only when something is clearly wrong: a step
+that can't complete, a stuck/blocked signal, an emergency (e.g. low HP with no heal step in the
+plan), or the mission/milestone is stale.
+
+Return ONLY JSON: {"change": <true|false>, "why": "<one short sentence>"}"""
+
+
+BRAINSTORM_SYSTEM = """You are the L1 BRAINSTORM step for an agent playing Pokémon Red, working
+toward the first gym (Brock, Pewter City, north). TRIAGE has flagged that the plan may need to
+change. Your job here is OPEN-ENDED assessment, not a final plan: think through the situation —
+current MAP, PARTY, ITEMS, BADGES, SIGNALS, MISSION, MILESTONE — and what the game actually
+requires next (a story gate, an errand, healing, grinding, the next town). A later DECIDE step
+will turn your assessment into concrete quest steps, so be concrete and specific (name the map /
+item / NPC where you can), but do NOT emit step objects or JSON steps yourself here.
+
+TOOL — knowledge base: you SHOULD look things up in a Pokémon Red guide before concluding —
+especially WHERE things are (which map has the item / NPC / Poké Center) and what a story gate
+requires. To search, reply with ONLY {"search": ["query1", "query2"]} (1-3 queries); results come
+back in KNOWLEDGE_GATHERED and you can search again or finalize. SEARCH_ROUNDS_LEFT limits
+searches. Trust KNOWLEDGE_GATHERED over your own memory when they conflict.
+
+Return ONLY JSON (when ready): {"assessment": "<a few sentences: what's going on, what's needed
+next, and why>"}"""
+
+
+DECIDE_SYSTEM = """You are the L1 DECIDE step for an agent playing Pokémon Red, working toward the
+first gym (Brock, Pewter City, north). BRAINSTORM has already assessed the situation (see
+BRAINSTORM below); your job now is to turn that into a MINIMAL, concrete set of quest-step edits
+anchored to the EXISTING plan — do NOT redesign the whole plan from scratch, only add what's
+missing and remove what's broken.
+
+You are given: CURRENT_MAP, PARTY, ITEMS, BADGES, PLAN (existing steps), SIGNALS, MISSION,
+MILESTONE, BRAINSTORM (the prior assessment), and MAPS (an id->name table — you MUST use these
+exact ids for any "map" field).
+
+EVERY step you add MUST include an explicit "kind" — this is a HARD requirement; a step with no
+kind silently breaks execution downstream:
+  {"kind": "travel", "map": <int>, "talk": false, "who": null,
+   "done_when": "on_map", "why": "<short>"}
+  {"kind": "action", "map": <int>, "talk": <true|false>, "who": "<npc name, if talk, else null>",
+   "done_when": "<criterion>", "why": "<short>"}
+
+The kind rule:
+  - "travel" is ONLY for moving to a map with no other objective on arrival; its done_when is
+    ALWAYS "on_map" and it must NEVER talk to anyone (talk must be false).
+  - "action" is for anything that must happen there (talk to an NPC, heal, grind, wait on a story
+    flag). An action step's done_when must be a REAL, non-"on_map" criterion — merely arriving on
+    the map is never enough to call an action step done.
+
+done_when MUST be exactly one of (this is the full grammar — nothing else parses):
+  "on_map"                    — arrived on the map (travel steps only).
+  "has_item:<name>"           — that item is now in the bag.
+  "no_item:<name>"            — that item is gone (used/delivered).
+  "level>=<N>"                — party reached level N.
+  "badges>=<N>"               — earned N badges.
+  "hp_frac>=<F>"              — party healed to fraction F of max HP.
+  "talked"                    — had a conversation (only when nothing more specific fits).
+  "verify:<yes/no question>"  — judged by a verifier from game state; LAST RESORT ONLY, when the
+                                 objective genuinely isn't RAM-checkable. Prefer any RAM-checkable
+                                 form above over verify: whenever one applies — verify: is
+                                 expensive and fuzzy.
+
+WORKED EXAMPLES (one per objective class — copy the SHAPE, adapt the specifics):
+  pickup an item  -> {"kind":"action","map":42,"talk":true,"who":"the Mart clerk",
+                       "done_when":"has_item:Oak's Parcel","why":"buy/collect the parcel"}
+  deliver an item -> {"kind":"action","map":0,"talk":true,"who":"Oak",
+                       "done_when":"no_item:Oak's Parcel","why":"hand the parcel to Oak"}
+                      CANONICAL: deliver -> no_item:<item>. The item LEAVING the bag proves
+                      delivery. Do NOT model a delivery as has_item:<something else>.
+  heal            -> {"kind":"action","map":41,"talk":true,"who":"the Nurse",
+                       "done_when":"hp_frac>=1.0","why":"heal the party at the Poké Center"}
+                      Add a step like this ONLY when SIGNALS shows low HP / emergency_heal — don't
+                      invent healing from generic caution.
+  grind           -> {"kind":"action","map":31,"talk":false,"who":null,
+                       "done_when":"level>=12","why":"grind in the grass toward the goal"}
+  earn a badge    -> {"kind":"action","map":2,"talk":true,"who":"Brock",
+                       "done_when":"badges>=1","why":"beat the gym leader"}
+  reach a place   -> {"kind":"travel","map":1,"talk":false,"who":null,
+                       "done_when":"on_map","why":"head to Viridian City"}
+  story beat not  -> {"kind":"action","map":12,"talk":true,"who":"the guard",
+  RAM-trackable        "done_when":"verify:did the guard let us pass?","why":"..."}
+
+RULES:
+  - Emit MINIMAL steps: only what's missing from the existing PLAN, anchored to it — don't repeat
+    steps already present and on track.
+  - EVERY step MUST include "kind" ("travel" or "action"); never omit it.
+  - Use the correct map id from MAPS for every "map" field.
+  - Prefer a RAM-checkable done_when (has_item/no_item/level/badges/hp_frac/on_map) over
+    "verify:" whenever one applies.
+
+Return ONLY JSON:
+{"assessment": "<one line: what changed and why>",
+ "add": [ <new step objects as above> ],
+ "remove": [ <ids of existing plan steps to drop> ],
+ "mission": "<the overall mission>",
+ "milestone": "<the current concrete sub-goal>"}"""
+
+
+REPAIR_SYSTEM = """You are the L1 REPAIR step for an agent playing Pokémon Red. ONE quest step
+failed deterministic validation. You are given the done_when GRAMMAR (below), the BAD_STEP exactly
+as emitted, and the exact ERROR from the validator. Re-emit ONLY that one step, same shape, with a
+corrected "done_when" and/or "kind" so it validates. Do not change anything else about the step
+(map/who/why) unless it is the cause of the error.
+
+done_when MUST be exactly one of:
+  "on_map" | "has_item:<name>" | "no_item:<name>" | "level>=<N>" | "badges>=<N>" |
+  "hp_frac>=<F>" | "talked" | "verify:<yes/no question>"
+
+kind is "travel" (done_when must be "on_map", and it must never talk) or "action" (done_when must
+be a real, non-"on_map" criterion).
+
+Return ONLY the corrected step as JSON, same shape as BAD_STEP:
+{"kind": "<travel|action>", "map": <int>, "talk": <true|false>, "who": "<name or null>",
+ "done_when": "<corrected criterion>", "why": "<short>"}"""
+
+
 class Planner:
     def __init__(self, *, goal_map: int | None = None, level_target: int = 0,
                  heal_hp: float = 0.80, reflector=None, provider=None, strategist=None, knowledge=None):
@@ -331,6 +454,121 @@ class Planner:
                     "add": add, "remove": remove}
         except Exception:
             return {"change": False, "add": [], "remove": []}
+
+    def l1_triage(self, context: dict) -> dict:
+        """L1 pipeline step 1 (TRIAGE): a cheap, fast, NO-search check of whether the standing
+        plan needs to change at all, given the plan + signals. Gates the expensive
+        brainstorm/decide calls — most reviews should say "no change" and stop here. Uses
+        ``self.provider`` (the fast tier) with plain ``chat_json`` (no KB tool-loop).
+
+        NEVER raises: no provider / parse failure -> {"change": False, "why": ""}."""
+        if self.provider is None:
+            return {"change": False, "why": ""}
+        try:
+            state = {
+                "plan": context.get("plan"),
+                "signals": context.get("signals"),
+                "mission": context.get("mission"),
+                "milestone": context.get("milestone"),
+                "current_map": context.get("current_map"),
+            }
+            content, _, _ = self.provider.chat_json(TRIAGE_SYSTEM, state)
+            data = json.loads(strip_fences(content))
+            if not isinstance(data, dict):
+                return {"change": False, "why": ""}
+            return {"change": bool(data.get("change", False)), "why": str(data.get("why") or "")}
+        except Exception:
+            return {"change": False, "why": ""}
+
+    def l1_brainstorm(self, emu, context: dict) -> dict:
+        """L1 pipeline step 2 (BRAINSTORM): open-ended assessment of the situation, letting the
+        model drive its own KB searches via ``_llm_with_search`` before concluding. Returns
+        {"assessment": str}; NEVER emits step objects itself (that is DECIDE's job).
+
+        NEVER raises: no provider / parse failure -> {"assessment": ""}."""
+        prov = self.strategist or self.provider
+        if prov is None:
+            return {"assessment": ""}
+        try:
+            state = {
+                "current_map": context.get("current_map"),
+                "party": context.get("party"),
+                "items": context.get("items"),
+                "badges": context.get("badges"),
+                "signals": context.get("signals"),
+                "mission": context.get("mission"),
+                "milestone": context.get("milestone"),
+            }
+            data = self._llm_with_search(prov, BRAINSTORM_SYSTEM, state, final_key="assessment")
+            if not isinstance(data, dict):
+                return {"assessment": ""}
+            return {"assessment": str(data.get("assessment") or "")}
+        except Exception:
+            return {"assessment": ""}
+
+    def l1_decide(self, context: dict, brainstorm: dict) -> dict:
+        """L1 pipeline step 3 (DECIDE): turn the BRAINSTORM assessment into a MINIMAL set of quest
+        step edits anchored to the existing plan. Plain ``chat_json`` (single call, no KB
+        tool-loop — BRAINSTORM already did the searching), robust parse via strip_fences+
+        json.loads. Does NOT validate criteria (that is the pipeline's job, task 7) — steps are
+        passed through as emitted so a bad one can be routed to ``l1_repair``.
+
+        NEVER raises: no provider / parse failure -> {"add": [], "remove": []}."""
+        prov = self.strategist or self.provider
+        if prov is None:
+            return {"add": [], "remove": []}
+        try:
+            state = {
+                "current_map": context.get("current_map"),
+                "party": context.get("party"),
+                "items": context.get("items"),
+                "badges": context.get("badges"),
+                "plan": context.get("plan"),
+                "signals": context.get("signals"),
+                "mission": context.get("mission"),
+                "milestone": context.get("milestone"),
+                "brainstorm": brainstorm.get("assessment", ""),
+                "maps": {str(mid): name for mid, name in MAP_NAMES_RAW.items()},
+            }
+            content, _, _ = prov.chat_json(DECIDE_SYSTEM, state)
+            data = json.loads(strip_fences(content))
+            if not isinstance(data, dict):
+                return {"add": [], "remove": []}
+            add = [s for s in (data.get("add") or []) if isinstance(s, dict)]
+            remove = [str(x) for x in (data.get("remove") or [])]
+            return {
+                "assessment": str(data.get("assessment") or ""),
+                "add": add,
+                "remove": remove,
+                "mission": str(data.get("mission") or context.get("mission") or ""),
+                "milestone": str(data.get("milestone") or context.get("milestone") or ""),
+            }
+        except Exception:
+            return {"add": [], "remove": []}
+
+    def l1_repair(self, context: dict, bad_step: dict, error: str) -> dict:
+        """L1 pipeline step (REPAIR): given the DSL grammar, the offending step, and the exact
+        validator error, re-emit ONLY that one step (same shape) with a corrected done_when/kind.
+        Uses ``self.strategist or self.provider`` with plain ``chat_json``.
+
+        NEVER raises: no provider / parse failure / empty response -> ``bad_step`` unchanged."""
+        prov = self.strategist or self.provider
+        if prov is None:
+            return bad_step
+        try:
+            state = {
+                "bad_step": bad_step,
+                "error": error,
+                "current_map": context.get("current_map"),
+                "maps": {str(mid): name for mid, name in MAP_NAMES_RAW.items()},
+            }
+            content, _, _ = prov.chat_json(REPAIR_SYSTEM, state)
+            data = json.loads(strip_fences(content))
+            if not isinstance(data, dict) or not data:
+                return bad_step
+            return data
+        except Exception:
+            return bad_step
 
     def plan(self, intent: Intent, emu, memory=None, *, why: str = "", context: dict | None = None) -> Directive:
         """Compute the concrete directive for ``intent``. ``why`` explains the replan

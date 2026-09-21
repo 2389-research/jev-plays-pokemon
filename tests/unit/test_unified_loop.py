@@ -121,6 +121,38 @@ def test_resolve_approach_npc_interacts_when_adjacent_and_facing():
     assert isinstance(move, InteractAction)
 
 
+def test_approach_counter_npc_bumps_then_talks_across_the_counter():
+    # A counter NPC (nurse at 3,1) sits behind a COUNTER cell (3,2): you can't stand adjacent, you
+    # talk from 2 tiles away (3,3) — but ONLY after bumping the counter (a blocked step into it).
+    loop, _ = _nav_loop(41)
+    walk = {(x, y) for x in range(6) for y in range(8)}
+    loop.world.ingest_collision(41, 6, 8, walk, {(3, 2)}, None)   # (3,2) is a counter cell
+    player = SimpleNamespace(x=3, y=3, map_id=41, facing="north")  # at the across-counter tile, facing it
+    obs = SimpleNamespace(player=player, map_dims=(6, 8),
+                          game_state={"npcs": [{"x": 3, "y": 1, "sprite": "Nurse"}]}, exits=[])
+    tgt = {"kind": "approach_npc", "sprite": "Nurse"}
+    loop._counter_bumped = False
+    bump = loop._approach_npc(tgt, _d(Intent.TALK_TO), obs, set(), set())
+    assert isinstance(bump, MoveAction) and bump.direction == Direction.NORTH   # bump the counter first
+    assert loop._counter_bumped is True
+    talk = loop._approach_npc(tgt, _d(Intent.TALK_TO), obs, set(), set())
+    assert isinstance(talk, InteractAction)                                     # then talk across it
+
+
+def test_approach_non_counter_npc_two_away_routes_closer_not_talks():
+    # WITHOUT a counter between them, an NPC 2 tiles away is not talkable over the gap: the agent
+    # must route to the 1-adjacent tile, not interact across open ground.
+    loop, _ = _nav_loop(41)
+    walk = {(x, y) for x in range(6) for y in range(8)}
+    loop.world.ingest_collision(41, 6, 8, walk, set(), None)      # no counters
+    player = SimpleNamespace(x=3, y=3, map_id=41, facing="north")
+    obs = SimpleNamespace(player=player, map_dims=(6, 8),
+                          game_state={"npcs": [{"x": 3, "y": 1, "sprite": "Nurse"}]}, exits=[])
+    move = loop._approach_npc({"kind": "approach_npc", "sprite": "Nurse"},
+                              _d(Intent.TALK_TO), obs, set(), set())
+    assert isinstance(move, MoveAction)          # routes toward the adjacent tile (3,2), no talk-over
+
+
 def test_resolve_tile_interacts_on_arrival_when_flagged():
     loop, _ = _nav_loop(0)
     player = SimpleNamespace(x=2, y=2, map_id=0, facing="south")

@@ -162,6 +162,7 @@ class ReasoningLoop:
         self._target_map: int | None = None
         self._target_stuck = 0          # consecutive legs the current target made no progress
         self._counter_bumped = False    # bumped a counter this leg (talk-over-counter NPCs: nurse/clerk)
+        self._edge_attempt: tuple | None = None  # (map,x,y) we last tried to step OFF to cross a map edge
         self._recent_targets: deque = deque(maxlen=6)
         # Jev-picked routing POLICY (shortest / dodge-grass / farm-exp), re-chosen per leg/area
         self._policy: str | None = None
@@ -582,6 +583,7 @@ class ReasoningLoop:
         self._target_map = None      # defensive: never pair a stale map with the (now cleared) target
         self._target_stuck = 0
         self._counter_bumped = False  # a fresh leg re-bumps a counter before talking over it
+        self._edge_attempt = None
         self._recent_targets.clear()
         self.on_event("directive", {"step": self.session.step, "intent": self._directive.intent.value,
                                     "target": self._directive.target, "success": self._directive.success,
@@ -620,13 +622,26 @@ class ReasoningLoop:
         goal_dir = next_direction(self.memory.graph, player.map_id, tmap)
         return {"kind": "edge", "dir": goal_dir, "next_map": next_map}
 
-    @staticmethod
-    def _target_reached(target, obs) -> bool:
+    def _target_reached(self, target, obs) -> bool:
         """Only a 'tile' target can be 'reached' in place (others resolve to a move each frame and
-        end when the map changes / an interaction fires)."""
+        end when the map changes / an interaction fires). EXCEPTION: a map-EDGE opening is reached by
+        stepping OFF it (one more move) to cross to the next map — standing on the boundary tile is
+        NOT the end, so return it un-reached and let the router step off. Guard against a boundary
+        tile that ISN'T a real crossing (a walkable edge with no adjacent map): once we've already
+        issued the step-off from this exact tile and we're still standing on it, it's a dead end ->
+        treat it as reached so we re-propose instead of stepping into the wall forever."""
         if target.get("kind") != "tile":
             return False
-        return (obs.player.x, obs.player.y) == (int(target["x"]), int(target["y"]))
+        xy = (int(target["x"]), int(target["y"]))
+        if (obs.player.x, obs.player.y) != xy:
+            return False
+        dims = getattr(obs, "map_dims", None)
+        if dims:
+            w, h = dims
+            on_edge = xy[0] <= 0 or xy[1] <= 0 or xy[0] >= w - 1 or xy[1] >= h - 1
+            if on_edge and self._edge_attempt != (obs.player.map_id, xy[0], xy[1]):
+                return False   # first arrival at an edge opening -> step OFF to cross (not yet reached)
+        return True
 
     def _current_target(self, directive, obs) -> dict | None:
         """Hold the current typed target across frames; (re)pick via the proposer on
@@ -1014,7 +1029,10 @@ class ReasoningLoop:
                     w, h = obs.map_dims
                     if xy[0] <= 0 or xy[1] <= 0 or xy[0] >= w - 1 or xy[1] >= h - 1:
                         d = self._warp_exit_dir(xy, obs.map_dims)
-                        return MoveAction(direction=d) if d is not None else None
+                        if d is not None:
+                            self._edge_attempt = (player.map_id, xy[0], xy[1])  # so a dead-end edge can't loop
+                            return MoveAction(direction=d)
+                        return None
                 return InteractAction() if target.get("interact") else None
             avoid = set(occupied)
             return self._route_to_tile(obs, xy, blocked_dirs, avoid)

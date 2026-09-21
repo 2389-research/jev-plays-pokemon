@@ -572,3 +572,26 @@ def test_route_flow_deterministic_fallback_without_jev():
                                    "kind": "dialog"}) == "dialogue"
     assert loop._route_flow(None, {"screen_text_raw": "", "menu": {"open": False},
                                    "kind": "overworld"}) == "navigate"
+
+
+# --- farm-exp grinding drifts toward the goal through grass (never paces in place) ---
+def test_farm_step_advances_through_grass_toward_goal():
+    loop, _ = _nav_loop(0)
+    loop.world.terrain[0] = {(2, 1): "grass", (1, 2): "grass", (3, 2): "grass"}  # N=forward, W/E=side
+    loop.world.tiles[0] = {}
+    player = SimpleNamespace(x=2, y=2, map_id=0, facing="north")
+    obs = SimpleNamespace(player=player, map_dims=(6, 6), game_state={}, exits=[])
+    loop._farm_age = 1                                   # not a weave step
+    mv = loop._farm_step(obs, (2, 0), set())             # goal is due north
+    assert isinstance(mv, MoveAction) and mv.direction == Direction.NORTH   # forward, on grass
+
+
+def test_farm_step_weaves_sideways_every_third_step_never_backward():
+    loop, _ = _nav_loop(0)
+    loop.world.terrain[0] = {(2, 1): "grass", (1, 2): "grass", (3, 2): "grass"}
+    loop.world.tiles[0] = {}
+    player = SimpleNamespace(x=2, y=2, map_id=0, facing="north")
+    obs = SimpleNamespace(player=player, map_dims=(6, 6), game_state={}, exits=[])
+    loop._farm_age = 2                                   # -> 3 inside -> weave step
+    mv = loop._farm_step(obs, (2, 0), set())
+    assert mv.direction in (Direction.WEST, Direction.EAST)   # perpendicular weave, never south (backward)

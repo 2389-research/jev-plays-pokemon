@@ -798,34 +798,52 @@ class ReasoningLoop:
         return MoveAction(direction=d) if d is not None else None
 
     def _farm_step(self, obs, wp, avoid):
-        """farm-exp GRAZING: pace back-and-forth across adjacent grass (each grass step rolls a wild
-        encounter) while periodically advancing toward the goal — the way a player walks in and out
-        of a grass patch to grind. Every 4th step it advances toward the target so it still makes
-        progress; the rest it oscillates over grass tiles."""
+        """farm-exp GRIND-WHILE-ADVANCING: drift toward the goal THROUGH grass, always net-progressing
+        — never pacing in place. Every grass step (any direction) rolls a wild encounter, so we don't
+        need to oscillate; we just prefer to take our steps ON grass. Order of preference:
+          1. a grass tile that gets us CLOSER to the waypoint (forward + grinding — the ideal),
+          2. occasionally (~1 step in 3) a grass tile at the SAME distance (a 'side to side' weave, so
+             we sweep a wider strip of grass) — but never a net-backward step,
+          3. if no adjacent grass advances us, the goal-directed router step (which still favours grass
+             en route). So the running motion is roughly two forward for each side step, always toward
+             the goal instead of stalling until the level target is hit."""
         from .routing import policy_first_step
         player = obs.player
         tiles = self.world.tiles.get(player.map_id, {})
         terr = self.world.terrain.get(player.map_id, {})
+        px, py = player.x, player.y
+        gx, gy = tuple(wp)
+        dx, dy = gx - px, gy - py
+        ns_goal = abs(dy) >= abs(dx)      # goal lies mainly north/south (else east/west)
 
-        def grass_walkable(d: Direction) -> bool:
-            nb = (player.x + DELTA[d][0], player.y + DELTA[d][1])
+        def grass_ok(nb):
             return terr.get(nb) == "grass" and tiles.get(nb) != WALL and nb not in avoid
 
+        def toward(nb):                   # step closes the DOMINANT-axis gap (net progress)
+            return (nb[1] - py) * dy > 0 if ns_goal else (nb[0] - px) * dx > 0
+
+        def perpendicular(nb):            # a side-step across the dominant axis (weave, no net loss)
+            return (nb[1] == py and nb[0] != px) if ns_goal else (nb[0] == px and nb[1] != py)
+
+        adj = {d: (px + DELTA[d][0], py + DELTA[d][1]) for d in DELTA}
+        fwd_grass = [d for d, nb in adj.items() if grass_ok(nb) and toward(nb)]
+        side_grass = [d for d, nb in adj.items() if grass_ok(nb) and perpendicular(nb)]
+
         self._farm_age += 1
-        grass_dirs = [d for d in DELTA if grass_walkable(d)]
-        # every 4th step (or when there's no grass to pace) advance toward the goal
-        if not grass_dirs or self._farm_age % 4 == 0:
-            d = policy_first_step(self.world, player.map_id, (player.x, player.y), tuple(wp),
-                                  "farm-exp", avoid)
-            self._farm_last = None
-            return MoveAction(direction=d) if d is not None else None
-        # otherwise graze: prefer reversing the last graze step (walk back into the grass you came
-        # from) to keep triggering encounters in place; else step onto any adjacent grass.
-        rev = {Direction.NORTH: Direction.SOUTH, Direction.SOUTH: Direction.NORTH,
-               Direction.EAST: Direction.WEST, Direction.WEST: Direction.EAST}
-        d = rev[self._farm_last] if (self._farm_last and rev[self._farm_last] in grass_dirs) else grass_dirs[0]
-        self._farm_last = d
-        return MoveAction(direction=d)
+        # ~1 step in 3: a lateral grass weave (only when it exists), else advance through grass
+        if side_grass and fwd_grass and self._farm_age % 3 == 0:
+            self._farm_last = side_grass[0]
+            return MoveAction(direction=side_grass[0])
+        if fwd_grass:                     # forward AND on grass — grind while progressing
+            self._farm_last = fwd_grass[0]
+            return MoveAction(direction=fwd_grass[0])
+        if side_grass:                    # the direct step isn't grass -> weave sideways to stay in grass
+            self._farm_last = side_grass[0]
+            return MoveAction(direction=side_grass[0])
+        # no adjacent grass advancing us -> take the goal-directed step (farm-exp router still prefers grass)
+        d = policy_first_step(self.world, player.map_id, (px, py), tuple(wp), "farm-exp", avoid)
+        self._farm_last = None
+        return MoveAction(direction=d) if d is not None else None
 
     def _pick_policy(self, obs) -> str:
         """Jev chooses the routing objective for this leg from HP / level / objective / grass."""

@@ -595,3 +595,51 @@ def test_farm_step_weaves_sideways_every_third_step_never_backward():
     loop._farm_age = 2                                   # -> 3 inside -> weave step
     mv = loop._farm_step(obs, (2, 0), set())
     assert mv.direction in (Direction.WEST, Direction.EAST)   # perpendicular weave, never south (backward)
+
+
+def _run_farm(loop, start, goal, steps):
+    """Simulate N farm-exp steps in an all-grass field, returning the path of (x,y) and the moves taken."""
+    x, y = start
+    path, moves = [(x, y)], []
+    d2v = {Direction.NORTH: (0, -1), Direction.SOUTH: (0, 1), Direction.EAST: (1, 0), Direction.WEST: (-1, 0)}
+    for _ in range(steps):
+        player = SimpleNamespace(x=x, y=y, map_id=0, facing="north")
+        obs = SimpleNamespace(player=player, map_dims=(20, 20), game_state={}, exits=[])
+        mv = loop._farm_step(obs, goal, set())
+        assert mv is not None
+        vx, vy = d2v[mv.direction]
+        x, y = x + vx, y + vy
+        path.append((x, y)); moves.append(mv.direction)
+    return path, moves
+
+
+def test_farm_step_weaves_FORWARD_never_paces_in_one_row():
+    # The core guarantee: over a run the agent nets progress toward the goal AND weaves across lanes —
+    # it does NOT ping-pong left/right in the same row waiting for a battle.
+    loop, _ = _nav_loop(0)
+    loop.world.tiles[0] = {}
+    loop.world.terrain[0] = {(x, y): "grass" for x in range(20) for y in range(20)}  # open grass field
+    start, goal = (5, 12), (5, 0)                        # goal is due north
+    path, moves = _run_farm(loop, start, goal, 12)
+
+    # (a) net FORWARD: ended well north of the start (y decreases going north), not stuck on the row
+    assert path[-1][1] <= start[1] - 6, f"expected strong northward progress, got {path}"
+    # (b) it actually weaved: visited more than one column
+    assert len({p[0] for p in path}) > 1, "never weaved sideways"
+    # (c) never two lateral steps in a row (that is what caused row ping-pong)
+    lat = {Direction.EAST, Direction.WEST}
+    assert not any(a in lat and b in lat for a, b in zip(moves, moves[1:])), f"two laterals in a row: {moves}"
+
+
+def test_farm_step_advances_through_open_lane_when_forward_isnt_grass():
+    # A vertical NON-grass lane straight ahead with grass on both sides: the agent must still climb the
+    # lane (net north) rather than oscillate east/west across it forever.
+    loop, _ = _nav_loop(0)
+    loop.world.tiles[0] = {}
+    terr = {}
+    for y in range(20):
+        terr[(4, y)] = "floor"; terr[(6, y)] = "floor"   # grass columns flanking the bare lane at x=5
+    loop.world.terrain[0] = terr
+    start, goal = (5, 12), (5, 0)
+    path, _ = _run_farm(loop, start, goal, 10)
+    assert path[-1][1] < start[1], f"did not advance north up the lane: {path}"

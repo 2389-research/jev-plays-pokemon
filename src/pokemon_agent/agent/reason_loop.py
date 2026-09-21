@@ -169,8 +169,9 @@ class ReasoningLoop:
         self._policy: str | None = None
         self._policy_map: int | None = None
         self._policy_age = 0
-        self._farm_last: Direction | None = None   # farm-exp pacing: last graze step (for back-and-forth)
+        self._farm_last: Direction | None = None   # farm-exp: last step (to forbid two laterals in a row)
         self._farm_age = 0
+        self._farm_weave = 1   # farm-exp weave sign (+1/-1): alternates lateral lanes into a zig-zag
         self._prev_map: int | None = None  # last DISTINCT map (resolves 0xFF "return" warps)
         self._recent: deque[str] = deque(maxlen=recent_max)
         self._prev: ReasonStep | None = None
@@ -798,15 +799,15 @@ class ReasoningLoop:
         return MoveAction(direction=d) if d is not None else None
 
     def _farm_step(self, obs, wp, avoid):
-        """farm-exp GRIND-WHILE-ADVANCING: drift toward the goal THROUGH grass, always net-progressing
-        — never pacing in place. Every grass step (any direction) rolls a wild encounter, so we don't
-        need to oscillate; we just prefer to take our steps ON grass. Order of preference:
-          1. a grass tile that gets us CLOSER to the waypoint (forward + grinding — the ideal),
-          2. occasionally (~1 step in 3) a grass tile at the SAME distance (a 'side to side' weave, so
-             we sweep a wider strip of grass) — but never a net-backward step,
-          3. if no adjacent grass advances us, the goal-directed router step (which still favours grass
-             en route). So the running motion is roughly two forward for each side step, always toward
-             the goal instead of stalling until the level target is hit."""
+        """farm-exp = WEAVE FORWARD toward the waypoint through grass. The motion is a zig-zag that
+        always trends to the goal: we never take two lateral steps in a row, so forward steps always
+        outnumber sideways ones and net displacement is toward the destination (no pacing in one row).
+          - After any lateral step, the next step ADVANCES (forward is open here — enforced below).
+          - Otherwise, ~every 3rd step (or whenever the forward tile isn't grass) we shift ONE lane
+            sideways onto grass, alternating left/right lanes (the zig-zag), then advance again.
+          - If the forward tile is a wall, hand off to the goal-directed router to get around it.
+        Every grass tile we touch rolls a wild encounter, so weaving through grass grinds EXP while we
+        keep closing on the waypoint — instead of oscillating in place until the level target is hit."""
         from .routing import policy_first_step
         player = obs.player
         tiles = self.world.tiles.get(player.map_id, {})
@@ -814,36 +815,46 @@ class ReasoningLoop:
         px, py = player.x, player.y
         gx, gy = tuple(wp)
         dx, dy = gx - px, gy - py
-        ns_goal = abs(dy) >= abs(dx)      # goal lies mainly north/south (else east/west)
 
-        def grass_ok(nb):
-            return terr.get(nb) == "grass" and tiles.get(nb) != WALL and nb not in avoid
+        if abs(dy) >= abs(dx):            # goal lies mainly north/south -> advance on Y, weave on X
+            fwd = Direction.SOUTH if dy > 0 else Direction.NORTH
+            lat_pos, lat_neg = Direction.EAST, Direction.WEST
+        else:                             # goal mainly east/west -> advance on X, weave on Y
+            fwd = Direction.EAST if dx > 0 else Direction.WEST
+            lat_pos, lat_neg = Direction.SOUTH, Direction.NORTH
 
-        def toward(nb):                   # step closes the DOMINANT-axis gap (net progress)
-            return (nb[1] - py) * dy > 0 if ns_goal else (nb[0] - px) * dx > 0
-
-        def perpendicular(nb):            # a side-step across the dominant axis (weave, no net loss)
-            return (nb[1] == py and nb[0] != px) if ns_goal else (nb[0] == px and nb[1] != py)
-
-        adj = {d: (px + DELTA[d][0], py + DELTA[d][1]) for d in DELTA}
-        fwd_grass = [d for d, nb in adj.items() if grass_ok(nb) and toward(nb)]
-        side_grass = [d for d, nb in adj.items() if grass_ok(nb) and perpendicular(nb)]
+        def nb(d):
+            return (px + DELTA[d][0], py + DELTA[d][1])
+        def walkable(d):
+            return tiles.get(nb(d)) != WALL and nb(d) not in avoid
+        def grass(d):
+            return walkable(d) and terr.get(nb(d)) == "grass"
 
         self._farm_age += 1
-        # ~1 step in 3: a lateral grass weave (only when it exists), else advance through grass
-        if side_grass and fwd_grass and self._farm_age % 3 == 0:
-            self._farm_last = side_grass[0]
-            return MoveAction(direction=side_grass[0])
-        if fwd_grass:                     # forward AND on grass — grind while progressing
-            self._farm_last = fwd_grass[0]
-            return MoveAction(direction=fwd_grass[0])
-        if side_grass:                    # the direct step isn't grass -> weave sideways to stay in grass
-            self._farm_last = side_grass[0]
-            return MoveAction(direction=side_grass[0])
-        # no adjacent grass advancing us -> take the goal-directed step (farm-exp router still prefers grass)
-        d = policy_first_step(self.world, player.map_id, (px, py), tuple(wp), "farm-exp", avoid)
-        self._farm_last = None
-        return MoveAction(direction=d) if d is not None else None
+
+        # Wall straight ahead: let the goal-directed router find the way around (it still favours grass).
+        if not walkable(fwd):
+            d = policy_first_step(self.world, player.map_id, (px, py), tuple(wp), "farm-exp", avoid)
+            self._farm_last = None
+            return MoveAction(direction=d) if d is not None else None
+
+        # Never two laterals in a row -> forward is open here, so ADVANCE. Guarantees net forward motion.
+        if self._farm_last in (lat_pos, lat_neg):
+            self._farm_last = fwd
+            return MoveAction(direction=fwd)
+
+        # Weave a lane every ~3rd step, or whenever the forward tile isn't grass (so we grind on the way):
+        # take ONE lateral step onto grass, preferring the current lane sign, then flip the sign (zig-zag).
+        if self._farm_age % 3 == 0 or not grass(fwd):
+            for lat in ((lat_pos, lat_neg) if self._farm_weave > 0 else (lat_neg, lat_pos)):
+                if grass(lat):
+                    self._farm_weave = -self._farm_weave
+                    self._farm_last = lat
+                    return MoveAction(direction=lat)
+
+        # Advance toward the goal (through grass when it is grass; forward is open regardless).
+        self._farm_last = fwd
+        return MoveAction(direction=fwd)
 
     def _pick_policy(self, obs) -> str:
         """Jev chooses the routing objective for this leg from HP / level / objective / grass."""

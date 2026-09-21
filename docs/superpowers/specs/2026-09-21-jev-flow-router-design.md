@@ -34,49 +34,95 @@ dialogue handler still mashes A deterministically until the screen changes).
 ### Dispatch (in `step_once`)
 
 ```
-1. in_battle (hard RAM bit, wIsInBattle) -> _battle_turn        # deterministic, safety-critical
-2. Jev available (decider == typesafe)?
-     yes -> flow, conf = reasoner.choose_flow(state)            # 1-of-N calibrated
-             if conf < FLOW_MIN_CONF: flow = _safe_flow(state)  # low-confidence fallback
-             dispatch by flow: dialogue -> _advance_dialog
-                               menu     -> _jev_turn (menu)
-                               navigate -> planner nav / legacy _jev_turn
-     no  -> deterministic dispatch (current: ctx_kind == dialog/menu, else navigate)  # llm-decider path
+1. in_battle (hard RAM bit, wIsInBattle) -> _battle_turn         # deterministic, safety-critical
+2. reasoner has choose_flow (Jev wired, duck-typed)?
+     yes -> ans = reasoner.choose_flow(state)                    # ONE call, {dialogue:(a,c), menu:(a,c)}
+             # menu: take it when RAM says open OR Jev is confident (cross-check; A on a menu SELECTS)
+             if ctx.menu.open or (ans["menu"] == ("yes", c) and c >= FLOW_MIN_CONF): -> _jev_turn (menu)
+             # dialogue: Jev-yes (confident) -> advance; hedged -> _safe_flow
+             elif ans["dialogue"] == "yes" and c >= FLOW_MIN_CONF:                   -> _advance_dialog
+             elif conf < FLOW_MIN_CONF:  flow = _safe_flow(state) -> that flow
+             else:                                                                    -> navigate
+     no  -> deterministic dispatch (current: ctx_kind == dialog / menu, else navigate)  # llm-decider path
 ```
 
-- **Battle stays deterministic.** `wIsInBattle` is an unambiguous bit and missing it loses the battle;
-  it is a fact, not a judgment. (It is also passed to Jev as a feature = a strong prior, but the
-  short-circuit means Jev never has to get it right.)
-- **Jev routes the fuzzy boundary** — navigate vs a text box is up vs a menu — which is where the
-  ambiguity (and the bug) actually lives.
-- **Deterministic fallback path** for when Jev isn't wired (`--decider llm`, or Jev unavailable): keep
-  the current `ctx_kind`-based dispatch (with the already-committed lowercase-dialogue heuristic as its
-  detector). So the router degrades gracefully; it does not depend on Jev being present.
+- **Battle AND menu stay deterministic.** `wIsInBattle` is an unambiguous bit (missing it loses the
+  battle), and `menu.open` is a separate RAM-derived signal from `read_menu`. Both are facts, not
+  judgments — and pressing A on an open menu MAKES A SELECTION (not a harmless no-op), so a menu must
+  never be routed to the dialogue (A-mashing) flow. Menus are handled before Jev.
+- **Jev arbitrates only the genuinely fuzzy boundary — navigate vs a dialogue box is up** — which is
+  exactly where the ambiguity (and the bug) lives. `choose_flow` is a 1-of-2 Choice
+  (`["navigate", "dialogue"]`), not 1-of-3. (In_battle / menu-open are passed as features = strong
+  priors, but the deterministic short-circuits mean Jev never has to get them right.)
+- **Jev-availability is duck-typed**, matching the existing optional-Jev pattern
+  (`getattr(self.reasoner, "choose_flow", None) is not None`) — not a decider string. When absent
+  (`--decider llm`, generative `Reasoner`), keep the current `ctx_kind`-based dispatch (with the
+  already-committed lowercase-dialogue heuristic as its detector). The router degrades gracefully.
 
-### `choose_flow` (new `TypeSafeReasoner.choose_flow`)
+### `choose_flow` — ONE call, N parallel focused binaries (`TypeSafeReasoner.choose_flow`)
 
-Mirrors the existing `choose_policy`/`choose_npc` shape: one calibrated `Choice`.
+Jev's `system_one(state, questions)` answers a DICT of named questions in a single round-trip,
+returning one calibrated answer per name (`SystemOneResponse.answers`). Jev works best on SHORT,
+focused prompts — so instead of cramming the mode decision into one multi-class prompt, `choose_flow`
+asks several tiny yes/no questions in parallel against the same state and routes on the calibrated
+answers.
 
-- **State (features):** the decoded on-screen text (rows 12–17, whatever it is — we still *decode* it,
-  we just don't heuristically classify it), a short `screen_has_text` flag, the menu-cursor/text-box
-  RAM signals we already read (`text_box_id`, any menu state in `read_context`), player position +
-  facing, whether the tile the player faces is an NPC, and the current objective.
-- **Question:** `Choice(criteria=["navigate", "dialogue", "menu"], instructions=…)` — "Given the
-  screen, which control flow is active right now?" Instructions describe each: dialogue = a text box is
-  open and waiting (press A to continue); menu = a selectable list/cursor is up (choose an option);
-  navigate = free overworld movement.
-- **Returns** `(flow: str, confidence: float)` — parsed like the other `choose_*` (the chosen criterion
-  + its calibrated probability).
+```python
+questions = {
+  "dialogue": Choice(criteria=["yes","no"],
+                     instructions="A text box is open and the player must press A to continue. Yes/no?"),
+  "menu":     Choice(criteria=["yes","no"],
+                     instructions="A selectable menu/list with a cursor is open. Yes/no?"),
+}
+resp = self.client.system_one(state=state, questions=questions)     # one round-trip, calibrated per Q
+return {name: (ans.choice, float(ans.confidence)) for name, ans in resp.answers.items()}
+```
+
+- **State (small, text-centric):** the decoded on-screen text-box region (rows 12–17, whatever it is —
+  we still *decode* it, we just don't heuristically classify it), a `has_text` bool, `text_box_id`, and
+  `last_action` (did the agent just try to move / press A?). Keep it tiny — the decisive feature is
+  `screen_text`.
+- **Returns** `dict[str, (answer, confidence)]` — e.g. `{"dialogue": ("yes", 0.93), "menu": ("no", .8)}`.
+- **Number of questions is a design variable (tuned in Deliverable 0):** at minimum `dialogue?`; adding
+  `menu?` lets Jev CROSS-CHECK the RAM `menu.open` signal (which the reviewer flagged as not-yet-fixture-
+  validated) at no extra round-trip. Only asking questions that earn their keep on the scorecard.
+
+**The exact questions, wording, and minimal features are designed EMPIRICALLY, not guessed** (see
+Deliverable 0): we run this parallel call against labelled real frames and tune against a scorecard
+(per-question accuracy + calibration) before wiring it into the loop.
 
 ### Low-confidence fallback (`_safe_flow`)
 
-When `conf < FLOW_MIN_CONF`, don't trust the pick — choose the SAFE default:
-- if there is on-screen text decoded -> `dialogue` (mashing A on a text box advances it; mashing A on a
-  non-dialog is a cheap, self-correcting no-op — far safer than walking into an unread box forever);
+When `conf < FLOW_MIN_CONF`, don't trust the pick — choose the SAFE default. Menus are already handled
+deterministically BEFORE this point (step 2), so `_safe_flow` only picks between dialogue and navigate,
+and A-on-a-menu can't happen here:
+- if there is on-screen text decoded -> `dialogue` (pressing A advances a real box; pressing A in the
+  overworld is a cheap, self-correcting no-op — far safer than walking into an unread box forever);
 - else -> `navigate`.
 
 This is strictly more robust than a bare heuristic or an uncalibrated model: an unsure router fails
-toward "close the box," which is the recoverable direction.
+toward "close the box," the recoverable direction.
+
+## Deliverable 0 — the flow-gate probe (BUILD + TUNE BEFORE WIRING)
+
+Do not touch `step_once` until the gate's prompt + minimal context are validated empirically (mirrors
+the Layer-2.5 criteria eval). A `scripts/probe_flow_gate.py` + fixtures:
+
+- **Fixtures = labelled real frames.** Reconstruct states from the recorded runs / RAM: a genuine
+  dialogue, the ALL-LOWERCASE dialogue that broke (`"…strong, they can protect me!"`), a plain
+  overworld frame, a garbled/cutscene frame (repeated-char blob -> should be `navigate`), and (as a
+  control) a menu frame. Each labelled with its true flow. Build them with a settable-RAM emulator
+  (poke the text-box tiles) or by loading captured `.state`s.
+- **Run `choose_flow`** on each and score: accuracy vs the label, and whether the confidence is
+  well-calibrated (high on the clear cases, lower on the garbled one). Try context variants (screen_text
+  alone vs +has_text vs +text_box_id) to find the MINIMAL context that classifies correctly.
+- **Output** a scorecard; iterate the instructions/features until the gate is right — in particular the
+  all-lowercase case must classify as `dialogue` and the cutscene blob as `navigate`.
+- Gated behind `@pytest.mark.live` / run as a script (it costs Jev credits); the DETERMINISTIC grader
+  is offline-unit-tested with canned Jev outputs.
+
+Only after Deliverable 0 gives a passing scorecard do we implement `choose_flow` for real and wire the
+dispatch.
 
 ### Constant
 `FLOW_MIN_CONF` (in `reason_loop.py`, alongside the other Jev thresholds `JEV_OVERRIDE_CONF` etc.),
@@ -101,14 +147,17 @@ Layer-3 (gated, live): the existing live smoke, plus optionally a fixture that s
 an NPC so it opens a dialog, and asserts it advances out instead of stalling.
 
 ## Files
-- **Modify** `agent/typesafe_reasoner.py` — add `choose_flow(state) -> (flow, conf)`.
-- **Modify** `agent/reason_loop.py` — `step_once` dispatch: battle short-circuit, Jev `choose_flow`
-  with `_safe_flow` fallback when Jev is wired, else the current deterministic dispatch; add
-  `FLOW_MIN_CONF`; add `_safe_flow`.
-- **Keep** `games/pokemon_red/game_state.py` `read_screen_text` (it still DECODES the text as a feature
-  and still backs the deterministic fallback path — the committed lowercase fix stays as the fallback
-  detector). The routing simply no longer *depends* on its boolean when Jev is present.
-- **Modify** `tests/unit/test_executive.py` (or a new `test_flow_router.py`) — the Layer-1 tests above.
+- **Create (Deliverable 0, first)** `scripts/probe_flow_gate.py` + `tests/fixtures/flow_frames.py` —
+  labelled frames + the live probe/scorecard; `tests/unit/test_flow_gate_grader.py` — offline grader.
+- **Modify** `agent/typesafe_reasoner.py` — add `choose_flow(state) -> (flow, conf)` (binary
+  dialogue/navigate), prompt/features per Deliverable 0.
+- **Modify** `agent/reason_loop.py` — `step_once` dispatch: battle short-circuit, menu short-circuit,
+  then (if `getattr(self.reasoner, "choose_flow", None)`) Jev `choose_flow` + `_safe_flow` fallback,
+  else the current deterministic `ctx_kind` dispatch; add `FLOW_MIN_CONF`; add `_safe_flow`.
+- **Keep** `games/pokemon_red/game_state.py` `read_screen_text` (still DECODES the text as a feature and
+  backs the deterministic fallback path — the committed lowercase fix stays as the fallback detector).
+  Routing no longer *depends* on its boolean when Jev is present.
+- **Modify** `tests/unit/test_executive.py` (or a new `test_flow_router.py`) — the dispatch tests below.
 
 ## Risks
 - **Cost:** one extra Jev call per step. Jev is calibrated/cheap (output free, ~$0.042/M input) so this

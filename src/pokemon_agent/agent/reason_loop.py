@@ -58,6 +58,7 @@ POLICY_BUDGET = 15       # steps a Jev-chosen routing policy runs before it's re
 JEV_NPC_CONF = 0.4  # trust Jev's NPC pick only at/above this confidence (else fall back to nearest)
 FLOW_MIN_CONF = 0.55  # trust Jev's flow-gate pick (dialogue vs navigate) only at/above this; else _safe_flow
 WARP_BACK = 0xFF     # a warp's dest_map of 0xFF means "return to the map you came from" (wLastMap)
+RESUME_EVERY = 50    # steps between always-on resumable checkpoints written into the record-dir
 TARGET_REPROPOSE_LIMIT = 2  # times the proposer may re-pick a DIFFERENT target to unstick before L1
 
 # screen-relative neighbor of the player in the local walkability window (up = north)
@@ -125,6 +126,9 @@ class ReasoningLoop:
         self.stuck = StuckDetector()
         self.checkpoint_every = checkpoint_every
         self.checkpoint_dir = Path(checkpoint_dir) if checkpoint_dir else None
+        # always-on resumable checkpoint: any recorded run drops latest.state + latest.mem.json in its
+        # own record-dir (periodically + at run-end), so the run can be continued with --resume-from.
+        self._resume_dir = recorder.dir if recorder is not None else None
         self.goal_map = goal_map
         self.level_target = level_target
         self.knowledge = knowledge           # Orrery KB (also used for battle type lookups)
@@ -1557,6 +1561,8 @@ class ReasoningLoop:
         self.session.step += 1
         if self.checkpoint_every and self.checkpoint_dir and self.session.step % self.checkpoint_every == 0:
             self._checkpoint()
+        if self._resume_dir is not None and self.session.step % RESUME_EVERY == 0:
+            self.save_resume_checkpoint()
         return result
 
     # --- battle sub-policy (mode dispatch routes here when in_battle) ---------
@@ -1616,12 +1622,28 @@ class ReasoningLoop:
         route = self.memory.graph.route(player.map_id, d.target_map)
         return (len(route) - 1) if route else None
 
-    def _checkpoint(self) -> None:
-        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    def _write_resume(self, dest: Path) -> None:
+        """Write a resumable checkpoint pair to `dest`: latest.state (full PyBoy save) + latest.mem.json
+        (world map, graph, interactions, reflection plan, map history, blocked edges)."""
+        dest.mkdir(parents=True, exist_ok=True)
         self.memory.plan = self._plan
-        self.controller.emu.save_state(self.checkpoint_dir / "latest.state")
-        self.memory.save(self.checkpoint_dir / "latest.mem.json")
+        self.controller.emu.save_state(dest / "latest.state")
+        self.memory.save(dest / "latest.mem.json")
+
+    def _checkpoint(self) -> None:
+        self._write_resume(self.checkpoint_dir)
         self.on_event("checkpoint", {"step": self.session.step, "dir": str(self.checkpoint_dir)})
+
+    def save_resume_checkpoint(self) -> None:
+        """Always-on continuation snapshot into the record-dir (periodic + at run-end). No-op when the
+        run isn't being recorded. Lets any run be continued later with `--resume-from <record-dir>`."""
+        if self._resume_dir is None:
+            return
+        try:
+            self._write_resume(self._resume_dir)
+            self.on_event("checkpoint", {"step": self.session.step, "dir": str(self._resume_dir), "resume": True})
+        except Exception as e:   # a checkpoint must never crash the run
+            self.on_event("checkpoint_failed", {"step": self.session.step, "error": str(e)})
 
     def _confirmed_wall(self, direction) -> bool:
         """True only if the LIVE collision map says the tile ahead is blocked.
@@ -1700,10 +1722,15 @@ class ReasoningLoop:
         )
 
     def run(self, max_steps: int = 40) -> None:
-        for _ in range(max_steps):
-            if not self.session.running:
-                break
-            self.step_once()
+        try:
+            for _ in range(max_steps):
+                if not self.session.running:
+                    break
+                self.step_once()
+        finally:
+            # Always leave a resumable snapshot at the end (budget reached, stop, or crash), so the run
+            # can be continued from exactly where it stopped rather than the last new-area state.
+            self.save_resume_checkpoint()
 
 
 def _desc(action) -> str:

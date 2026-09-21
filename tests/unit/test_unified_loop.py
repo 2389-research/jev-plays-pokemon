@@ -631,6 +631,42 @@ def test_farm_step_weaves_FORWARD_never_paces_in_one_row():
     assert not any(a in lat and b in lat for a, b in zip(moves, moves[1:])), f"two laterals in a row: {moves}"
 
 
+# --- always-on resumable checkpoints (continue a run from where it stopped) ---
+def _recorded_loop(tmp_path, map_id=0):
+    from pokemon_agent.logging.run_recorder import RunRecorder
+    loop, emu = _nav_loop(map_id)
+    rec = RunRecorder(emu, tmp_path / "rec")
+    loop.recorder = rec
+    loop._resume_dir = rec.dir          # what __init__ sets when a recorder is present
+    return loop, emu, rec
+
+
+def test_save_resume_checkpoint_writes_resumable_pair(tmp_path):
+    from pokemon_agent.agent.memory import AgentMemory
+    loop, emu, rec = _recorded_loop(tmp_path)
+    loop.save_resume_checkpoint()
+    # memory file is really written (and round-trips), and the emulator state was saved to latest.state
+    assert (rec.dir / "latest.mem.json").exists()
+    assert AgentMemory.load(rec.dir / "latest.mem.json") is not None
+    assert str(rec.dir / "latest.state") in emu.saved_states
+
+
+def test_run_always_writes_final_resume_checkpoint(tmp_path):
+    # even a zero-step run leaves a resumable snapshot (the finally clause), so a budget-capped or
+    # crashed run can be continued from exactly where it stopped.
+    loop, emu, rec = _recorded_loop(tmp_path)
+    loop.run(max_steps=0)
+    assert (rec.dir / "latest.mem.json").exists()
+    assert str(rec.dir / "latest.state") in emu.saved_states
+
+
+def test_resume_checkpoint_is_noop_without_recorder():
+    loop, _ = _nav_loop(0)
+    assert loop._resume_dir is None            # no recorder -> nothing to resume into
+    loop.save_resume_checkpoint()              # must not raise
+    loop.run(max_steps=0)                      # finally clause must not raise either
+
+
 def test_farm_step_advances_through_open_lane_when_forward_isnt_grass():
     # A vertical NON-grass lane straight ahead with grass on both sides: the agent must still climb the
     # lane (net north) rather than oscillate east/west across it forever.

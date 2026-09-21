@@ -671,6 +671,7 @@ class ReasoningLoop:
                 door = next((e for e in (obs.exits or []) if e.get("dest_map") == hop[0]), None)
                 if door is not None:
                     exit_tile = (int(door["x"]), int(door["y"]))
+        reach = self._reachable_cells(player, occupied)
         ctx = {
             "map_view": obs.map_view,
             "player": {"x": player.x, "y": player.y, "map_id": player.map_id},
@@ -684,7 +685,8 @@ class ReasoningLoop:
                      for n in ((obs.game_state or {}).get("npcs") or []) if "x" in n and "y" in n],
             "recent_trail": list(self._recent)[-8:],
             "recent_targets": [dict(t) for t in self._recent_targets],
-            "reachable": self._reachable_cells(player, occupied),
+            "reachable": reach,
+            "candidate_exits": self._candidate_exits(obs, reach),
             "default": default,
             "stuck": stuck,
             "why": ("the last target was unreachable or made no progress; propose a DIFFERENT one"
@@ -1006,6 +1008,13 @@ class ReasoningLoop:
                 if door is not None:
                     d = self._warp_exit_dir(xy, obs.map_dims)
                     return MoveAction(direction=d) if d is not None else None
+                # a map-EDGE opening L2 routed to (a boundary tile, no warp): step OFF the edge to
+                # cross to the adjacent map — the router owns the crossing, L2 only named the tile.
+                if obs.map_dims:
+                    w, h = obs.map_dims
+                    if xy[0] <= 0 or xy[1] <= 0 or xy[0] >= w - 1 or xy[1] >= h - 1:
+                        d = self._warp_exit_dir(xy, obs.map_dims)
+                        return MoveAction(direction=d) if d is not None else None
                 return InteractAction() if target.get("interact") else None
             avoid = set(occupied)
             return self._route_to_tile(obs, xy, blocked_dirs, avoid)
@@ -1285,6 +1294,34 @@ class ReasoningLoop:
         self._prev = rstep
         self._emit_reason(rstep, 0)
         return self._finish(obs, rstep, result, 0, {}, shot)
+
+    def _candidate_exits(self, obs, reachable) -> list[dict]:
+        """Every reachable WAY OFF this map, as coordinates L2 can route to — so it SELECTS a specific
+        exit instead of us guessing the nearest door. Two kinds, both deterministic from RAM (never
+        guessed): warp DOORS (from obs.exits, with their known destination map) and map-EDGE openings
+        (reachable walkable tiles sitting on the map boundary — the tiles you can step off to reach the
+        adjacent map). L2 may pick one of these or any other walkable tile; they are hints, not a menu."""
+        out: list[dict] = []
+        doors: set[tuple[int, int]] = set()
+        for e in (obs.exits or []):
+            try:
+                x, y = int(e["x"]), int(e["y"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            doors.add((x, y))
+            out.append({"x": x, "y": y, "kind": "door",
+                        "dest_map": e.get("dest_map"), "dest": e.get("dest_name")})
+        dims = getattr(obs, "map_dims", None)
+        if dims and reachable:
+            w, h = dims
+            for (x, y) in reachable:
+                if (x, y) in doors:
+                    continue
+                d = ("N" if y <= 0 else "S" if y >= h - 1 else
+                     "W" if x <= 0 else "E" if x >= w - 1 else None)
+                if d is not None:
+                    out.append({"x": x, "y": y, "kind": "edge", "dir": d})
+        return out
 
     def _reachable_cells(self, player, npcs: set[tuple[int, int]]) -> set[tuple[int, int]]:
         """BFS-reachable cells from the player over the ingested collision, avoiding walls,

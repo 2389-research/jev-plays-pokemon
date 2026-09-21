@@ -98,24 +98,32 @@ Return ONLY JSON: {"path": "(x,y)->(x,y)->...", "x": <int>, "y": <int>, "reason"
 
 
 PROPOSER_SYSTEM = """You are the MID-LEVEL PROPOSER for a Pokémon Red agent. The strategic layer
-picked WHERE to go (a target map / errand). Each leg you look at the grid and propose ONE concrete,
-machine-usable SHORT-TERM TARGET toward that goal — a deterministic router then enacts it and asks
-you again when you REACH it, get STUCK, or the map changes. You are also the get-unstuck mechanism:
-when WHY says the last target was unreachable, propose something DIFFERENT (a new tile, or leave).
+picked WHERE to go (a target map / errand). Your job each leg: look at the grid and pick ONE
+COORDINATE to walk toward. A deterministic router walks you there and handles what happens on
+arrival (stepping through a door, or off a map edge) — you just pick the tile. It asks you again
+when you REACH it, get STUCK, or the map changes. You are also the get-unstuck mechanism: when WHY
+says the last target was unreachable or made no progress, pick a DIFFERENT tile.
 
-Return ONLY ONE JSON object, one of these kinds:
-  {"kind":"tile","x":<int>,"y":<int>,"note":"..."}   head to a walkable coordinate on THIS map
-  {"kind":"exit","note":"..."}                        leave this building/area toward the goal
-  {"kind":"enter","map":<int>,"note":"..."}           step through the door leading to that map
-  {"kind":"approach_npc","sprite":"<name>","note":"..."}  reach and talk to that person
+Return ONLY ONE JSON object. Normally a coordinate:
+  {"x":<int>,"y":<int>,"why":"<one short sentence: why this tile>"}
+To talk to a person instead of move:
+  {"kind":"approach_npc","sprite":"<name>","why":"..."}
 
-COORDINATES: (x,y); x = column (increases EAST), y = row (increases SOUTH, y=0 north). The MAP_VIEW
-starts with a LEGEND naming every symbol (path, grass 'G' is walkable, '#'/water NOT walkable, one-way
-ledges, doors, counters, NPCs) — READ IT, never guess a tile. Pick a 'tile' that is in REACHABLE and a
-real step toward DESTINATION/GOAL_DIR, not one in RECENT_TARGETS you keep revisiting. Prefer EXIT_TILE
-(or {"kind":"exit"}) when the way forward is out a door. Use DEFAULT as a strong hint — it is what the
-deterministic layer would do; accept it unless you can do better or must get unstuck. NOTE is one short
-sentence of your reasoning (this becomes the agent's visible short-term objective)."""
+COORDINATES: (x,y); x = column (increases EAST), y = row (increases SOUTH, y=0 is the north edge).
+The MAP_VIEW starts with a LEGEND naming every symbol (path, grass 'G' walkable, '#'/water NOT
+walkable, one-way ledges, doors 'D', counters, NPCs) — READ IT, never guess a tile.
+
+CANDIDATE_EXITS is the list of ways OFF this map, each an exact coordinate: kind "door" (a warp,
+with its destination map) or "edge" (a walkable map-boundary opening, with its direction N/S/E/W).
+To LEAVE toward the goal, pick the coordinate of the candidate that advances toward
+DESTINATION/GOAL_DIR — e.g. a north 'edge' when the goal is north, or a 'door' whose dest is on the
+way. IGNORE candidates that lead BACKWARD (e.g. a door back into a building you just left, or whose
+dest is where you came from). If no candidate helps yet, walk toward the goal side of the map and
+you'll be asked again. You may also pick any other walkable tile — candidates are hints, not a menu.
+
+Pick a tile that is in REACHABLE and a real step toward the goal, not one in RECENT_TARGETS you keep
+revisiting. WHY is one short sentence of your reasoning (it becomes the agent's visible short-term
+objective and helps debugging — always include it)."""
 
 
 STRATEGIST_SYSTEM = """You are the STRATEGIC planner (tier 2) for an agent playing Pokémon Red,
@@ -714,6 +722,7 @@ class Planner:
             "player": context.get("player"),
             "map_view": context.get("map_view"),
             "exit_tile": list(exit_tile) if exit_tile else None,
+            "candidate_exits": context.get("candidate_exits"),
             "npcs": context.get("npcs"),
             "recent_trail": context.get("recent_trail"),
             "recent_targets": context.get("recent_targets"),
@@ -731,8 +740,8 @@ class Planner:
             except Exception as e:
                 reason = f"call/parse failed: {e}"
                 continue
-            note = str(data.get("note") or "").strip()
-            if kind == "tile":
+            note = str(data.get("why") or data.get("note") or "").strip()
+            if kind == "tile" or (kind is None and "x" in data and "y" in data):
                 try:
                     x, y = int(data["x"]), int(data["y"])
                 except (KeyError, TypeError, ValueError):

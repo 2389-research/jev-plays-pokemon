@@ -121,6 +121,38 @@ def test_resolve_approach_npc_interacts_when_adjacent_and_facing():
     assert isinstance(move, InteractAction)
 
 
+def test_candidate_exits_lists_doors_and_reachable_edge_openings():
+    # L2 should be handed every way OFF the map as a coordinate: warp doors (with dest) AND reachable
+    # map-boundary openings (edge tiles), so it can SELECT one instead of us guessing the nearest door.
+    loop, _ = _nav_loop(0)
+    obs = SimpleNamespace(map_dims=(6, 8),
+                          exits=[{"x": 2, "y": 7, "dest_map": 40, "dest_name": "Oaks Lab"}])
+    reachable = {(2, 7), (3, 0), (0, 4), (2, 3)}  # door tile, north-edge, west-edge, interior tile
+    cands = loop._candidate_exits(obs, reachable)
+    doors = [c for c in cands if c["kind"] == "door"]
+    edges = {(c["x"], c["y"], c["dir"]) for c in cands if c["kind"] == "edge"}
+    assert doors == [{"x": 2, "y": 7, "kind": "door", "dest_map": 40, "dest": "Oaks Lab"}]
+    assert edges == {(3, 0, "N"), (0, 4, "W")}          # boundary openings, with direction
+    assert (2, 3) not in {(c["x"], c["y"]) for c in cands}  # interior tile is not a way off
+
+
+def test_propose_target_accepts_bare_coordinate_with_why():
+    # L2's primary output is just a coordinate + why — no "kind" needed.
+    p = Planner(goal_map=0, provider=FakeProvider('{"x":3,"y":4,"why":"head south toward the north edge exit"}'))
+    t = p.propose_target(emu=None, context=_ctx())
+    assert t["kind"] == "tile" and (t["x"], t["y"]) == (3, 4)
+    assert "south" in t["note"]
+
+
+def test_resolve_tile_at_map_edge_steps_off_to_cross():
+    # routing to a boundary opening tile: on arrival the ROUTER steps off the edge to cross maps.
+    loop, _ = _nav_loop(0)
+    player = SimpleNamespace(x=3, y=0, map_id=0, facing="north")   # already ON the north boundary
+    obs = SimpleNamespace(player=player, map_dims=(6, 8), exits=[], game_state={})
+    move = loop._resolve_target({"kind": "tile", "x": 3, "y": 0}, _d(Intent.TRAVEL), obs, set(), set())
+    assert isinstance(move, MoveAction) and move.direction == Direction.NORTH
+
+
 def test_approach_counter_npc_bumps_then_talks_across_the_counter():
     # A counter NPC (nurse at 3,1) sits behind a COUNTER cell (3,2): you can't stand adjacent, you
     # talk from 2 tiles away (3,3) — but ONLY after bumping the counter (a blocked step into it).

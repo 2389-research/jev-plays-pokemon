@@ -56,6 +56,7 @@ SERVO_FAIL_LIMIT = 6  # consecutive servo no-route steps before the directive is
 JEV_OVERRIDE_CONF = 0.6  # Jev may override the BFS pathing suggestion only at/above this confidence
 POLICY_BUDGET = 15       # steps a Jev-chosen routing policy runs before it's re-selected for the area
 JEV_NPC_CONF = 0.4  # trust Jev's NPC pick only at/above this confidence (else fall back to nearest)
+FLOW_MIN_CONF = 0.55  # trust Jev's flow-gate pick (dialogue vs navigate) only at/above this; else _safe_flow
 WARP_BACK = 0xFF     # a warp's dest_map of 0xFF means "return to the map you came from" (wLastMap)
 TARGET_REPROPOSE_LIMIT = 2  # times the proposer may re-pick a DIFFERENT target to unstick before L1
 
@@ -232,18 +233,22 @@ class ReasoningLoop:
         ctx = (obs.game_state or {}).get("context") or {}
         ctx_kind = ctx.get("kind")
 
-        # --- mode controllers own the step (battle / passive dialog) ---
+        # --- battle owns the step (deterministic RAM bit — a fact, never a classification) ---
         if ctx.get("in_battle"):
             rstep, latency, usage, result = self._battle_turn(obs)
             self._prev = rstep
             self._emit_reason(rstep, latency)
             return self._finish(obs, rstep, result, latency, usage, shot)
-        if ctx_kind == "dialog":
-            return self._advance_dialog(obs, shot)
 
-        # --- menu is a mode: Jev operates it (a bounded 1-of-N calibrated choice) ---
-        if ctx_kind == "menu":
+        # --- FLOW ROUTER: menu is deterministic (RAM cursor); navigate-vs-dialogue is a calibrated
+        # Jev choice (falls back to the deterministic ctx_kind detector when Jev isn't wired). Replaces
+        # the brittle has_upper dialog heuristic as the router. ---
+        flow = self._route_flow(obs, ctx)
+        if flow == "menu":
             return self._jev_turn(obs, player_desc, self._blocked_dirs(obs, None), None, shot)
+        if flow == "dialogue":
+            return self._advance_dialog(obs, shot)
+        # flow == "navigate" -> fall through to the navigation path below
 
         # --- overworld: LunaRoute sets the target, deterministic BFS routes to it. Jev is NOT a
         # navigator — when there's no clean route the DECISION goes up to LunaRoute (re-plan /
@@ -1310,6 +1315,48 @@ class ReasoningLoop:
         result = self.controller.execute(rstep.action)
         # (no wall-learning on a blocked move — the RAM collision map is ground truth.)
         return result
+
+    def _route_flow(self, obs, ctx) -> str:
+        """Which control FLOW is active (battle handled upstream): 'menu' | 'dialogue' | 'navigate'.
+
+        Menu is deterministic — the RAM cursor-arrow signal (A on a menu SELECTS, so a menu must never
+        reach the dialogue/A-mash path). The genuinely fuzzy boundary — a text box is up vs the overworld
+        is free — is a calibrated Jev choice fed the RAW decoded text (so it sees an all-lowercase line
+        the old has_upper heuristic would have zeroed). When Jev isn't wired (e.g. --decider llm), or it
+        errors, fall back to the deterministic ctx_kind detector. Low confidence -> _safe_flow."""
+        menu = ctx.get("menu") or {}
+        raw = (ctx.get("screen_text_raw") or "").strip()
+        choose = getattr(self.reasoner, "choose_flow", None)
+        if choose is None:                                   # no Jev -> deterministic fallback
+            if menu.get("open"):
+                return "menu"
+            return "dialogue" if ctx.get("kind") == "dialog" else "navigate"
+        if not raw and not menu.get("open"):                 # no text at all -> no box -> skip the Jev call
+            return "navigate"
+        try:
+            last = getattr(getattr(self._prev, "action", None), "type", "") or ""
+            ans = choose(screen_text=raw, has_text=bool(raw),
+                         text_box_id=int(ctx.get("text_box_id") or 0), last_action=last)
+        except Exception:                                    # Jev call failed -> deterministic fallback
+            if menu.get("open"):
+                return "menu"
+            return "dialogue" if ctx.get("kind") == "dialog" else "navigate"
+        d_ans, d_conf = ans.get("dialogue", ("no", 0.0))
+        m_ans, m_conf = ans.get("menu", ("no", 0.0))
+        if menu.get("open") or (m_ans == "yes" and m_conf >= FLOW_MIN_CONF):   # menu first (RAM or Jev)
+            return "menu"
+        if d_ans == "yes" and d_conf >= FLOW_MIN_CONF:
+            return "dialogue"
+        if max(d_conf, m_conf) < FLOW_MIN_CONF:              # Jev hedged -> safe default
+            return self._safe_flow(ctx)
+        return "navigate"
+
+    @staticmethod
+    def _safe_flow(ctx) -> str:
+        """Low-confidence fallback (menu handled upstream): fail toward closing a box. Raw text present
+        -> dialogue (advancing a real box clears the stall; A on the overworld is a cheap, self-
+        correcting no-op — far safer than walking into an unread box forever); else navigate."""
+        return "dialogue" if (ctx.get("screen_text_raw") or "").strip() else "navigate"
 
     def _advance_dialog(self, obs, shot) -> ActionResult:
         from ..core.models import AdvanceDialogAction

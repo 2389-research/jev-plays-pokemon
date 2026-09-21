@@ -528,3 +528,47 @@ def test_collision_is_reread_every_step_not_cached(monkeypatch):
     loop.step_once()
     assert loop.world.bounds[0] == (20, 18)           # re-read corrected it (not cached once)
     assert calls["n"] >= 2                              # collision is read on EVERY step
+
+
+# --- flow router (_route_flow): Jev routes navigate-vs-dialogue; menu is deterministic RAM ---
+class _FlowStub:
+    def __init__(self, ans): self.ans = ans
+    def choose_flow(self, **kw): return self.ans
+
+
+def test_route_flow_jev_routes_confident_dialogue():
+    loop, _ = _nav_loop(0)
+    loop.reasoner = _FlowStub({"dialogue": ("yes", 0.9), "menu": ("no", 0.9)})
+    ctx = {"screen_text_raw": "This is private property!", "menu": {"open": False}, "kind": "overworld"}
+    assert loop._route_flow(None, ctx) == "dialogue"
+
+
+def test_route_flow_no_text_skips_jev_and_navigates():
+    loop, _ = _nav_loop(0)
+    loop.reasoner = _FlowStub({"dialogue": ("yes", 0.99), "menu": ("no", 0.99)})  # must NOT be consulted
+    assert loop._route_flow(None, {"screen_text_raw": "", "menu": {"open": False}}) == "navigate"
+
+
+def test_route_flow_menu_open_is_deterministic_and_wins():
+    # A on a menu SELECTS -> the RAM cursor signal must route to menu even when Jev reads the text as
+    # dialogue (the nurse YES/NO decodes as prose, so Jev leans dialogue — RAM must win).
+    loop, _ = _nav_loop(0)
+    loop.reasoner = _FlowStub({"dialogue": ("yes", 0.99), "menu": ("no", 0.3)})
+    ctx = {"screen_text_raw": "Shall we heal your POKMON?", "menu": {"open": True}}
+    assert loop._route_flow(None, ctx) == "menu"
+
+
+def test_route_flow_low_confidence_falls_to_dialogue_when_text_present():
+    loop, _ = _nav_loop(0)
+    loop.reasoner = _FlowStub({"dialogue": ("yes", 0.3), "menu": ("no", 0.3)})   # both hedged
+    ctx = {"screen_text_raw": "some ambiguous text", "menu": {"open": False}}
+    assert loop._route_flow(None, ctx) == "dialogue"      # safe = close the box
+
+
+def test_route_flow_deterministic_fallback_without_jev():
+    loop, _ = _nav_loop(0)
+    loop.reasoner = object()                              # no choose_flow -> ctx_kind dispatch
+    assert loop._route_flow(None, {"screen_text_raw": "x", "menu": {"open": False},
+                                   "kind": "dialog"}) == "dialogue"
+    assert loop._route_flow(None, {"screen_text_raw": "", "menu": {"open": False},
+                                   "kind": "overworld"}) == "navigate"

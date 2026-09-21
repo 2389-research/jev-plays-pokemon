@@ -187,6 +187,22 @@ def _uppercase_run(emu: Emulator, addr: int, length: int) -> bool:
     return any(0x80 <= emu.read_memory(addr + i) <= 0x99 for i in range(length))
 
 
+def decode_textbox_raw(emu: Emulator) -> str:
+    """The letters decoded from the bottom text-box region (rows 12-17), WITHOUT any dialog/no-dialog
+    classification — just the raw ≥3-alpha lines joined. Empty => no text at all. The Jev flow router
+    feeds THIS to the model (so it sees an all-lowercase line the has_upper heuristic would zero); the
+    model, not a string heuristic, decides whether it's a dialogue box or a background-picture blob."""
+    try:
+        lines = []
+        for row in range(12, 18):
+            s = _decode(emu, WTILEMAP + row * 20, 20, stop_at_terminator=False).strip()
+            if sum(c.isalpha() for c in s) >= 3:
+                lines.append(s)
+        return " ".join(lines).strip()
+    except Exception:
+        return ""
+
+
 def read_screen_text(emu: Emulator) -> tuple[str, bool]:
     """Decode the on-screen textbox region into text, and whether a real dialog/menu
     is active. Text boxes occupy the bottom rows (12-17). A row counts as text only
@@ -329,6 +345,7 @@ def read_context(emu: Emulator) -> dict:
         "battle_kind": _BATTLE_KIND.get(inb, f"#{inb}"),
         "text_active": text_active,
         "screen_text": text,
+        "screen_text_raw": decode_textbox_raw(emu),  # raw decode (unclassified) for the Jev flow router
         "menu": menu,          # {open, kind, cursor_index, num_options, options} when a menu is up
     }
     try:

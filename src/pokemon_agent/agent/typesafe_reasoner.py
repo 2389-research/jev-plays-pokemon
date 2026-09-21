@@ -348,15 +348,18 @@ class TypeSafeReasoner:
             "note": "SCREEN_TEXT is decoded from the on-screen text-box area; it may be empty (no box) "
                     "or a repeated-character blob (a background picture, not real text).",
         }
+        # NB: the questions describe the OBSERVABLE screen state only — never our action ("press A").
+        # Jev classifies what's on screen; our code decides how to act on each flow.
         questions = {
             "dialogue": Choice(
-                instructions="Is a dialogue text box open, waiting for the player to press A to continue?",
-                criteria={"yes": "a dialogue / text box IS open and waiting for A",
-                          "no": "no dialogue box — SCREEN_TEXT is empty or a background-picture blob"}),
+                instructions="Is a dialogue / message text box currently shown on screen — a character "
+                             "speaking, or a message being displayed to the player?",
+                criteria={"yes": "a dialogue / message text box IS on screen (SCREEN_TEXT is real prose)",
+                          "no": "no message box — SCREEN_TEXT is empty or a background-picture blob"}),
             "menu": Choice(
-                instructions="Is a selectable menu / list with a cursor open (player must choose an option)?",
-                criteria={"yes": "a menu or selectable list with a cursor IS open",
-                          "no": "no menu is open"}),
+                instructions="Is a selectable menu or list (with a cursor) currently shown on screen?",
+                criteria={"yes": "a menu / selectable list IS on screen",
+                          "no": "no menu is on screen"}),
         }
         resp = self.client.system_one(state=state, questions=questions)
         out = {}

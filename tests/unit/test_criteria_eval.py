@@ -37,6 +37,15 @@ def test_pickup_step_matches_exact_case_insensitively():
     assert grade["semantic"] is True
 
 
+def test_deliver_step_matches_exact_despite_item_name_spelling():
+    # the model emits the human spelling "Oak's Parcel"; the fixture declares "oaks_parcel".
+    # Both resolve to the same item id, so grading must match by RESOLVED predicate, not raw string.
+    step = {"kind": "action", "map": 0, "done_when": "no_item:Oak's Parcel"}
+    grade = grade_case(_case("deliver_parcel"), [step])
+    assert grade["hard"] is True
+    assert grade["semantic"] is True
+
+
 def test_heal_step_grades_semantic_true_by_family():
     step = {"kind": "action", "map": 41, "done_when": "hp_frac>=1.0"}
     grade = grade_case(_case("heal_low_hp"), [step])

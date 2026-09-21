@@ -22,7 +22,9 @@ def _criterion(done_when: str | None, map_id: int, kind: str) -> dict:
     from .planner_llm import Planner
     parsed = Planner._parse_done_when(done_when, map_id)
     if kind == "travel":
-        return parsed if parsed is not None else {"on_map": map_id}
+        # a travel leg completes on ARRIVAL by definition — always on_map, ignoring any (bogus)
+        # criterion a directly-constructed step might carry (validate_step gates L1-emitted ones).
+        return {"on_map": map_id}
     # kind == "action": a real, non-on_map criterion is REQUIRED (never complete-on-arrival)
     if parsed is None or parsed == {"on_map": map_id}:
         raise ValueError(

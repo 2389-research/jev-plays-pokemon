@@ -48,7 +48,8 @@ def grade_case(case: dict, add_steps: list[dict]) -> dict:
     - hard: EVERY emitted step passes `validate_step` (the same hard-gate `run_l1_pipeline`
       applies before a step ever reaches the plan). Vacuously True for an empty `add_steps`.
     - semantic: at least one step matches what the case expects:
-        * `expect_exact` — a step whose `done_when` (stripped, case-insensitive) equals it.
+        * `expect_exact` — a step whose `done_when` resolves to the same predicate (so
+          "no_item:Oak's Parcel" matches "no_item:oaks_parcel"); raw-string equality as a fallback.
         * `expect_family` — a step whose `_step_family` equals it; a `kind == "travel"` step
           always counts toward family "on_map" (travel's done_when is on_map by construction,
           even if the step under test omits/garbles it).
@@ -60,8 +61,23 @@ def grade_case(case: dict, add_steps: list[dict]) -> dict:
     want_exact = case.get("expect_exact")
     want_family = case.get("expect_family")
     if want_exact:
-        norm = want_exact.strip().lower()
-        semantic = any(str(s.get("done_when") or "").strip().lower() == norm for s in add_steps)
+        # Compare by RESOLVED predicate, not raw string: the model emits e.g. "no_item:Oak's Parcel"
+        # while the fixture declares "no_item:oaks_parcel" — both resolve to the same item id, so a
+        # raw string compare would false-FAIL the very parcel cases this scorecard exists to protect.
+        from pokemon_agent.agent.planner_llm import Planner
+        want_pred = Planner._parse_done_when(want_exact, 0)
+
+        def _exact_match(s: dict) -> bool:
+            try:
+                mp = int(s.get("map"))
+            except (TypeError, ValueError):
+                mp = 0
+            got = Planner._parse_done_when(str(s.get("done_when") or ""), mp)
+            if want_pred is not None and got == want_pred:
+                return True
+            return str(s.get("done_when") or "").strip().lower() == want_exact.strip().lower()
+
+        semantic = any(_exact_match(s) for s in add_steps)
     else:
         def _matches(s: dict) -> bool:
             if want_family == "on_map" and str(s.get("kind")) == "travel":

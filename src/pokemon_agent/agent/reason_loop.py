@@ -161,6 +161,7 @@ class ReasoningLoop:
         self._target: dict | None = None
         self._target_map: int | None = None
         self._target_stuck = 0          # consecutive legs the current target made no progress
+        self._counter_bumped = False    # bumped a counter this leg (talk-over-counter NPCs: nurse/clerk)
         self._recent_targets: deque = deque(maxlen=6)
         # Jev-picked routing POLICY (shortest / dodge-grass / farm-exp), re-chosen per leg/area
         self._policy: str | None = None
@@ -580,6 +581,7 @@ class ReasoningLoop:
         self._target = None
         self._target_map = None      # defensive: never pair a stale map with the (now cleared) target
         self._target_stuck = 0
+        self._counter_bumped = False  # a fresh leg re-bumps a counter before talking over it
         self._recent_targets.clear()
         self.on_event("directive", {"step": self.session.step, "intent": self._directive.intent.value,
                                     "target": self._directive.target, "success": self._directive.success,
@@ -950,11 +952,33 @@ class ReasoningLoop:
         nx, ny = int(npc["x"]), int(npc["y"])
         adj = {Direction.NORTH: (nx, ny + 1), Direction.SOUTH: (nx, ny - 1),
                Direction.EAST: (nx - 1, ny), Direction.WEST: (nx + 1, ny)}  # tile you stand on to face npc
+        # COUNTER TALK: an NPC behind a real COUNTER tile (nurse, Mart clerk) can't be stood next to —
+        # the adjacent tile IS the counter. You talk to them from 2 tiles away in a straight line,
+        # over the counter. When the intervening cell is an actual counter (RAM's per-tileset talk-over
+        # tiles, never a generic wall), the stand tile is that 2-away cell instead of the (blocked) one.
+        counters = getattr(self.world, "counters", {}).get(getattr(player, "map_id", None), set())
+        far = {Direction.NORTH: (nx, ny + 2), Direction.SOUTH: (nx, ny - 2),
+               Direction.EAST: (nx - 2, ny), Direction.WEST: (nx + 2, ny)}
+        counter_dirs = set()
+        for d, mid in list(adj.items()):
+            if mid in counters:
+                adj[d] = far[d]        # reach the counter NPC from across the counter
+                counter_dirs.add(d)
         facing_map = {"north": Direction.NORTH, "south": Direction.SOUTH,
                       "east": Direction.EAST, "west": Direction.WEST}
         for d, stand in adj.items():
             if (player.x, player.y) == stand:
-                if facing_map.get(getattr(player, "facing", None)) == d:
+                facing_ok = facing_map.get(getattr(player, "facing", None)) == d
+                if d in counter_dirs:
+                    # COUNTER TALK (nurse/clerk): arriving on the tile already facing the counter is
+                    # NOT enough — the game only registers a talk-over-counter after you BUMP the
+                    # counter (a blocked step into it). Bump once per leg, then interact; once the
+                    # dialog opens, dialog-mode drives the rest.
+                    if not facing_ok or not self._counter_bumped:
+                        self._counter_bumped = True
+                        return MoveAction(direction=d)   # blocked step into the counter -> bump/turn
+                    return InteractAction()
+                if facing_ok:
                     return InteractAction()          # adjacent AND facing -> talk
                 return MoveAction(direction=d)        # adjacent, turn to face (a blocked step turns you)
         others = occupied - {(nx, ny)}

@@ -498,6 +498,37 @@ def test_recorder_plan_steps_include_done_when_and_kind():
     assert s["why"] == "scripted stop" and s["talk"] is True and s["who"] == "Oak"
 
 
+def test_talk_step_marked_done_only_when_criterion_directive_completes():
+    # Bug A regression: a talk/fetch step compiles to TRAVEL(reach map) + TALK_TO(criterion) sharing
+    # one quest_id. The step must NOT be marked done when the TRAVEL half completes (arriving on the
+    # map) — only when the FINAL criterion directive completes. Otherwise e.g. a heal is checked off
+    # the instant you enter the Poké Center, before ever reaching the nurse.
+    from collections import deque
+    from pokemon_agent.agent.quest_reconciler import QuestStep
+    from pokemon_agent.agent.plan import Directive, Intent
+    events = []
+    loop, _ = _loop(map_id=0, events=events)
+    loop.planner = None
+    loop._plan_steps = [QuestStep(id="h1", map=41, talk=True, who="Nurse",
+                                  done_when="hp_frac>=1.0", kind="action", status="active")]
+    travel = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 41},
+                       success={"on_map": 41}, quest_id="h1")
+    talk = Directive(intent=Intent.TALK_TO, target={"kind": "npc", "map": 41},
+                     success={"hp_frac": ">=1.0"}, quest_id="h1")
+    loop._directive = travel
+    loop._quest = deque([talk])
+    loop._directive_satisfied = lambda d: True   # force each directive's success in turn
+    obs, _ = loop.builder.build(capture_screenshot=False)
+
+    loop._manage_directive(obs)                  # TRAVEL half completes (arrived on map 41)
+    assert loop._step_by_qid("h1").status == "active"          # NOT falsely done
+    assert not [p for k, p in events if k == "step_done"]      # no false heal-done event
+
+    loop._manage_directive(obs)                  # now the TALK_TO (criterion) half completes
+    assert loop._step_by_qid("h1").status == "done"
+    assert [p for k, p in events if k == "step_done"]          # real completion recorded
+
+
 def test_mark_step_done_emits_provenance_event():
     from pokemon_agent.agent.quest_reconciler import QuestStep
     events = []

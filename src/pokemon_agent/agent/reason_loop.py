@@ -536,10 +536,18 @@ class ReasoningLoop:
         # --- 4. termination / advance -----------------------------------------------------------
         if self._directive is None or satisfied:
             if self._directive is not None:
+                qid = self._directive.quest_id
+                # A step can compile to SEVERAL directives sharing one quest_id (a talk/fetch step is
+                # TRAVEL(reach map) + TALK_TO(criterion)). Mark the STEP done only when its FINAL
+                # directive completes — NOT the intermediate travel half. Otherwise the step
+                # false-completes on arrival (e.g. a heal marked hp_frac>=1.0 the instant you enter
+                # the Poké Center, before ever reaching the nurse), which also drives re-plan thrash.
+                more_for_step = bool(self._quest) and self._quest[0].quest_id == qid
                 self.on_event("directive_done", {"step": self.session.step,
                                                  "intent": self._directive.intent.value,
                                                  "reason": self._directive.reason})
-                self._mark_step(self._directive.quest_id, "done")
+                if not more_for_step:
+                    self._mark_step(qid, "done")
                 self._servo_fail = 0
             if self._quest:
                 self._directive = self._quest.popleft()

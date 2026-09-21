@@ -205,7 +205,16 @@ def read_screen_text(emu: Emulator) -> tuple[str, bool]:
                 lines.append(s)
                 has_upper = has_upper or _uppercase_run(emu, base, 20)
         text = " ".join(lines).strip()
-        return (text, True) if (text and has_upper) else ("", False)
+        # A real dialog/menu box has an uppercase font tile OR reads like natural language. The
+        # uppercase check ALONE wrongly rejects an all-lowercase dialogue line (a continuation like
+        # "...strong, they can protect me!"), leaving the agent stuck: a box is up so it can't move,
+        # but it reads as overworld and never presses A to close it. A full-screen cutscene picture,
+        # by contrast, decodes to a REPEATED char ("aaaa…") — so real language is distinguished by
+        # letter VARIETY (many distinct letters), not by casing.
+        words = [w for w in text.split() if sum(c.isalpha() for c in w) >= 2]
+        distinct = len({c for c in text.lower() if c.isalpha()})
+        looks_like_language = len(words) >= 2 and distinct >= 5
+        return (text, True) if (text and (has_upper or looks_like_language)) else ("", False)
     except Exception:
         return "", False
 

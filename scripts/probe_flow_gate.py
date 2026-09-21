@@ -9,25 +9,13 @@ The `route`/grade logic is pure and offline-unit-tested in tests/unit/test_flow_
 """
 import sys
 sys.path.insert(0, "src")
+sys.path.insert(0, ".")   # so tests.fixtures (the real mined frames) imports when run from repo root
 
 FLOW_MIN_CONF = 0.55
 
-# Labelled frames: the decisive input is `screen_text` (decoded text-box region). `ram_menu_open`
-# is the RAM menu signal the router cross-checks. `expect` is the true flow.
-CASES = [
-    {"name": "overworld_empty", "screen_text": "", "has_text": False, "ram_menu_open": False,
-     "expect": "navigate"},
-    {"name": "dialogue_uppercase", "screen_text": "HELLO! I am PROF. OAK", "has_text": True,
-     "ram_menu_open": False, "expect": "dialogue"},
-    {"name": "dialogue_all_lowercase", "screen_text": "strong, they can protect me!", "has_text": True,
-     "ram_menu_open": False, "expect": "dialogue"},   # the case that broke the heuristic
-    {"name": "dialogue_nurse", "screen_text": "We heal your POKMON back to perfect health!",
-     "has_text": True, "ram_menu_open": False, "expect": "dialogue"},
-    {"name": "cutscene_blob", "screen_text": "aaaaaaaaaaaaaaaaaaaa", "has_text": True,
-     "ram_menu_open": False, "expect": "navigate"},   # a background picture, not text
-    {"name": "menu_start", "screen_text": "POKEDEX POKEMON ITEM SAVE OPTION", "has_text": True,
-     "ram_menu_open": True, "expect": "menu"},
-]
+# Labelled frames: REAL game-produced strings mined from recorded runs (tests/fixtures/flow_frames.py),
+# not invented. The decisive input is `screen_text` (decoded text-box region).
+from tests.fixtures.flow_frames import FRAMES as CASES
 
 
 def route(answers: dict, ram_menu_open: bool, min_conf: float = FLOW_MIN_CONF) -> str:

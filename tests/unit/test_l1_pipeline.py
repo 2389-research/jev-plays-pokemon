@@ -74,20 +74,32 @@ def test_no_change_triage_short_circuits():
 def test_hard_event_skips_triage():
     planner = StubPlanner(
         brainstorm={"assessment": "need to heal"},
-        decide={"add": [], "remove": [], "mission": "m", "milestone": "ms", "assessment": "a"},
+        decide={"add": [{"kind": "action", "map": 41, "done_when": "hp_frac>=1.0"}],
+                "remove": [], "mission": "m", "milestone": "ms", "assessment": "a"},
     )
     result = run_l1_pipeline(None, {}, planner, hard_event=True)
     assert "triage" not in planner.calls
     assert planner.calls == ["brainstorm", "decide"]
     assert result is not None
-    assert result["add"] == []
+    assert len(result["add"]) == 1
+
+
+def test_empty_decide_is_treated_as_no_change():
+    # decide adds/removes nothing -> the plan is unchanged; the pipeline returns None (keep going,
+    # continue the active step) rather than a churny no-op proposal that restates the milestone.
+    planner = StubPlanner(
+        brainstorm={"assessment": "still travelling"},
+        decide={"add": [], "remove": [], "mission": "m", "milestone": "ms", "assessment": "a"},
+    )
+    assert run_l1_pipeline(None, {}, planner, hard_event=True) is None
 
 
 def test_triage_change_true_runs_brainstorm_and_decide():
     planner = StubPlanner(
         triage={"change": True, "why": "signal fired"},
         brainstorm={"assessment": "assess"},
-        decide={"add": [], "remove": [], "mission": "m", "milestone": "ms", "assessment": "a"},
+        decide={"add": [{"kind": "travel", "map": 2, "done_when": "on_map"}],
+                "remove": [], "mission": "m", "milestone": "ms", "assessment": "a"},
     )
     result = run_l1_pipeline(None, {}, planner, hard_event=False)
     assert planner.calls == ["triage", "brainstorm", "decide"]

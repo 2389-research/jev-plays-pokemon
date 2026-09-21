@@ -241,6 +241,16 @@ BRAINSTORM below); your job now is to turn that into a MINIMAL, concrete set of 
 anchored to the EXISTING plan — do NOT redesign the whole plan from scratch, only add what's
 missing and remove what's broken.
 
+CHANGING NOTHING IS THE COMMON, PREFERRED OUTCOME. You are often called just because the agent is
+still travelling or momentarily blocked — that does NOT mean the plan is wrong. If the standing
+plan already covers the situation and the active step is still valid (its destination is reachable,
+its goal not yet met), return EMPTY "add" and EMPTY "remove" — that means "keep going, continue the
+active step". Do NOT re-add or restate a step that already exists in the PLAN and is in progress
+(e.g. do not add another heal step when one is already active, nor another "go to X" when that is
+already the active step) — repeating a step never helps and just thrashes the plan. ONLY add a step
+that is genuinely MISSING, and ONLY remove one that is truly impossible or already obsolete. Leave
+MISSION/MILESTONE unchanged unless the concrete sub-goal has actually moved on.
+
 You are given: CURRENT_MAP, PARTY, ITEMS, BADGES, PLAN (existing steps), SIGNALS, MISSION,
 MILESTONE, BRAINSTORM (the prior assessment), and MAPS (an id->name table — you MUST use these
 exact ids for any "map" field).

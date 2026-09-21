@@ -66,9 +66,20 @@ def run_l1_pipeline(emu, context: dict, planner, *, hard_event: bool, on_trace=N
                 on_trace({"stage": "invalid_criterion", "step": step, "error": err2 or err})
             return None
 
+    remove = d.get("remove") or []
+    # NO-OP DECIDE == NO CHANGE. If decide neither added nor removed a step, the plan structure is
+    # unchanged and re-applying it would only churn the mission/milestone (and re-fire an l1_review),
+    # which reads as L1 "restating" the task instead of continuing it. Treat it as no change: keep the
+    # standing plan (and its active step) and return None. (A real edit still carries mission/
+    # milestone through.) This is what lets a wedge-triggered deep review say "keep going".
+    if not validated_add and not remove:
+        if on_trace:
+            on_trace({"stage": "no_change", "why": "decide made no add/remove; continue active step"})
+        return None
+
     return {
         "add": validated_add,
-        "remove": d.get("remove", []),
+        "remove": remove,
         "mission": d.get("mission"),
         "milestone": d.get("milestone"),
         "assessment": d.get("assessment"),

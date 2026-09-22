@@ -83,4 +83,6 @@ def run_l1_pipeline(emu, context: dict, planner, *, hard_event: bool, on_trace=N
         "mission": d.get("mission"),
         "milestone": d.get("milestone"),
         "assessment": d.get("assessment"),
+        # optional standing battle goal (design §7.1): a species list L1 wants to catch.
+        "catch": d.get("catch"),
     }

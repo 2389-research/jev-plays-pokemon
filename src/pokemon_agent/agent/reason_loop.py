@@ -33,10 +33,12 @@ from ..actions.controller import ActionController
 from ..actions.stuck_detector import StuckDetector
 from ..core.models import ActionResult, Direction, GoToAction, InteractAction, MenuSelectAction, MoveAction
 from ..games.pokemon_red import predicates
+from ..games.pokemon_red.map_reader import read_collision_map
 from ..games.pokemon_red.maps import map_name
 from ..games.pokemon_red.progress import progress_vector
 from ..games.pokemon_red.routes import next_direction
 from ..games.pokemon_red.state import detect_mode, read_player
+from .portal_graph import PortalGraph
 from ..observations.builder import ObservationBuilder
 from .l1_pipeline import run_l1_pipeline
 from .memory import AgentMemory
@@ -133,6 +135,13 @@ class ReasoningLoop:
         self.level_target = level_target
         self.knowledge = knowledge           # Orrery KB (also used for battle type lookups)
         self.pather = pather                 # "bfs" (deterministic) or "jev" (calibrated per-step direction)
+        # PortalGraph: ground-truth cross-map routing (warps + edges + walk-reachability, ripped from
+        # game data). L1 reads it for reachability; L2/servo for the exact next portal. None if the
+        # packaged data is unavailable (falls back to the coarse WorldGraph).
+        try:
+            self.portals: PortalGraph | None = PortalGraph.load()
+        except Exception:
+            self.portals = None
         self._battle_kb: dict[str, list[str]] = {}  # cache: enemy species -> type knowledge
         # L1 planner: the strategist that owns the plan. Active only when a goal/level is set —
         # otherwise the loop runs the plain executor path (legacy vertical-slice behavior).
@@ -1154,6 +1163,23 @@ class ReasoningLoop:
             return MoveAction(direction=Direction(goal_dir))
         return None
 
+    def _portal_next(self, player, tmap) -> dict | None:
+        """The next PORTAL to head toward on the way to map ``tmap``, from the ground-truth
+        PortalGraph (or None if it doesn't cover this leg). Locates the player's walkable component
+        from the LIVE collision map so it stays correct even if map state changed."""
+        pg = self.portals
+        if pg is None or player is None or player.map_id not in pg.maps or int(tmap) not in pg.maps:
+            return None
+        try:
+            coll = read_collision_map(self.controller.emu)
+        except Exception:
+            coll = None
+        walk = coll["walkable"] if coll else set()
+        comp = pg.component_at(player.map_id, player.x, player.y, walk)
+        if comp is None:
+            return None
+        return pg.next_portal(player.map_id, comp, int(tmap))
+
     def _servo_step(self, directive: Directive, obs, blocked_dirs: set[str]):
         """The deterministic servo: one concrete step toward ``directive.target`` (LLM+P),
         now WARP-AWARE so it uses the world model instead of walking blindly.
@@ -1192,6 +1218,28 @@ class ReasoningLoop:
         tmap = directive.target_map
         if tmap is None or player.map_id == tmap:
             return None
+
+        # 2a. Ground-truth PortalGraph hop: route straight to the EXACT next portal tile toward the
+        # goal (knows gates/buildings the coarse WorldGraph misses — e.g. crossing Viridian Forest
+        # to Pewter). We use the portal's own coordinate rather than matching live exits by dest_map,
+        # because gate return-doors report a dynamic 0xFF destination at runtime.
+        portal = self._portal_next(player, tmap)
+        if portal is not None:
+            coord = (int(portal["coord"][0]), int(portal["coord"][1]))
+            self.on_event("portal_hop", {"step": self.session.step, "from_map": player.map_id,
+                                         "to_map": portal["dest_map"], "coord": list(coord),
+                                         "goal_map": int(tmap)})
+            if (player.x, player.y) != coord:
+                mv = self._bfs_move(player, coord, interact=False,
+                                    blocked_dirs=blocked_dirs, occupied=occupied)
+                if mv is not None:
+                    return mv
+            else:  # on the portal tile: warps fire on-step; an edge/doormat tile needs a step OFF
+                d = self._warp_exit_dir(coord, obs.map_dims)
+                if d is not None and d.value not in blocked_dirs:
+                    return MoveAction(direction=d)
+            # portal known but couldn't move toward it -> fall through to the coarse logic / residual
+
         hop = self.memory.graph.next_hop(player.map_id, tmap)
         if hop is None:
             return None  # no known route -> residual; the impossible trigger will replan

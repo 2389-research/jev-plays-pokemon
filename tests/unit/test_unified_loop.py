@@ -660,6 +660,22 @@ def test_run_always_writes_final_resume_checkpoint(tmp_path):
     assert str(rec.dir / "latest.state") in emu.saved_states
 
 
+def test_loop_loads_portal_graph_and_routes_forest_to_pewter_via_north_gate():
+    # the wired executive exposes the PortalGraph and picks the NORTH gate as the next portal from
+    # the forest toward Pewter (the cross-map hop the coarse WorldGraph could not make).
+    loop, _ = _nav_loop(51)
+    assert loop.portals is not None
+    player = SimpleNamespace(map_id=51, x=1, y=0)   # standing on the forest's north-gate warp tile
+    portal = loop._portal_next(player, 2)           # goal = Pewter City
+    assert portal is not None and portal["dest_map"] == 47   # Viridian Forest North Gate
+
+
+def test_loop_portal_next_none_off_graph():
+    loop, _ = _nav_loop(51)
+    # a map the corridor graph doesn't cover -> None (falls back to the coarse graph)
+    assert loop._portal_next(SimpleNamespace(map_id=200, x=0, y=0), 2) is None
+
+
 def test_resume_checkpoint_is_noop_without_recorder():
     loop, _ = _nav_loop(0)
     assert loop._resume_dir is None            # no recorder -> nothing to resume into

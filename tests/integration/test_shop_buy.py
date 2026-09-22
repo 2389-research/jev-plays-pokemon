@@ -92,3 +92,33 @@ def test_read_shop_list_matches_the_viridian_shelf():
         assert shop.resolve_shop_index(shop.read_shop_list(emu), "Parlyz Heal") == 2
     finally:
         emu.close()
+
+
+def test_buy_a_set_of_items():
+    """Buy a SET across several purchases — different items selected from the live shelf, each with a
+    quantity — and verify the bag and money add up exactly. Proves list selection + quantities work
+    for more than one item (the 'buy sets of things' path)."""
+    if not ROM_PATH.exists() or not STATE_PATH.exists():
+        pytest.skip("ROM/mart-counter fixture not present")
+    from pokemon_agent.games.pokemon_red import shop
+    from pokemon_agent.games.pokemon_red.game_state import read_items, read_money
+
+    emu = _emu()
+    try:
+        def inv():
+            return {i["item"]: i["qty"] for i in read_items(emu)}
+
+        # Viridian shelf: Poke Ball 200 / Antidote 100 / Parlyz Heal 200 / Burn Heal 250.
+        orders = [("Antidote", 3), ("Poke Ball", 2), ("Burn Heal", 1)]
+        prices = {"Antidote": 100, "Poke Ball": 200, "Burn Heal": 250}
+        money_before = read_money(emu)
+        for item, qty in orders:
+            before = inv().get(item, 0)
+            r = shop.shop_buy(emu, item, qty)
+            assert r.get("ok"), f"buy {qty}x {item} failed: {r.get('reason')}"
+            assert inv().get(item, 0) == before + qty
+
+        assert inv().get("Antidote") == 3 and inv().get("Poke Ball") == 2 and inv().get("Burn Heal") == 1
+        assert money_before - read_money(emu) == sum(prices[i] * q for i, q in orders)  # exact spend
+    finally:
+        emu.close()

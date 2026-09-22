@@ -365,6 +365,25 @@ class Planner:
         self.strategist = strategist    # tier-2 chat_json provider (LunaRoute-strong) for quests
         self.knowledge = knowledge      # optional Orrery KnowledgeBase for retrieval-grounded quests
         self.on_search = None           # optional callback(query, n_results) for logging KB tool-calls
+        self.capture = None             # optional distillation Capture (mounted by the loop; §3)
+
+    def _capture_decision(self, layer, provider, state, content, parsed, latency_ms, usage) -> None:
+        """Best-effort per-decision capture (§3): recover the tokens/latency the call site
+        discarded (`chat_json` returns (raw, latency_ms, usage); tokens live inside usage).
+        Never raises / never changes behavior — guarded on the optional mounted Capture."""
+        cap = getattr(self, "capture", None)
+        if cap is None:
+            return
+        tokens = usage.get("total_tokens", 0) if isinstance(usage, dict) else 0
+        cap.record(layer, model=getattr(provider, "model", None),
+                   input=state, output_raw=content, parsed=parsed,
+                   tokens=tokens, latency_ms=latency_ms, extra={"usage": usage})
+
+    def _cap_target(self, state, content, target, latency_ms, usage):
+        """Record a proposer decision (§3) and return the target UNCHANGED (zero-behavior) — used
+        at `propose_target`'s several return points so exactly one record lands per call."""
+        self._capture_decision("l2_propose_target", self.provider, state, content, target, latency_ms, usage)
+        return target
 
     def _llm_with_search(self, provider, system: str, state: dict, *, final_key: str,
                          max_rounds: int = 3) -> dict:
@@ -500,8 +519,9 @@ class Planner:
                 "milestone": context.get("milestone"),
                 "current_map": context.get("current_map"),
             }
-            content, _, _ = self.provider.chat_json(TRIAGE_SYSTEM, state)
+            content, _lat, _usage = self.provider.chat_json(TRIAGE_SYSTEM, state)
             data = json.loads(strip_fences(content))
+            self._capture_decision("l1_triage", self.provider, state, content, data, _lat, _usage)
             if not isinstance(data, dict):
                 return {"change": False, "why": ""}
             return {"change": bool(data.get("change", False)), "why": str(data.get("why") or "")}
@@ -558,8 +578,9 @@ class Planner:
                 "brainstorm": brainstorm.get("assessment", ""),
                 "maps": {str(mid): name for mid, name in MAP_NAMES_RAW.items()},
             }
-            content, _, _ = prov.chat_json(DECIDE_SYSTEM, state)
+            content, _lat, _usage = prov.chat_json(DECIDE_SYSTEM, state)
             data = json.loads(strip_fences(content))
+            self._capture_decision("l1_decide", prov, state, content, data, _lat, _usage)
             if not isinstance(data, dict):
                 return {"add": [], "remove": []}
             add = [s for s in (data.get("add") or []) if isinstance(s, dict)]
@@ -594,8 +615,9 @@ class Planner:
                 "current_map": context.get("current_map"),
                 "maps": {str(mid): name for mid, name in MAP_NAMES_RAW.items()},
             }
-            content, _, _ = prov.chat_json(REPAIR_SYSTEM, state)
+            content, _lat, _usage = prov.chat_json(REPAIR_SYSTEM, state)
             data = json.loads(strip_fences(content))
+            self._capture_decision("l1_repair", prov, state, content, data, _lat, _usage)
             if not isinstance(data, dict) or not data:
                 return bad_step
             return data
@@ -693,7 +715,7 @@ class Planner:
         }
         for _ in range(2):  # one retry if the model picks an invalid tile
             try:
-                content, _, _ = self.provider.chat_json(WAYPOINT_SYSTEM, state)
+                content, _lat, _usage = self.provider.chat_json(WAYPOINT_SYSTEM, state)
                 data = json.loads(strip_fences(content))
                 x, y = int(data["x"]), int(data["y"])
             except Exception:
@@ -706,6 +728,8 @@ class Planner:
             progresses = (px is None) or (x, y) != (px, py)
             ok = progresses and (is_exit or reachable is None or (x, y) in reachable)
             if ok:
+                self._capture_decision("l2_next_waypoint", self.provider, state, content,
+                                       {"x": x, "y": y, "reason": reason}, _lat, _usage)
                 return x, y, reason
         return None
 
@@ -745,9 +769,10 @@ class Planner:
         }
         reason = "no response"
         last_raw = None
+        content, _lat, _usage = None, 0, {}   # bound for the unresolved-after-failure record
         for _ in range(2):  # one retry on an invalid pick
             try:
-                content, _, _ = self.provider.chat_json(PROPOSER_SYSTEM, state)
+                content, _lat, _usage = self.provider.chat_json(PROPOSER_SYSTEM, state)
                 last_raw = content
                 data = json.loads(strip_fences(content))
                 kind = data.get("kind")
@@ -766,12 +791,12 @@ class Planner:
                 is_exit = exit_tile is not None and (x, y) == tuple(exit_tile)
                 progresses = (px is None) or (x, y) != (px, py)
                 if progresses and (is_exit or reachable is None or (x, y) in reachable):
-                    return {"kind": "tile", "x": x, "y": y, "note": note}
+                    return self._cap_target(state, content, {"kind": "tile", "x": x, "y": y, "note": note}, _lat, _usage)
                 reason = f"tile ({x},{y}) unreachable / no-op"
                 continue
             if kind == "enter":
                 try:
-                    return {"kind": "enter", "map": int(data["map"]), "note": note}
+                    return self._cap_target(state, content, {"kind": "enter", "map": int(data["map"]), "note": note}, _lat, _usage)
                 except (KeyError, TypeError, ValueError):
                     reason = "enter missing map"
                     continue
@@ -780,13 +805,14 @@ class Planner:
                 if not sprite:
                     reason = "approach_npc missing sprite"
                     continue
-                return {"kind": "approach_npc", "sprite": sprite, "note": note}
+                return self._cap_target(state, content, {"kind": "approach_npc", "sprite": sprite, "note": note}, _lat, _usage)
             if kind == "exit":
-                return {"kind": "exit", "note": note}
+                return self._cap_target(state, content, {"kind": "exit", "note": note}, _lat, _usage)
             reason = f"unknown kind {kind!r}"
         # a wired provider failed to produce a usable target -> surface it; do NOT guess deterministically
-        return {"kind": "unresolved", "reason": reason, "raw": (str(last_raw)[:300] if last_raw else None),
-                "note": f"proposer failed: {reason}"}
+        return self._cap_target(state, content, {"kind": "unresolved", "reason": reason,
+                "raw": (str(last_raw)[:300] if last_raw else None),
+                "note": f"proposer failed: {reason}"}, _lat, _usage)
 
     # --- travel: LLM picks the target map; graph does the geometry + fallback --
     def _travel(self, emu, memory, why: str) -> Directive:

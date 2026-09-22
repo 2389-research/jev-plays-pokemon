@@ -588,11 +588,11 @@ from pokemon_agent.logging.capture import Capture
 from pokemon_agent.agent.planner_llm import Planner
 
 
-class _Knowledge:               # stub KB so _llm_with_search treats a "search" list as a round.
-    # Must match the REAL signature: query_texts(text, *, top_k=5, max_chars=1600) — the loop calls
-    # it as self.knowledge.query_texts(q, top_k=4), so **kwargs (or the keyword-only params) is required
-    # or the call raises TypeError and l1_brainstorm swallows it before recording.
-    def query_texts(self, text, **kwargs): return ["(kb result)"]
+class _Knowledge:               # stub KB — MIRRORS the real signature (knowledge.py:57) so the real
+    # call works: _llm_with_search does self.knowledge.query_texts(q, top_k=4) (planner_llm.py:390).
+    # `text` positional (not `queries`), `top_k` keyword-only (the `*`) — exactly what the old
+    # (queries, k=3) stub got wrong; return a list (the loop does len(res) for its on_search callback).
+    def query_texts(self, text, *, top_k=5, max_chars=1600): return ["(kb result)"]
 
 
 class _SearchProv:

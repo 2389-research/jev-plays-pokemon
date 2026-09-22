@@ -96,6 +96,7 @@ class ReasoningLoop:
         recorder=None,
         pather: str = "bfs",
         l1_every: int = 0,
+        capture_mode: str = "off",
         on_event: Optional[Callable[[str, dict], None]] = None,
     ):
         self.builder = builder
@@ -113,6 +114,9 @@ class ReasoningLoop:
             self.on_event = _tee
         else:
             self.on_event = _on_event
+        # Distillation capture (design §3): a side-effect-only per-decision log, mounted like on_event.
+        from ..logging.capture import Capture
+        self.capture = Capture(recorder.dir, mode=capture_mode) if recorder is not None else Capture(".", mode="off")
         self.reflect_every = max(1, reflect_every)
         # when the decider reports confidence below this, re-plan on the NEXT step
         # (throttled by reflect_cooldown) instead of thrashing. None = off.
@@ -206,12 +210,29 @@ class ReasoningLoop:
         self._l1_event = False                   # a one-shot event asked for an L1 review next gate
         self._l1_last = None                     # last L1 review's {change, assessment, trace} (for the recorder)
         self._l1_trace: list[dict] = []          # current/last review's pipeline stage events
+        # attach the loop's Capture onto planner/reasoner so their layer methods can reach it
+        self._mount_capture()
+
+    def _mount_capture(self) -> None:
+        """Attach the loop's Capture onto the planner + reasoner so their layer methods can
+        reach it via getattr(self, "capture", None). No-op when a component is absent."""
+        cap = getattr(self, "capture", None)
+        if cap is None:
+            return
+        for comp in (getattr(self, "planner", None), getattr(self, "reasoner", None)):
+            if comp is not None:
+                try:
+                    comp.capture = cap
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------ step
     def step_once(self) -> ActionResult:
         want_shot = self.vision or bool(self.logger and getattr(self.logger, "wants_screenshot", False))
         obs, shot = self.builder.build(capture_screenshot=want_shot)
         self.session.record_position(obs.player)
+        # open a fresh per-decision capture buffer for this step (flushed in _finish)
+        self.capture.begin_step(self.session.step, anchor=f"states/*_step{self.session.step}.state")
         # FULL-MAP collision from RAM (wOverworldMap) is GROUND TRUTH for walkability — it already
         # encodes walls, signs, trees, and ledges as non-walkable (verified against the game); the
         # only obstacles NOT in it are moving sprites (NPCs), read separately from sprite RAM. We
@@ -1740,6 +1761,7 @@ class ReasoningLoop:
             }
             self.recorder.record(step=self.session.step, obs=obs, action=rstep.action,
                                  result=result, extra=extra)
+            self.capture.flush()   # persist this step's captured decisions beside the record
         self.session.step += 1
         if self.checkpoint_every and self.checkpoint_dir and self.session.step % self.checkpoint_every == 0:
             self._checkpoint()
@@ -1997,6 +2019,19 @@ class ReasoningLoop:
             # Always leave a resumable snapshot at the end (budget reached, stop, or crash), so the run
             # can be continued from exactly where it stopped rather than the last new-area state.
             self.save_resume_checkpoint()
+            # distillation capture: write run metadata once + label the finished run (best-effort).
+            try:
+                self.capture.write_run_meta({
+                    "goal_map": self.goal_map, "level_target": self.level_target,
+                    "pather": self.pather, "l1_every": self.l1_every,
+                    "portal_graph": getattr(getattr(self, "portals", None), "version", None),
+                })
+                if self.capture.enabled and self._resume_dir is not None:
+                    from ..logging.outcome import label_run
+                    label_run(self._resume_dir, goal_map=self.goal_map)
+                self.capture.close()
+            except Exception:
+                pass
 
 
 def _desc(action) -> str:

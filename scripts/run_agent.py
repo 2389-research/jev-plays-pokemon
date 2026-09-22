@@ -126,6 +126,10 @@ def main() -> None:
     ap.add_argument("--log", default=None, help="JSONL episode log path")
     ap.add_argument("--screenshot-logging", default="every_step", choices=["none", "errors_only", "every_step"],
                     help="save per-step frames next to the log so steps can be reconstructed")
+    ap.add_argument("--capture", default="off", choices=["off", "decisions", "distill"],
+                    help="decision capture for distillation (--mode reason only): 'decisions' logs "
+                         "every model decision (cheap); 'distill' also step-anchors a save state each "
+                         "step (disk-heavy) + captures deterministic layers")
     args = ap.parse_args()
 
     # named fixture shorthands -> states/<NAME>.state
@@ -250,7 +254,8 @@ def main() -> None:
             from pokemon_agent.logging.run_recorder import RunRecorder, unique_run_dir
             rec_dir = unique_run_dir(Path(args.record_dir) if args.record_dir else (
                 states_dir.parent / "runs" / f"rec-{time.strftime('%Y%m%d-%H%M%S')}"))
-            recorder = RunRecorder(emu, rec_dir)
+            state_every = 1 if args.capture == "distill" else 0
+            recorder = RunRecorder(emu, rec_dir, state_every=state_every)
             print(f"recording run -> {rec_dir}  (view: serve runs/ and open _viewer.html, or open {rec_dir}/viewer.html)")
 
         loop = ReasoningLoop(builder=ObservationBuilder(emu), controller=ActionController(emu),
@@ -261,7 +266,8 @@ def main() -> None:
                              checkpoint_dir=(ckpt_dir if args.checkpoint_every else None),
                              goal_map=args.goal_map, level_target=args.level_target,
                              strategist_provider=strategist_provider, knowledge=knowledge,
-                             pather=args.pather, l1_every=args.l1_every, on_event=on_event_r)
+                             pather=args.pather, l1_every=args.l1_every,
+                             capture_mode=args.capture, on_event=on_event_r)
         print(f"running REASON mode decider={args.decider} model={rmodel} vision={use_vision} goal={args.goal!r}")
         try:
             loop.run(max_steps=args.steps)

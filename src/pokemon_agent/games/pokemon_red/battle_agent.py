@@ -119,10 +119,12 @@ def choose_action(objective: str, state: dict) -> dict:
     return {"kind": "move"}
 
 
-def choose_move(client, emu: Emulator, *, type_knowledge: list[str] | None = None) -> tuple[int, float]:
+def choose_move(client, emu: Emulator, *, type_knowledge: list[str] | None = None,
+                capture=None) -> tuple[int, float]:
     """Ask the TypeSafe client which move slot to use. ``type_knowledge`` is optional retrieved
     type-effectiveness guidance (from the knowledge base) injected into Jev's decision state.
-    Returns (slot, confidence)."""
+    ``capture`` is an optional distillation Capture (§3) — recording is best-effort and never
+    changes behavior. Returns (slot, confidence)."""
     from typesafe_sdk import Choice
 
     moves = battle.active_moves(emu)
@@ -141,4 +143,9 @@ def choose_move(client, emu: Emulator, *, type_knowledge: list[str] | None = Non
     except (TypeError, ValueError):
         slot = 0
     slot = max(0, min(slot, len(moves) - 1))
-    return slot, float(getattr(ans, "confidence", 0.0) or 0.0)
+    confidence = float(getattr(ans, "confidence", 0.0) or 0.0)
+    if capture is not None:
+        capture.record("battle_move", model=getattr(client, "model", "typesafe"),
+                       input=state, output_raw=str(getattr(ans, "choice", None)),
+                       parsed={"slot": slot}, confidence=confidence)
+    return slot, confidence

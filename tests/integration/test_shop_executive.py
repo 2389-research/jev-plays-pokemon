@@ -65,3 +65,36 @@ def test_shop_directive_runs_buy_macro_at_the_counter():
         assert money_before - read_money(emu) == 3 * 100
     finally:
         emu.close()
+
+
+def test_l1_natural_talk_clerk_has_item_triggers_buy():
+    """The trigger L1 actually emits: a routed TALK_TO the Mart clerk with a has_item:<X> goal (NOT
+    Intent.SHOP — nothing emits that). Once the talk opens the counter, the buy macro must fire from
+    the item named in the done_when. This is the model-driven path: L1 decides to shop, mechanics run."""
+    if not ROM_PATH.exists() or not STATE_PATH.exists():
+        pytest.skip("ROM/mart-counter fixture not present")
+    from pokemon_agent.agent.plan import Directive, Intent
+    from pokemon_agent.emulator.pyboy_adapter import PyBoyEmulator
+    from pokemon_agent.games.pokemon_red.game_state import read_items, read_money
+
+    emu = PyBoyEmulator(str(ROM_PATH), window="null")
+    try:
+        emu.load_state(STATE_PATH)
+        emu.tick(6)
+        loop = _loop(emu)
+        # exactly what compile_steps_to_directives makes from an L1 "buy" action step:
+        loop._directive = Directive(intent=Intent.TALK_TO,
+                                    target={"kind": "npc", "map": 42, "sprite": "the Mart clerk"},
+                                    success={"has_item": "Antidote"})
+
+        def qty_of(items, name):
+            return next((it["qty"] for it in items if it["item"].lower() == name.lower()), 0)
+
+        before = qty_of(read_items(emu), "Antidote")
+        money_before = read_money(emu)
+        loop.step_once()   # counter open + a has_item goal -> buy fires (no Intent.SHOP needed)
+
+        assert qty_of(read_items(emu), "Antidote") == before + 1   # default qty 1 from has_item
+        assert money_before - read_money(emu) == 100
+    finally:
+        emu.close()

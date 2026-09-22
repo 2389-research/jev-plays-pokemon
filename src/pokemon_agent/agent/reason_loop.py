@@ -1524,12 +1524,14 @@ class ReasoningLoop:
         return (str(item) if item else None), qty
 
     def _maybe_shop(self, obs, shot) -> ActionResult | None:
-        """When the active directive is a SHOP and the Mart's BUY/SELL/QUIT counter menu is open,
-        run the deterministic buy macro (design §6.1) instead of letting Jev flail through the menu.
-        Guarded: fires only on the unambiguous RAM signal (the root shop menu is up) with a known
-        item to buy. Returns an ActionResult when it handled the step, else None (normal flow)."""
+        """When the Mart's BUY/SELL/QUIT counter menu is open AND the active directive names an item
+        to acquire, run the deterministic buy macro (design §6.1) instead of letting Jev flail through
+        the menu. The trigger is model-driven: L1 decides to shop by adding a step to talk to the Mart
+        clerk with ``done_when has_item:<item>`` (compiled to a routed TALK_TO / SHOP) — this fires the
+        buy once that talk opens the counter. Guarded by the unambiguous RAM shop-menu signal + a
+        resolvable item, so it never fires on a non-shopping menu."""
         d = self._directive
-        if d is None or d.intent is not Intent.SHOP:
+        if d is None:
             return None
         from ..games.pokemon_red import shop as shop_macro
         emu = self.controller.emu

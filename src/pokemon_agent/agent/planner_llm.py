@@ -293,6 +293,11 @@ done_when MUST be exactly one of (this is the full grammar — nothing else pars
 WORKED EXAMPLES (one per objective class — copy the SHAPE, adapt the specifics):
   pickup an item  -> {"kind":"action","map":42,"talk":true,"who":"the Mart clerk",
                        "done_when":"has_item:Oak's Parcel","why":"buy/collect the parcel"}
+  buy at a Mart   -> {"kind":"action","map":56,"talk":true,"who":"the Mart clerk",
+                       "done_when":"has_item:Potion","why":"buy Potions before the gym"}
+                      Talking to a Mart clerk opens the shop and the buy runs automatically. Add this
+                      when you have money and want consumables (e.g. Potions before a gym). Only items
+                      on that Mart's shelf are bought; anything else is a harmless no-op.
   deliver an item -> {"kind":"action","map":0,"talk":true,"who":"Oak",
                        "done_when":"no_item:Oak's Parcel","why":"hand the parcel to Oak"}
                       CANONICAL: deliver -> no_item:<item>. The item LEAVING the bag proves

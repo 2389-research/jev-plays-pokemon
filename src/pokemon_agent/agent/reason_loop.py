@@ -226,6 +226,15 @@ class ReasoningLoop:
                 except Exception:
                     pass
 
+    def _cap_det(self, layer: str, inp, out) -> None:
+        """Deterministic-layer capture (§3, YAGNI-gated): records a pure-function decision for
+        replay/attribution, but ONLY under --capture distill (cap.deterministic). Best-effort;
+        never raises / never changes behavior."""
+        cap = getattr(self, "capture", None)
+        if cap is None or not getattr(cap, "deterministic", False):
+            return
+        cap.record(layer, kind="deterministic", model=None, input=inp, parsed=out)
+
     # ------------------------------------------------------------------ step
     def step_once(self) -> ActionResult:
         want_shot = self.vision or bool(self.logger and getattr(self.logger, "wants_screenshot", False))
@@ -750,6 +759,7 @@ class ReasoningLoop:
         # oscillated at gates. This is what actually crosses Viridian Forest toward Pewter.
         tmap0 = directive.target_map if directive is not None else None
         portal = self._portal_next(obs.player, tmap0) if (tmap0 is not None and obs.player is not None) else None
+        self._cap_det("portal_next", {"map_id": getattr(obs.player, "map_id", None), "target_map": tmap0}, portal)
         if portal is not None:
             cx, cy = int(portal["coord"][0]), int(portal["coord"][1])
             self.on_event("portal_hop", {"step": self.session.step, "from_map": obs.player.map_id,
@@ -1440,6 +1450,10 @@ class ReasoningLoop:
         if arrived:
             return InteractAction() if interact else None
         if isinstance(prim, MoveAction) and prim.direction.value not in blocked_dirs:
+            self._cap_det("servo_move",
+                          {"player": {"x": getattr(player, "x", None), "y": getattr(player, "y", None)},
+                           "target": [int(xy[0]), int(xy[1])], "interact": interact},
+                          {"direction": prim.direction.value})
             return prim
         return None
 
@@ -1796,6 +1810,8 @@ class ReasoningLoop:
         if battle.in_battle(emu) and not self._last_in_battle:
             state = battle_l2.build_state(emu, self._battle_goals)
             self._battle_objective = battle_l2.choose_objective(state, self._battle_goals)
+            self._cap_det("battle_l2_objective", {"state": state, "goals": self._battle_goals},
+                          {"objective": self._battle_objective})
             self.on_event("battle_objective", {
                 "step": self.session.step, "objective": self._battle_objective,
                 "enemy": (state.get("enemy") or {}).get("species"),
@@ -1820,6 +1836,7 @@ class ReasoningLoop:
                 "step": self.session.step, "from": cached, "to": objective,
                 "hp_frac": round(battle_l2.hp_frac(state.get("active")), 3)})
         action = battle_agent.choose_action(objective, state)
+        self._cap_det("battle_choose_action", {"objective": objective, "state": state}, action)
         kind = action.get("kind")
 
         # --- ESCAPE -> run ---

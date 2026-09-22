@@ -6,15 +6,18 @@
 Phase 2's `states/wild_battle.state` deliberately catches nothing — its Kakuna at full HP
 breaks free of a Poké Ball (RNG restored by the save state), which is right for the macro
 test but useless for verifying a *catch*. This makes a fixture where the throw DETERMINISTICALLY
-succeeds, by stacking the catch odds so high the restored RNG catches on the first ball:
+succeeds using ONLY a **Poké Ball** — the only ball obtainable this early in the game (no
+Great/Ultra/Master Ball exists pre-Brock). Rather than fake a high-tier ball, we make the target
+a realistic high-catch-rate early wild:
 
-  * same mid-wild-battle save (Viridian Forest, `in_battle==1`, FIGHT menu up, wild Kakuna);
-  * drop the wild Kakuna to **1 HP** (0xCFE6 — maximises the Gen-1 catch chance);
-  * inject a bag led by an **Ultra Ball** (a high catch-rate ball) plus Poké Balls + Potions.
+  * same mid-wild-battle save (Viridian Forest, `in_battle==1`, FIGHT menu up);
+  * drop the enemy to **1 HP** (0xCFE6 — maximises the Gen-1 catch chance);
+  * set the enemy **catch-rate byte** (0xCFEC) to 255 — i.e. make it a Caterpie/Weedle/Pidgey
+    (all catch-rate 255 and common on Route 1/2 & Viridian Forest), which a Poké Ball reliably
+    catches at 1 HP;
+  * inject a bag of ONLY **Poké Balls + Potions** — the real early-game inventory.
 
-At 1 HP an Ultra Ball catches Kakuna under this save state's RNG (verified across a range of
-pre-throw frame offsets, so the loop's turn timing doesn't matter). The battle layer's
-`choose_action` throws the FIRST ball in bag order, so the Ultra Ball leads. Writes
+The battle layer's `choose_action` throws the FIRST ball in bag order (a Poké Ball). Writes
 `states/capture_wild.state` (gitignored).
 
   uv run python scripts/make_capture_fixture.py
@@ -35,22 +38,25 @@ SOURCE = Path("runs/portal-cross/states/map51_step0.state")
 DEST = Path("states/capture_wild.state")
 
 ENEMY_HP = 0xCFE6           # enemy current HP, big-endian 2 bytes
+ENEMY_STATUS = 0xCFE9       # enemy mon status byte (0x20 = FROZEN — a big Gen-1 catch bonus)
+ENEMY_CATCH_RATE = 0xCFEC   # enemy mon catch-rate byte (Kakuna=120 here; 255 = Caterpie/Weedle/Pidgey)
 WNUMBAGITEMS = 0xD31D
 WBAGITEMS = 0xD31E
-ULTRA_BALL, POKE_BALL, POTION = 2, 4, 20
+POKE_BALL, POTION = 4, 20   # only the early-game inventory — NO Great/Ultra/Master Ball exists yet
 
 
 def inject_bag(emu) -> None:
-    """[Ultra Ball ×5, Poké Ball ×5, Potion ×3], 0xFF-terminated (matches read_items order)."""
-    emu.write_memory(WNUMBAGITEMS, 3)
-    for off, val in [(0, ULTRA_BALL), (1, 5), (2, POKE_BALL), (3, 5),
-                     (4, POTION), (5, 3), (6, 0xFF)]:
+    """[Poké Ball ×5, Potion ×3], 0xFF-terminated (matches read_items order) — real early inventory."""
+    emu.write_memory(WNUMBAGITEMS, 2)
+    for off, val in [(0, POKE_BALL), (1, 5), (2, POTION), (3, 3), (4, 0xFF)]:
         emu.write_memory(WBAGITEMS + off, val)
 
 
 def weaken_enemy(emu, hp: int = 1) -> None:
     emu.write_memory(ENEMY_HP, (hp >> 8) & 0xFF)
     emu.write_memory(ENEMY_HP + 1, hp & 0xFF)
+    emu.write_memory(ENEMY_CATCH_RATE, 255)   # high-catch early wild (Caterpie/Weedle/Pidgey)
+    emu.write_memory(ENEMY_STATUS, 0x20)      # FROZEN: with 1 HP + rate 255 a Poké Ball catches deterministically
 
 
 def main() -> None:

@@ -2,9 +2,10 @@
 Jev throw -> the ball macro -> a REAL catch, driven through the loop's `_battle_turn`.
 
 Fixture `states/capture_wild.state` (built by scripts/make_capture_fixture.py): the Viridian
-Forest wild battle with the Kakuna dropped to 1 HP and a bag led by an Ultra Ball, so the
-save state's restored RNG catches on the first throw — a deterministic catch. states/*.state
-are gitignored, so these skip when the ROM/fixture is absent.
+Forest wild battle with the enemy at 1 HP + FROZEN + catch-rate 255 (a Caterpie/Weedle/Pidgey-
+class early wild) and a bag of ONLY Poke Balls + Potions — the real early-game inventory, no
+fake Ultra/Master Ball. Under the restored RNG the loop reliably catches within a few throws.
+states/*.state are gitignored, so these skip when the ROM/fixture is absent.
 """
 from __future__ import annotations
 
@@ -75,7 +76,7 @@ def test_capture_goal_catches_the_wild_pokemon():
     try:
         events = []
         loop = _loop(emu, events)
-        balls_before = _qty(read_items(emu), "Ultra Ball")
+        balls_before = _qty(read_items(emu), "Poke Ball")
         party_before = len(read_party(emu))
         assert balls_before > 0 and battle.in_battle(emu)
 
@@ -93,7 +94,9 @@ def test_capture_goal_catches_the_wild_pokemon():
         assert any(k == "battle_objective" and p["objective"] == CAPTURE for k, p in events)
         assert caught, "the loop should have caught the wild Pokémon"
         assert len(read_party(emu)) == party_before + 1          # party +1
-        assert _qty(read_items(emu), "Ultra Ball") == balls_before - 1  # a ball was consumed
+        # at least one ball was consumed (a Poké Ball can break free, so the loop may throw a few
+        # before it sticks — the realistic early-game ball, not a fake high-tier one).
+        assert 0 < _qty(read_items(emu), "Poke Ball") < balls_before
         assert not battle.in_battle(emu)                         # the battle ended
     finally:
         emu.close()
@@ -118,13 +121,13 @@ def test_capture_at_critical_hp_does_not_throw_and_flees():
         emu.write_memory(ACTIVE_HP, 0)
         emu.write_memory(ACTIVE_HP + 1, 2)   # 2/27 HP -> below the critical band
 
-        balls_before = _qty(read_items(emu), "Ultra Ball")
+        balls_before = _qty(read_items(emu), "Poke Ball")
         loop.step_once()
 
         # the per-turn override flipped CAPTURE -> ESCAPE this turn (recorded), and NO ball flew.
         assert any(k == "battle_safety_override" and p["from"] == CAPTURE and p["to"] == ESCAPE
                    for k, p in events)
-        assert _qty(read_items(emu), "Ultra Ball") == balls_before, "must not throw at critical HP"
+        assert _qty(read_items(emu), "Poke Ball") == balls_before, "must not throw at critical HP"
         # the cached objective is untouched (per-turn override, not a re-plan).
         assert loop._battle_objective == CAPTURE
     finally:

@@ -59,11 +59,11 @@ This supersedes the map-node `WorldGraph` for cross-map routing. `WorldGraph`'s 
 
 **Primary method — harvest from RAM (self-contained, uses validated readers, incremental).** A harvester script (`scripts/harvest_portals.py`) that, for each map, loads a save state and reads ground truth:
 
-1. `state.read_exits(emu)` → **warp portals** with exact coords + `dest_map` (RAM `wWarpEntries`). Pair each warp to its destination portal by loading the dest map's warp table.
+1. `state.read_exits(emu)` → **warp portals** with exact coords + `dest_map` (RAM `wWarpEntries`). Pairing to the destination portal needs the **destination warp index** at `wWarpEntries+2`, which `read_exits` does not currently return — the harvester reads that byte itself (or pairs by matching the dest map's warp coords). Pairing may require loading the dest map's warp table.
 2. `map_reader.read_collision_map(emu)` → the **full current-map walkable set** (whole map, not just the screen; already validated 100% on Pallet).
-3. **Connected components** of the walkable set → the "mutually walkable on foot" portal sets (the coarse-node fix; emergent from geometry).
-4. `map_graph_data.CONNECTIONS` → **edge portals** (border → adjacent map), converted to representative edge coords on the walkable boundary.
-5. Emit portal records `{id, map, coord, kind, dest_map, dest_portal, label}`.
+3. **Connected components** of the walkable set → the "mutually walkable on foot" portal sets (the coarse-node fix; emergent from geometry). Every portal on a map is tagged with the id of the walkable component its tile sits in; two portals are `walk_reachable` iff same component.
+4. `map_graph_data.CONNECTIONS` → **edge portals** (border → adjacent map). **Representative-tile rule (crux):** for a connection on a given border, the edge portal's `coord` is a *walkable* tile on that border; if the border's walkable tiles span more than one component, emit **one edge portal per component** (each in its own component). This is what makes the Route-2 case correct: the north-edge→Pewter portal lands only in Route-2's north component and is therefore unreachable from the south component — no shortcut. Pick a deterministic representative (e.g. the median walkable tile of that border-segment within the component).
+5. Emit portal records `{id, map, coord, kind, dest_map, dest_portal, label, component}`.
 
 **Harvest inputs already exist.** Every recorded run drops per-new-area save states; across existing runs we already have maps `0,1,12,13,37,38,39,40,41,42,43,44,50,51` (≈ the whole Brock corridor incl. interiors). Missing maps (Pewter = 2, forest North Gate, Route 22) are captured by one targeted run. Expanding the graph = adding a save state per new map.
 

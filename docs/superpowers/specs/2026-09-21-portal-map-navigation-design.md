@@ -25,6 +25,9 @@ In run `runs/full-run-20260921-195847` the agent delivered Oak's Parcel and navi
 3. **Agent decides, pathfinder executes** — the validated architecture from Gemini/Claude Plays Pokémon. The map is read-only; the agent picks a portal *by name*; the deterministic servo walks to its tile.
 4. **Representation = scoped natural-language adjacency, named not coordinate-addressed** — see §5. Grounded in "Talk like a Graph" (ICLR 2024: adjacency-list/"incident" NL phrasing with meaningful names is the robust best encoder) and the two Pokémon runs (externalize connectivity as text; never make the LLM infer reachability; self-drawn maps and coordinate *reasoning* were the documented failure modes).
 5. **Coordinates are ground-truth handles, not identity** — points of interest are shown *with* coordinates as a neutral factual menu the harness re-provides every turn; the agent selects by name and the pathfinder consumes the coord. The agent never remembers or does geometry on coordinates. Nothing is ranked or forced.
+6. **Orrery is the knowledge backend** — the portal graph + coordinates + semantic metadata are stored in Orrery (entities + relations); this is the system of record, an intentional dogfood of Orrery, and the KG L1 queries. Routing loads a snapshot into an in-memory portal graph at run start (cache) so the per-step hot path is fast and deterministic — routing never depends on a live HTTP query.
+7. **The map is extracted deterministically, never by LLM** — warps, coordinates, connections and walk-reachability are ripped from ground truth (RAM readers / pokered). GLM is used only for the fuzzy semantic layer (labels, POI descriptions, region tags) and never authors a coordinate or an edge. (LLM coordinate reasoning is the documented CPP hallucination failure.)
+8. **Build region-by-region** — do the Pallet→Pewter (Brock) corridor first, validate each harvested map against live RAM, then expand map-by-map.
 
 Out of scope for this spec (separate follow-on): **Pokémon capture** (no `CATCH` intent / ball-throw battle policy today). Also out of scope: re-planning cadence/hysteresis tuning (tracked separately); this spec removes the *cause* of most re-plans (unroutable steps) but does not retune the detector.
 
@@ -52,16 +55,25 @@ Two link types:
 
 This supersedes the map-node `WorldGraph` for cross-map routing. `WorldGraph`'s existing `add_warp`/`observe_exits` (live RAM warp ingestion) remain as the runtime refinement/validation layer; the portal graph is the authored ground-truth spine.
 
-## 4. Offline build pipeline (what's required)
+## 4. Build pipeline (deterministic RAM harvest → Orrery)
 
-Produce a static data module `map_portals.py` (mirrors how `map_graph_data.CONNECTIONS` was ripped), consumed by the portal graph builder. Inputs, all ground truth:
+**Primary method — harvest from RAM (self-contained, uses validated readers, incremental).** A harvester script (`scripts/harvest_portals.py`) that, for each map, loads a save state and reads ground truth:
 
-1. **`warp_events`** per map → warp portals `(map, x, y, dest_map, dest_warp_id)`; pair each warp to its destination portal via `dest_warp_id`. Source: pokered `data/maps/objects/*.asm`.
-2. **`connections`** per map → edge portals (which border → which adjacent map). Already ripped as `CONNECTIONS`; convert border directions to representative edge portals.
-3. **Blockdata + tileset collision** per map → the walkable grid → connected components → the intra-map reachability sets. Source: pokered `.blk` map files + tileset collision lists (the same collision semantics `map_reader.py` already decodes from RAM).
-4. **Points of interest** (optional, phase 2): `object_events` (NPCs, item balls, signs) → named POIs `(map, x, y, label, kind)`.
+1. `state.read_exits(emu)` → **warp portals** with exact coords + `dest_map` (RAM `wWarpEntries`). Pair each warp to its destination portal by loading the dest map's warp table.
+2. `map_reader.read_collision_map(emu)` → the **full current-map walkable set** (whole map, not just the screen; already validated 100% on Pallet).
+3. **Connected components** of the walkable set → the "mutually walkable on foot" portal sets (the coarse-node fix; emergent from geometry).
+4. `map_graph_data.CONNECTIONS` → **edge portals** (border → adjacent map), converted to representative edge coords on the walkable boundary.
+5. Emit portal records `{id, map, coord, kind, dest_map, dest_portal, label}`.
 
-Build dependency: obtain pokered (clone `pret/pokered`, or parse the ROM's map headers directly — the ROM is self-contained). The parser is a one-time offline script under `scripts/`; its output is committed data (`do not edit by hand`, like `map_graph_data.py`). Validate the parser's collision output against `read_collision_map` on several already-reachable maps (Pallet is 100%-validated today) before trusting it.
+**Harvest inputs already exist.** Every recorded run drops per-new-area save states; across existing runs we already have maps `0,1,12,13,37,38,39,40,41,42,43,44,50,51` (≈ the whole Brock corridor incl. interiors). Missing maps (Pewter = 2, forest North Gate, Route 22) are captured by one targeted run. Expanding the graph = adding a save state per new map.
+
+**No coordinate or edge is produced by an LLM.** GLM is optional and only enriches the semantic layer (POI descriptions, region tags, friendly labels), reviewed before load.
+
+**Optional backfill (later, for completeness):** parse pokered `warp_events`/`connections`/`.blk` to fill maps we haven't visited. Not a dependency for the corridor.
+
+**Load into Orrery.** The harvested records are written to Orrery as entities (`Map`, `Portal`, `POI`) and relations (`warps_to`, `edge_connects`, `walk_reachable`, `has_coord`), workspace `6d677a16`. At run start the router loads a snapshot into the in-memory portal graph (cache); Orrery is the system of record and the KG L1 queries.
+
+**Validation gate:** each harvested map's warps/collision are checked against a live RAM read of that map before it is trusted (parser/harvester correctness), region by region.
 
 ## 5. Representation surfaced to the agent
 
@@ -109,8 +121,14 @@ Minimal change to the existing L1/L2/servo split:
 - **Parser validation:** ripped collision matches `read_collision_map` on known maps.
 - **Live:** a headless run from `lab_deliver` crosses the forest to Pewter (the current failure) and the L1 re-plan count on that leg drops sharply (no unroutable-step thrash).
 
-## 8. Open questions
+## 8. Decisions & remaining questions
 
-1. **pokered source:** clone `pret/pokered` for the rip, or parse the ROM headers directly (self-contained)? Recommend clone for readability; ROM-parse as fallback.
-2. **Orrery mirror:** also publish the portal graph into the KG as queryable facts for L1's brainstorm, or keep it a static module the router reads? Recommend static-first (deterministic routing), KG mirror as a later, additive step.
-3. **POIs in phase 1 or 2?** The forest crossing needs only portals; POIs (NPCs/items with coords) can follow once portals are proven.
+Resolved in brainstorming:
+- **Backend = Orrery** (system of record + L1 KG), with an in-memory routing cache loaded at run start.
+- **Extraction = deterministic RAM harvest** (not LLM); GLM only for semantic metadata.
+- **Rollout = region-by-region**, Brock corridor first, validated against live RAM.
+
+Remaining:
+1. **Orrery schema shape:** exact entity/relation types and how a portal's `walk_reachable` component is represented (per-map component id vs pairwise). Settle when wiring the loader.
+2. **POI phase:** portals-only first (all the forest needs); POIs (NPCs/items with coords, incl. any GLM-authored labels) as phase 2 once portals + routing are proven.
+3. **Missing-map capture:** one targeted run/save-state pass to grab Pewter (2), forest North Gate, Route 22 before the corridor is complete.

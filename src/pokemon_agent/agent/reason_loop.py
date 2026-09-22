@@ -143,6 +143,13 @@ class ReasoningLoop:
         except Exception:
             self.portals = None
         self._battle_kb: dict[str, list[str]] = {}  # cache: enemy species -> type knowledge
+        # battle_L2 state (design §2.1): the objective is chosen ONCE on the battle-start edge
+        # and cached for the fight. `_last_in_battle` detects that false->true edge; the loop
+        # clears both when the battle ends. `_battle_goals` carries L1's standing battle goals
+        # (e.g. {"catch": ["Pidgey"]}); empty -> GRIND-EXP.
+        self._last_in_battle: bool = False
+        self._battle_objective: str | None = None
+        self._battle_goals: dict = {}
         # L1 planner: the strategist that owns the plan. Active only when a goal/level is set —
         # otherwise the loop runs the plain executor path (legacy vertical-slice behavior).
         # NeedsArbiter is no longer consulted here; needs flow into L1 as signals + the
@@ -253,6 +260,13 @@ class ReasoningLoop:
             self._prev = rstep
             self._emit_reason(rstep, latency)
             return self._finish(obs, rstep, result, latency, usage, shot)
+        # battle just ended -> clear the cached objective so the NEXT battle re-detects the
+        # false->true edge in _battle_turn and re-runs battle_L2 (design §2.1 edge reset).
+        if self._last_in_battle:
+            self.on_event("battle_end", {"step": self.session.step,
+                                         "objective": self._battle_objective})
+            self._last_in_battle = False
+            self._battle_objective = None
 
         # --- FLOW ROUTER: menu is deterministic (RAM cursor); navigate-vs-dialogue is a calibrated
         # Jev choice (falls back to the deterministic ctx_kind detector when Jev isn't wired). Replaces
@@ -1705,17 +1719,70 @@ class ReasoningLoop:
 
     # --- battle sub-policy (mode dispatch routes here when in_battle) ---------
     def _battle_turn(self, obs):
-        """Advance battle intro/result text; when the FIGHT menu is up, choose a move
-        (Jev if the executor is TypeSafe, else the first slot) and execute the turn."""
+        """One battle turn under the layered objective model (design §2).
+
+        On the battle-start edge (`in_battle` false->true) run `battle_L2` to cache ONE
+        objective — done ABOVE the intro-text early-return so a short intro can't skip it
+        (§2.1). Then, once the FIGHT menu is up, Jev picks a typed action toward the cached
+        objective and the matching macro executes it. GRIND-EXP is exactly today's fight
+        path (choose_move -> use_move), so the working fight is preserved."""
         from ..core.models import AdvanceDialogAction, MenuSelectAction
-        from ..games.pokemon_red import battle, battle_agent
+        from ..games.pokemon_red import battle, battle_actions, battle_agent, battle_l2
         emu = self.controller.emu
         mode_before = detect_mode(emu)
+
+        # --- battle-start edge (ABOVE the intro-text return): set the cached objective now,
+        # during intro text, so a very short intro can't skip battle_L2.
+        if battle.in_battle(emu) and not self._last_in_battle:
+            state = battle_l2.build_state(emu, self._battle_goals)
+            self._battle_objective = battle_l2.choose_objective(state, self._battle_goals)
+            self.on_event("battle_objective", {
+                "step": self.session.step, "objective": self._battle_objective,
+                "enemy": (state.get("enemy") or {}).get("species"),
+                "trainer": state.get("is_trainer")})
+        self._last_in_battle = battle.in_battle(emu)
+
+        # intro / result text: advance until the FIGHT/PKMN/ITEM/RUN menu is interactive.
         if not battle.fight_menu_showing(emu):
             res = self.controller.execute(AdvanceDialogAction())
             rstep = ReasonStep(location="battle", objective="advance battle text",
                                reasoning="advancing battle text", action=AdvanceDialogAction())
             return rstep, 0, {}, res
+
+        objective = self._battle_objective or battle_l2.GRIND_EXP
+        state = battle_l2.build_state(emu, self._battle_goals)
+        action = battle_agent.choose_action(objective, state)
+        kind = action.get("kind")
+
+        # --- ESCAPE -> run ---
+        if kind == "run":
+            r = battle_actions.run(emu)
+            return self._battle_result(
+                objective, "run", ok=bool(r.get("ok")), mode_before=mode_before,
+                events=[f"battle_action:run", f"escaped:{r.get('escaped')}"],
+                detail=f"battle[{objective}]: run (escaped={r.get('escaped')})",
+                action=MenuSelectAction(index=0, label="battle:run"))
+
+        # --- CAPTURE (target weak) -> throw a ball ---
+        if kind == "ball":
+            r = battle_actions.throw_ball(emu, action["item"])
+            return self._battle_result(
+                objective, "ball", ok=bool(r.get("ok")), mode_before=mode_before,
+                events=[f"battle_action:ball:{action['item']}", f"caught:{r.get('caught')}"],
+                detail=f"battle[{objective}]: throw {action['item']} (caught={r.get('caught')})",
+                action=MenuSelectAction(index=0, label=f"battle:ball:{action['item']}"))
+
+        # --- SURVIVE (low HP) -> use a Potion ---
+        if kind == "item":
+            r = battle_actions.use_item(emu, action["item"])
+            return self._battle_result(
+                objective, "item", ok=bool(r.get("ok")), mode_before=mode_before,
+                events=[f"battle_action:item:{action['item']}",
+                        f"hp:{r.get('active_hp_before')}->{r.get('active_hp_after')}"],
+                detail=f"battle[{objective}]: use {action['item']}",
+                action=MenuSelectAction(index=0, label=f"battle:item:{action['item']}"))
+
+        # --- GRIND-EXP (and any fallback) -> the existing move path, UNCHANGED ---
         client = getattr(self.reasoner, "client", None)
         conf = 0.0
         if client is not None:
@@ -1727,13 +1794,25 @@ class ReasoningLoop:
         result = ActionResult(
             success=bool(r.get("ok")), result="completed",
             mode_before=mode_before, mode_after=detect_mode(emu),
-            events=[f"battle_move:{r.get('move')}", f"dmg:{r.get('damage_dealt')}"],
-            detail=f"battle: {r.get('move')} dealt {r.get('damage_dealt')} (over={r.get('battle_over')})",
+            events=[f"battle_objective:{objective}", f"battle_action:move",
+                    f"battle_move:{r.get('move')}", f"dmg:{r.get('damage_dealt')}"],
+            detail=f"battle[{objective}]: {r.get('move')} dealt {r.get('damage_dealt')} (over={r.get('battle_over')})",
         )
         rstep = ReasonStep(location="battle", objective=f"use {r.get('move')}",
-                           reasoning=f"battle move {slot} ({r.get('move')}) conf {conf:.2f}",
+                           reasoning=f"[{objective}] battle move {slot} ({r.get('move')}) conf {conf:.2f}",
                            action=MenuSelectAction(index=slot, label=f"move:{r.get('move')}"))
         return rstep, 0, {"confidence": conf}, result
+
+    def _battle_result(self, objective, kind, *, ok, mode_before, events, detail, action):
+        """Build the (rstep, latency, usage, result) tuple for a non-move battle macro."""
+        result = ActionResult(
+            success=ok, result="completed",
+            mode_before=mode_before, mode_after=detect_mode(self.controller.emu),
+            events=[f"battle_objective:{objective}"] + events, detail=detail,
+        )
+        rstep = ReasonStep(location="battle", objective=f"battle:{kind}",
+                           reasoning=f"[{objective}] {detail}", action=action)
+        return rstep, 0, {}, result
 
     def _battle_type_knowledge(self, emu) -> list[str] | None:
         """Retrieve type-effectiveness guidance for the current enemy from the KB (once per

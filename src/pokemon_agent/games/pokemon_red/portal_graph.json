@@ -1,0 +1,1126 @@
+{
+  "maps": {
+    "0": {
+      "id": 0,
+      "name": "PalletTown",
+      "const": "PALLET_TOWN",
+      "width": 20,
+      "height": 18,
+      "tileset": "OVERWORLD",
+      "n_components": 5,
+      "walkable_count": 221
+    },
+    "1": {
+      "id": 1,
+      "name": "ViridianCity",
+      "const": "VIRIDIAN_CITY",
+      "width": 40,
+      "height": 36,
+      "tileset": "OVERWORLD",
+      "n_components": 6,
+      "walkable_count": 777
+    },
+    "2": {
+      "id": 2,
+      "name": "PewterCity",
+      "const": "PEWTER_CITY",
+      "width": 40,
+      "height": 36,
+      "tileset": "OVERWORLD",
+      "n_components": 5,
+      "walkable_count": 879
+    },
+    "12": {
+      "id": 12,
+      "name": "Route1",
+      "const": "ROUTE_1",
+      "width": 20,
+      "height": 36,
+      "tileset": "OVERWORLD",
+      "n_components": 8,
+      "walkable_count": 553
+    },
+    "13": {
+      "id": 13,
+      "name": "Route2",
+      "const": "ROUTE_2",
+      "width": 20,
+      "height": 72,
+      "tileset": "OVERWORLD",
+      "n_components": 11,
+      "walkable_count": 805
+    },
+    "47": {
+      "id": 47,
+      "name": "ViridianForestNorthGate",
+      "const": "VIRIDIAN_FOREST_NORTH_GATE",
+      "width": 10,
+      "height": 8,
+      "tileset": "FOREST_GATE",
+      "n_components": 1,
+      "walkable_count": 51
+    },
+    "50": {
+      "id": 50,
+      "name": "ViridianForestSouthGate",
+      "const": "VIRIDIAN_FOREST_SOUTH_GATE",
+      "width": 10,
+      "height": 8,
+      "tileset": "FOREST_GATE",
+      "n_components": 1,
+      "walkable_count": 51
+    },
+    "51": {
+      "id": 51,
+      "name": "ViridianForest",
+      "const": "VIRIDIAN_FOREST",
+      "width": 34,
+      "height": 48,
+      "tileset": "FOREST",
+      "n_components": 1,
+      "walkable_count": 719
+    }
+  },
+  "portals": {
+    "pallettown:warp1": {
+      "id": "pallettown:warp1",
+      "map": 0,
+      "coord": [
+        5,
+        5
+      ],
+      "kind": "warp",
+      "dest_map": 37,
+      "dest_warp": 1,
+      "dest_portal": "redshouse1f:warp1",
+      "component": 2,
+      "direction": "interior",
+      "label": "PalletTown warp 1 -> REDS_HOUSE_1F",
+      "note": null
+    },
+    "pallettown:warp2": {
+      "id": "pallettown:warp2",
+      "map": 0,
+      "coord": [
+        13,
+        5
+      ],
+      "kind": "warp",
+      "dest_map": 39,
+      "dest_warp": 1,
+      "dest_portal": "blueshouse:warp1",
+      "component": 2,
+      "direction": "interior",
+      "label": "PalletTown warp 2 -> BLUES_HOUSE",
+      "note": null
+    },
+    "pallettown:warp3": {
+      "id": "pallettown:warp3",
+      "map": 0,
+      "coord": [
+        12,
+        11
+      ],
+      "kind": "warp",
+      "dest_map": 40,
+      "dest_warp": 2,
+      "dest_portal": "oakslab:warp2",
+      "component": 2,
+      "direction": "interior",
+      "label": "PalletTown warp 3 -> OAKS_LAB",
+      "note": null
+    },
+    "viridiancity:warp1": {
+      "id": "viridiancity:warp1",
+      "map": 1,
+      "coord": [
+        23,
+        25
+      ],
+      "kind": "warp",
+      "dest_map": 41,
+      "dest_warp": 1,
+      "dest_portal": "viridianpokecenter:warp1",
+      "component": 0,
+      "direction": "interior",
+      "label": "ViridianCity warp 1 -> VIRIDIAN_POKECENTER",
+      "note": null
+    },
+    "viridiancity:warp2": {
+      "id": "viridiancity:warp2",
+      "map": 1,
+      "coord": [
+        29,
+        19
+      ],
+      "kind": "warp",
+      "dest_map": 42,
+      "dest_warp": 1,
+      "dest_portal": "viridianmart:warp1",
+      "component": 0,
+      "direction": "interior",
+      "label": "ViridianCity warp 2 -> VIRIDIAN_MART",
+      "note": null
+    },
+    "viridiancity:warp3": {
+      "id": "viridiancity:warp3",
+      "map": 1,
+      "coord": [
+        21,
+        15
+      ],
+      "kind": "warp",
+      "dest_map": 43,
+      "dest_warp": 1,
+      "dest_portal": "viridianschoolhouse:warp1",
+      "component": 0,
+      "direction": "interior",
+      "label": "ViridianCity warp 3 -> VIRIDIAN_SCHOOL_HOUSE",
+      "note": null
+    },
+    "viridiancity:warp4": {
+      "id": "viridiancity:warp4",
+      "map": 1,
+      "coord": [
+        21,
+        9
+      ],
+      "kind": "warp",
+      "dest_map": 44,
+      "dest_warp": 1,
+      "dest_portal": "viridiannicknamehouse:warp1",
+      "component": 0,
+      "direction": "interior",
+      "label": "ViridianCity warp 4 -> VIRIDIAN_NICKNAME_HOUSE",
+      "note": null
+    },
+    "viridiancity:warp5": {
+      "id": "viridiancity:warp5",
+      "map": 1,
+      "coord": [
+        32,
+        7
+      ],
+      "kind": "warp",
+      "dest_map": 45,
+      "dest_warp": 1,
+      "dest_portal": "viridiangym:warp1",
+      "component": 0,
+      "direction": "north",
+      "label": "ViridianCity warp 5 -> VIRIDIAN_GYM",
+      "note": null
+    },
+    "pewtercity:warp1": {
+      "id": "pewtercity:warp1",
+      "map": 2,
+      "coord": [
+        14,
+        7
+      ],
+      "kind": "warp",
+      "dest_map": 52,
+      "dest_warp": 1,
+      "dest_portal": "museum1f:warp1",
+      "component": 1,
+      "direction": "north",
+      "label": "PewterCity warp 1 -> MUSEUM_1F",
+      "note": null
+    },
+    "pewtercity:warp2": {
+      "id": "pewtercity:warp2",
+      "map": 2,
+      "coord": [
+        19,
+        5
+      ],
+      "kind": "warp",
+      "dest_map": 52,
+      "dest_warp": 3,
+      "dest_portal": "museum1f:warp3",
+      "component": 2,
+      "direction": "north",
+      "label": "PewterCity warp 2 -> MUSEUM_1F",
+      "note": null
+    },
+    "pewtercity:warp3": {
+      "id": "pewtercity:warp3",
+      "map": 2,
+      "coord": [
+        16,
+        17
+      ],
+      "kind": "warp",
+      "dest_map": 54,
+      "dest_warp": 1,
+      "dest_portal": "pewtergym:warp1",
+      "component": 1,
+      "direction": "interior",
+      "label": "PewterCity warp 3 -> PEWTER_GYM",
+      "note": null
+    },
+    "pewtercity:warp4": {
+      "id": "pewtercity:warp4",
+      "map": 2,
+      "coord": [
+        29,
+        13
+      ],
+      "kind": "warp",
+      "dest_map": 55,
+      "dest_warp": 1,
+      "dest_portal": "pewternidoranhouse:warp1",
+      "component": 1,
+      "direction": "interior",
+      "label": "PewterCity warp 4 -> PEWTER_NIDORAN_HOUSE",
+      "note": null
+    },
+    "pewtercity:warp5": {
+      "id": "pewtercity:warp5",
+      "map": 2,
+      "coord": [
+        23,
+        17
+      ],
+      "kind": "warp",
+      "dest_map": 56,
+      "dest_warp": 1,
+      "dest_portal": "pewtermart:warp1",
+      "component": 1,
+      "direction": "interior",
+      "label": "PewterCity warp 5 -> PEWTER_MART",
+      "note": null
+    },
+    "pewtercity:warp6": {
+      "id": "pewtercity:warp6",
+      "map": 2,
+      "coord": [
+        7,
+        29
+      ],
+      "kind": "warp",
+      "dest_map": 57,
+      "dest_warp": 1,
+      "dest_portal": "pewterspeechhouse:warp1",
+      "component": 1,
+      "direction": "south",
+      "label": "PewterCity warp 6 -> PEWTER_SPEECH_HOUSE",
+      "note": null
+    },
+    "pewtercity:warp7": {
+      "id": "pewtercity:warp7",
+      "map": 2,
+      "coord": [
+        13,
+        25
+      ],
+      "kind": "warp",
+      "dest_map": 58,
+      "dest_warp": 1,
+      "dest_portal": "pewterpokecenter:warp1",
+      "component": 1,
+      "direction": "interior",
+      "label": "PewterCity warp 7 -> PEWTER_POKECENTER",
+      "note": null
+    },
+    "route2:warp1": {
+      "id": "route2:warp1",
+      "map": 13,
+      "coord": [
+        12,
+        9
+      ],
+      "kind": "warp",
+      "dest_map": 46,
+      "dest_warp": 1,
+      "dest_portal": "diglettscaveroute2:warp1",
+      "component": 1,
+      "direction": "north",
+      "label": "Route2 warp 1 -> DIGLETTS_CAVE_ROUTE_2",
+      "note": null
+    },
+    "route2:warp2": {
+      "id": "route2:warp2",
+      "map": 13,
+      "coord": [
+        3,
+        11
+      ],
+      "kind": "warp",
+      "dest_map": 47,
+      "dest_warp": 2,
+      "dest_portal": "viridianforestnorthgate:warp2",
+      "component": 0,
+      "direction": "north",
+      "label": "Route2 warp 2 -> VIRIDIAN_FOREST_NORTH_GATE",
+      "note": null
+    },
+    "route2:warp3": {
+      "id": "route2:warp3",
+      "map": 13,
+      "coord": [
+        15,
+        19
+      ],
+      "kind": "warp",
+      "dest_map": 48,
+      "dest_warp": 1,
+      "dest_portal": "route2tradehouse:warp1",
+      "component": 1,
+      "direction": "interior",
+      "label": "Route2 warp 3 -> ROUTE_2_TRADE_HOUSE",
+      "note": null
+    },
+    "route2:warp4": {
+      "id": "route2:warp4",
+      "map": 13,
+      "coord": [
+        16,
+        35
+      ],
+      "kind": "warp",
+      "dest_map": 49,
+      "dest_warp": 2,
+      "dest_portal": "route2gate:warp2",
+      "component": 5,
+      "direction": "east",
+      "label": "Route2 warp 4 -> ROUTE_2_GATE",
+      "note": null
+    },
+    "route2:warp5": {
+      "id": "route2:warp5",
+      "map": 13,
+      "coord": [
+        15,
+        39
+      ],
+      "kind": "warp",
+      "dest_map": 49,
+      "dest_warp": 3,
+      "dest_portal": "route2gate:warp3",
+      "component": 9,
+      "direction": "interior",
+      "label": "Route2 warp 5 -> ROUTE_2_GATE",
+      "note": null
+    },
+    "route2:warp6": {
+      "id": "route2:warp6",
+      "map": 13,
+      "coord": [
+        3,
+        43
+      ],
+      "kind": "warp",
+      "dest_map": 50,
+      "dest_warp": 3,
+      "dest_portal": "viridianforestsouthgate:warp3",
+      "component": 10,
+      "direction": "west",
+      "label": "Route2 warp 6 -> VIRIDIAN_FOREST_SOUTH_GATE",
+      "note": null
+    },
+    "viridianforestnorthgate:warp1": {
+      "id": "viridianforestnorthgate:warp1",
+      "map": 47,
+      "coord": [
+        4,
+        0
+      ],
+      "kind": "warp",
+      "dest_map": 13,
+      "dest_warp": 2,
+      "dest_portal": "route2:warp2",
+      "component": 0,
+      "direction": "north",
+      "label": "ViridianForestNorthGate warp 1 -> LAST_MAP",
+      "note": "LAST_MAP -> map 13 (paired north-side door; twin slot entered)"
+    },
+    "viridianforestnorthgate:warp2": {
+      "id": "viridianforestnorthgate:warp2",
+      "map": 47,
+      "coord": [
+        5,
+        0
+      ],
+      "kind": "warp",
+      "dest_map": 13,
+      "dest_warp": 2,
+      "dest_portal": "route2:warp2",
+      "component": 0,
+      "direction": "north",
+      "label": "ViridianForestNorthGate warp 2 -> LAST_MAP",
+      "note": "LAST_MAP -> map 13 (incoming warp targets slot 2)"
+    },
+    "viridianforestnorthgate:warp3": {
+      "id": "viridianforestnorthgate:warp3",
+      "map": 47,
+      "coord": [
+        4,
+        7
+      ],
+      "kind": "warp",
+      "dest_map": 51,
+      "dest_warp": 1,
+      "dest_portal": "viridianforest:warp1",
+      "component": 0,
+      "direction": "south",
+      "label": "ViridianForestNorthGate warp 3 -> VIRIDIAN_FOREST",
+      "note": null
+    },
+    "viridianforestnorthgate:warp4": {
+      "id": "viridianforestnorthgate:warp4",
+      "map": 47,
+      "coord": [
+        5,
+        7
+      ],
+      "kind": "warp",
+      "dest_map": 51,
+      "dest_warp": 1,
+      "dest_portal": "viridianforest:warp1",
+      "component": 0,
+      "direction": "south",
+      "label": "ViridianForestNorthGate warp 4 -> VIRIDIAN_FOREST",
+      "note": null
+    },
+    "viridianforestsouthgate:warp1": {
+      "id": "viridianforestsouthgate:warp1",
+      "map": 50,
+      "coord": [
+        4,
+        0
+      ],
+      "kind": "warp",
+      "dest_map": 51,
+      "dest_warp": 4,
+      "dest_portal": "viridianforest:warp4",
+      "component": 0,
+      "direction": "north",
+      "label": "ViridianForestSouthGate warp 1 -> VIRIDIAN_FOREST",
+      "note": null
+    },
+    "viridianforestsouthgate:warp2": {
+      "id": "viridianforestsouthgate:warp2",
+      "map": 50,
+      "coord": [
+        5,
+        0
+      ],
+      "kind": "warp",
+      "dest_map": 51,
+      "dest_warp": 5,
+      "dest_portal": "viridianforest:warp5",
+      "component": 0,
+      "direction": "north",
+      "label": "ViridianForestSouthGate warp 2 -> VIRIDIAN_FOREST",
+      "note": null
+    },
+    "viridianforestsouthgate:warp3": {
+      "id": "viridianforestsouthgate:warp3",
+      "map": 50,
+      "coord": [
+        4,
+        7
+      ],
+      "kind": "warp",
+      "dest_map": 13,
+      "dest_warp": 6,
+      "dest_portal": "route2:warp6",
+      "component": 0,
+      "direction": "south",
+      "label": "ViridianForestSouthGate warp 3 -> LAST_MAP",
+      "note": "LAST_MAP -> map 13 (incoming warp targets slot 3)"
+    },
+    "viridianforestsouthgate:warp4": {
+      "id": "viridianforestsouthgate:warp4",
+      "map": 50,
+      "coord": [
+        5,
+        7
+      ],
+      "kind": "warp",
+      "dest_map": 13,
+      "dest_warp": 6,
+      "dest_portal": "route2:warp6",
+      "component": 0,
+      "direction": "south",
+      "label": "ViridianForestSouthGate warp 4 -> LAST_MAP",
+      "note": "LAST_MAP -> map 13 (paired south-side door; twin slot entered)"
+    },
+    "viridianforest:warp1": {
+      "id": "viridianforest:warp1",
+      "map": 51,
+      "coord": [
+        1,
+        0
+      ],
+      "kind": "warp",
+      "dest_map": 47,
+      "dest_warp": 3,
+      "dest_portal": "viridianforestnorthgate:warp3",
+      "component": 0,
+      "direction": "north",
+      "label": "ViridianForest warp 1 -> VIRIDIAN_FOREST_NORTH_GATE",
+      "note": null
+    },
+    "viridianforest:warp2": {
+      "id": "viridianforest:warp2",
+      "map": 51,
+      "coord": [
+        2,
+        0
+      ],
+      "kind": "warp",
+      "dest_map": 47,
+      "dest_warp": 4,
+      "dest_portal": "viridianforestnorthgate:warp4",
+      "component": 0,
+      "direction": "north",
+      "label": "ViridianForest warp 2 -> VIRIDIAN_FOREST_NORTH_GATE",
+      "note": null
+    },
+    "viridianforest:warp3": {
+      "id": "viridianforest:warp3",
+      "map": 51,
+      "coord": [
+        15,
+        47
+      ],
+      "kind": "warp",
+      "dest_map": 50,
+      "dest_warp": 2,
+      "dest_portal": "viridianforestsouthgate:warp2",
+      "component": 0,
+      "direction": "south",
+      "label": "ViridianForest warp 3 -> VIRIDIAN_FOREST_SOUTH_GATE",
+      "note": null
+    },
+    "viridianforest:warp4": {
+      "id": "viridianforest:warp4",
+      "map": 51,
+      "coord": [
+        16,
+        47
+      ],
+      "kind": "warp",
+      "dest_map": 50,
+      "dest_warp": 2,
+      "dest_portal": "viridianforestsouthgate:warp2",
+      "component": 0,
+      "direction": "south",
+      "label": "ViridianForest warp 4 -> VIRIDIAN_FOREST_SOUTH_GATE",
+      "note": null
+    },
+    "viridianforest:warp5": {
+      "id": "viridianforest:warp5",
+      "map": 51,
+      "coord": [
+        17,
+        47
+      ],
+      "kind": "warp",
+      "dest_map": 50,
+      "dest_warp": 2,
+      "dest_portal": "viridianforestsouthgate:warp2",
+      "component": 0,
+      "direction": "south",
+      "label": "ViridianForest warp 5 -> VIRIDIAN_FOREST_SOUTH_GATE",
+      "note": null
+    },
+    "viridianforest:warp6": {
+      "id": "viridianforest:warp6",
+      "map": 51,
+      "coord": [
+        18,
+        47
+      ],
+      "kind": "warp",
+      "dest_map": 50,
+      "dest_warp": 2,
+      "dest_portal": "viridianforestsouthgate:warp2",
+      "component": 0,
+      "direction": "south",
+      "label": "ViridianForest warp 6 -> VIRIDIAN_FOREST_SOUTH_GATE",
+      "note": null
+    },
+    "pallettown:edge_north_c0": {
+      "id": "pallettown:edge_north_c0",
+      "map": 0,
+      "coord": [
+        1,
+        0
+      ],
+      "kind": "edge",
+      "dest_map": 12,
+      "dest_warp": null,
+      "dest_portal": "route1:edge_south_c0",
+      "component": 0,
+      "label": "PalletTown north edge -> Route1",
+      "direction": "north"
+    },
+    "pallettown:edge_north_c1": {
+      "id": "pallettown:edge_north_c1",
+      "map": 0,
+      "coord": [
+        6,
+        0
+      ],
+      "kind": "edge",
+      "dest_map": 12,
+      "dest_warp": null,
+      "dest_portal": "route1:edge_south_c6",
+      "component": 1,
+      "label": "PalletTown north edge -> Route1",
+      "direction": "north"
+    },
+    "pallettown:edge_north_c2": {
+      "id": "pallettown:edge_north_c2",
+      "map": 0,
+      "coord": [
+        10,
+        0
+      ],
+      "kind": "edge",
+      "dest_map": 12,
+      "dest_warp": null,
+      "dest_portal": "route1:edge_south_c2",
+      "component": 2,
+      "label": "PalletTown north edge -> Route1",
+      "direction": "north"
+    },
+    "pallettown:edge_north_c3": {
+      "id": "pallettown:edge_north_c3",
+      "map": 0,
+      "coord": [
+        15,
+        0
+      ],
+      "kind": "edge",
+      "dest_map": 12,
+      "dest_warp": null,
+      "dest_portal": "route1:edge_south_c7",
+      "component": 3,
+      "label": "PalletTown north edge -> Route1",
+      "direction": "north"
+    },
+    "pallettown:edge_north_c4": {
+      "id": "pallettown:edge_north_c4",
+      "map": 0,
+      "coord": [
+        19,
+        0
+      ],
+      "kind": "edge",
+      "dest_map": 12,
+      "dest_warp": null,
+      "dest_portal": "route1:edge_south_c4",
+      "component": 4,
+      "label": "PalletTown north edge -> Route1",
+      "direction": "north"
+    },
+    "pallettown:edge_south_c2": {
+      "id": "pallettown:edge_south_c2",
+      "map": 0,
+      "coord": [
+        2,
+        17
+      ],
+      "kind": "edge",
+      "dest_map": 32,
+      "dest_warp": null,
+      "dest_portal": null,
+      "component": 2,
+      "label": "PalletTown south edge -> Route21",
+      "direction": "south"
+    },
+    "viridiancity:edge_north_c0": {
+      "id": "viridiancity:edge_north_c0",
+      "map": 1,
+      "coord": [
+        18,
+        0
+      ],
+      "kind": "edge",
+      "dest_map": 13,
+      "dest_warp": null,
+      "dest_portal": "route2:edge_south_c10",
+      "component": 0,
+      "label": "ViridianCity north edge -> Route2",
+      "direction": "north"
+    },
+    "viridiancity:edge_south_c0": {
+      "id": "viridiancity:edge_south_c0",
+      "map": 1,
+      "coord": [
+        20,
+        35
+      ],
+      "kind": "edge",
+      "dest_map": 12,
+      "dest_warp": null,
+      "dest_portal": "route1:edge_north_c4",
+      "component": 0,
+      "label": "ViridianCity south edge -> Route1",
+      "direction": "south"
+    },
+    "viridiancity:edge_south_c2": {
+      "id": "viridiancity:edge_south_c2",
+      "map": 1,
+      "coord": [
+        6,
+        35
+      ],
+      "kind": "edge",
+      "dest_map": 12,
+      "dest_warp": null,
+      "dest_portal": "route1:edge_north_c1",
+      "component": 2,
+      "label": "ViridianCity south edge -> Route1",
+      "direction": "south"
+    },
+    "viridiancity:edge_south_c3": {
+      "id": "viridiancity:edge_south_c3",
+      "map": 1,
+      "coord": [
+        16,
+        35
+      ],
+      "kind": "edge",
+      "dest_map": 12,
+      "dest_warp": null,
+      "dest_portal": "route1:edge_north_c3",
+      "component": 3,
+      "label": "ViridianCity south edge -> Route1",
+      "direction": "south"
+    },
+    "viridiancity:edge_south_c4": {
+      "id": "viridiancity:edge_south_c4",
+      "map": 1,
+      "coord": [
+        25,
+        35
+      ],
+      "kind": "edge",
+      "dest_map": 12,
+      "dest_warp": null,
+      "dest_portal": "route1:edge_north_c4",
+      "component": 4,
+      "label": "ViridianCity south edge -> Route1",
+      "direction": "south"
+    },
+    "viridiancity:edge_south_c5": {
+      "id": "viridiancity:edge_south_c5",
+      "map": 1,
+      "coord": [
+        34,
+        35
+      ],
+      "kind": "edge",
+      "dest_map": 12,
+      "dest_warp": null,
+      "dest_portal": "route1:edge_north_c4",
+      "component": 5,
+      "label": "ViridianCity south edge -> Route1",
+      "direction": "south"
+    },
+    "viridiancity:edge_west_c0": {
+      "id": "viridiancity:edge_west_c0",
+      "map": 1,
+      "coord": [
+        0,
+        15
+      ],
+      "kind": "edge",
+      "dest_map": 33,
+      "dest_warp": null,
+      "dest_portal": null,
+      "component": 0,
+      "label": "ViridianCity west edge -> Route22",
+      "direction": "west"
+    },
+    "viridiancity:edge_west_c2": {
+      "id": "viridiancity:edge_west_c2",
+      "map": 1,
+      "coord": [
+        0,
+        31
+      ],
+      "kind": "edge",
+      "dest_map": 33,
+      "dest_warp": null,
+      "dest_portal": null,
+      "component": 2,
+      "label": "ViridianCity west edge -> Route22",
+      "direction": "west"
+    },
+    "pewtercity:edge_south_c1": {
+      "id": "pewtercity:edge_south_c1",
+      "map": 2,
+      "coord": [
+        18,
+        35
+      ],
+      "kind": "edge",
+      "dest_map": 13,
+      "dest_warp": null,
+      "dest_portal": "route2:edge_north_c0",
+      "component": 1,
+      "label": "PewterCity south edge -> Route2",
+      "direction": "south"
+    },
+    "pewtercity:edge_south_c3": {
+      "id": "pewtercity:edge_south_c3",
+      "map": 2,
+      "coord": [
+        32,
+        35
+      ],
+      "kind": "edge",
+      "dest_map": 13,
+      "dest_warp": null,
+      "dest_portal": "route2:edge_north_c0",
+      "component": 3,
+      "label": "PewterCity south edge -> Route2",
+      "direction": "south"
+    },
+    "pewtercity:edge_south_c4": {
+      "id": "pewtercity:edge_south_c4",
+      "map": 2,
+      "coord": [
+        5,
+        35
+      ],
+      "kind": "edge",
+      "dest_map": 13,
+      "dest_warp": null,
+      "dest_portal": "route2:edge_north_c0",
+      "component": 4,
+      "label": "PewterCity south edge -> Route2",
+      "direction": "south"
+    },
+    "pewtercity:edge_east_c0": {
+      "id": "pewtercity:edge_east_c0",
+      "map": 2,
+      "coord": [
+        39,
+        0
+      ],
+      "kind": "edge",
+      "dest_map": 14,
+      "dest_warp": null,
+      "dest_portal": null,
+      "component": 0,
+      "label": "PewterCity east edge -> Route3",
+      "direction": "east"
+    },
+    "pewtercity:edge_east_c1": {
+      "id": "pewtercity:edge_east_c1",
+      "map": 2,
+      "coord": [
+        39,
+        17
+      ],
+      "kind": "edge",
+      "dest_map": 14,
+      "dest_warp": null,
+      "dest_portal": null,
+      "component": 1,
+      "label": "PewterCity east edge -> Route3",
+      "direction": "east"
+    },
+    "pewtercity:edge_east_c3": {
+      "id": "pewtercity:edge_east_c3",
+      "map": 2,
+      "coord": [
+        39,
+        30
+      ],
+      "kind": "edge",
+      "dest_map": 14,
+      "dest_warp": null,
+      "dest_portal": null,
+      "component": 3,
+      "label": "PewterCity east edge -> Route3",
+      "direction": "east"
+    },
+    "route1:edge_north_c0": {
+      "id": "route1:edge_north_c0",
+      "map": 12,
+      "coord": [
+        1,
+        0
+      ],
+      "kind": "edge",
+      "dest_map": 1,
+      "dest_warp": null,
+      "dest_portal": "viridiancity:edge_south_c2",
+      "component": 0,
+      "label": "Route1 north edge -> ViridianCity",
+      "direction": "north"
+    },
+    "route1:edge_north_c1": {
+      "id": "route1:edge_north_c1",
+      "map": 12,
+      "coord": [
+        6,
+        0
+      ],
+      "kind": "edge",
+      "dest_map": 1,
+      "dest_warp": null,
+      "dest_portal": "viridiancity:edge_south_c2",
+      "component": 1,
+      "label": "Route1 north edge -> ViridianCity",
+      "direction": "north"
+    },
+    "route1:edge_north_c2": {
+      "id": "route1:edge_north_c2",
+      "map": 12,
+      "coord": [
+        10,
+        0
+      ],
+      "kind": "edge",
+      "dest_map": 1,
+      "dest_warp": null,
+      "dest_portal": "viridiancity:edge_south_c2",
+      "component": 2,
+      "label": "Route1 north edge -> ViridianCity",
+      "direction": "north"
+    },
+    "route1:edge_north_c3": {
+      "id": "route1:edge_north_c3",
+      "map": 12,
+      "coord": [
+        15,
+        0
+      ],
+      "kind": "edge",
+      "dest_map": 1,
+      "dest_warp": null,
+      "dest_portal": "viridiancity:edge_south_c3",
+      "component": 3,
+      "label": "Route1 north edge -> ViridianCity",
+      "direction": "north"
+    },
+    "route1:edge_north_c4": {
+      "id": "route1:edge_north_c4",
+      "map": 12,
+      "coord": [
+        19,
+        0
+      ],
+      "kind": "edge",
+      "dest_map": 1,
+      "dest_warp": null,
+      "dest_portal": "viridiancity:edge_south_c0",
+      "component": 4,
+      "label": "Route1 north edge -> ViridianCity",
+      "direction": "north"
+    },
+    "route1:edge_south_c0": {
+      "id": "route1:edge_south_c0",
+      "map": 12,
+      "coord": [
+        1,
+        35
+      ],
+      "kind": "edge",
+      "dest_map": 0,
+      "dest_warp": null,
+      "dest_portal": "pallettown:edge_north_c0",
+      "component": 0,
+      "label": "Route1 south edge -> PalletTown",
+      "direction": "south"
+    },
+    "route1:edge_south_c2": {
+      "id": "route1:edge_south_c2",
+      "map": 12,
+      "coord": [
+        10,
+        35
+      ],
+      "kind": "edge",
+      "dest_map": 0,
+      "dest_warp": null,
+      "dest_portal": "pallettown:edge_north_c2",
+      "component": 2,
+      "label": "Route1 south edge -> PalletTown",
+      "direction": "south"
+    },
+    "route1:edge_south_c4": {
+      "id": "route1:edge_south_c4",
+      "map": 12,
+      "coord": [
+        19,
+        35
+      ],
+      "kind": "edge",
+      "dest_map": 0,
+      "dest_warp": null,
+      "dest_portal": "pallettown:edge_north_c4",
+      "component": 4,
+      "label": "Route1 south edge -> PalletTown",
+      "direction": "south"
+    },
+    "route1:edge_south_c6": {
+      "id": "route1:edge_south_c6",
+      "map": 12,
+      "coord": [
+        6,
+        35
+      ],
+      "kind": "edge",
+      "dest_map": 0,
+      "dest_warp": null,
+      "dest_portal": "pallettown:edge_north_c1",
+      "component": 6,
+      "label": "Route1 south edge -> PalletTown",
+      "direction": "south"
+    },
+    "route1:edge_south_c7": {
+      "id": "route1:edge_south_c7",
+      "map": 12,
+      "coord": [
+        15,
+        35
+      ],
+      "kind": "edge",
+      "dest_map": 0,
+      "dest_warp": null,
+      "dest_portal": "pallettown:edge_north_c3",
+      "component": 7,
+      "label": "Route1 south edge -> PalletTown",
+      "direction": "south"
+    },
+    "route2:edge_north_c0": {
+      "id": "route2:edge_north_c0",
+      "map": 13,
+      "coord": [
+        8,
+        0
+      ],
+      "kind": "edge",
+      "dest_map": 2,
+      "dest_warp": null,
+      "dest_portal": "pewtercity:edge_south_c4",
+      "component": 0,
+      "label": "Route2 north edge -> PewterCity",
+      "direction": "north"
+    },
+    "route2:edge_south_c10": {
+      "id": "route2:edge_south_c10",
+      "map": 13,
+      "coord": [
+        8,
+        71
+      ],
+      "kind": "edge",
+      "dest_map": 1,
+      "dest_warp": null,
+      "dest_portal": "viridiancity:edge_north_c0",
+      "component": 10,
+      "label": "Route2 south edge -> ViridianCity",
+      "direction": "south"
+    }
+  }
+}

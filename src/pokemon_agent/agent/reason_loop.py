@@ -33,10 +33,12 @@ from ..actions.controller import ActionController
 from ..actions.stuck_detector import StuckDetector
 from ..core.models import ActionResult, Direction, GoToAction, InteractAction, MenuSelectAction, MoveAction
 from ..games.pokemon_red import predicates
+from ..games.pokemon_red.map_reader import read_collision_map
 from ..games.pokemon_red.maps import map_name
 from ..games.pokemon_red.progress import progress_vector
 from ..games.pokemon_red.routes import next_direction
 from ..games.pokemon_red.state import detect_mode, read_player
+from .portal_graph import PortalGraph
 from ..observations.builder import ObservationBuilder
 from .l1_pipeline import run_l1_pipeline
 from .memory import AgentMemory
@@ -133,7 +135,21 @@ class ReasoningLoop:
         self.level_target = level_target
         self.knowledge = knowledge           # Orrery KB (also used for battle type lookups)
         self.pather = pather                 # "bfs" (deterministic) or "jev" (calibrated per-step direction)
+        # PortalGraph: ground-truth cross-map routing (warps + edges + walk-reachability, ripped from
+        # game data). L1 reads it for reachability; L2/servo for the exact next portal. None if the
+        # packaged data is unavailable (falls back to the coarse WorldGraph).
+        try:
+            self.portals: PortalGraph | None = PortalGraph.load()
+        except Exception:
+            self.portals = None
         self._battle_kb: dict[str, list[str]] = {}  # cache: enemy species -> type knowledge
+        # battle_L2 state (design §2.1): the objective is chosen ONCE on the battle-start edge
+        # and cached for the fight. `_last_in_battle` detects that false->true edge; the loop
+        # clears both when the battle ends. `_battle_goals` carries L1's standing battle goals
+        # (e.g. {"catch": ["Pidgey"]}); empty -> GRIND-EXP.
+        self._last_in_battle: bool = False
+        self._battle_objective: str | None = None
+        self._battle_goals: dict = {}
         # L1 planner: the strategist that owns the plan. Active only when a goal/level is set —
         # otherwise the loop runs the plain executor path (legacy vertical-slice behavior).
         # NeedsArbiter is no longer consulted here; needs flow into L1 as signals + the
@@ -238,18 +254,32 @@ class ReasoningLoop:
         ctx = (obs.game_state or {}).get("context") or {}
         ctx_kind = ctx.get("kind")
 
+        # keep the compact battle-goals (catch list + level_target) in sync with L1's plan each
+        # step, so the battle layer sees the CURRENT goals on the next battle-start edge (§7.1).
+        self._sync_battle_goals()
+
         # --- battle owns the step (deterministic RAM bit — a fact, never a classification) ---
         if ctx.get("in_battle"):
             rstep, latency, usage, result = self._battle_turn(obs)
             self._prev = rstep
             self._emit_reason(rstep, latency)
             return self._finish(obs, rstep, result, latency, usage, shot)
+        # battle just ended -> clear the cached objective so the NEXT battle re-detects the
+        # false->true edge in _battle_turn and re-runs battle_L2 (design §2.1 edge reset).
+        if self._last_in_battle:
+            self.on_event("battle_end", {"step": self.session.step,
+                                         "objective": self._battle_objective})
+            self._last_in_battle = False
+            self._battle_objective = None
 
         # --- FLOW ROUTER: menu is deterministic (RAM cursor); navigate-vs-dialogue is a calibrated
         # Jev choice (falls back to the deterministic ctx_kind detector when Jev isn't wired). Replaces
         # the brittle has_upper dialog heuristic as the router. ---
         flow = self._route_flow(obs, ctx)
         if flow == "menu":
+            shopped = self._maybe_shop(obs, shot)   # SHOP directive at an open Mart counter -> buy macro
+            if shopped is not None:
+                return shopped
             return self._jev_turn(obs, player_desc, self._blocked_dirs(obs, None), None, shot)
         if flow == "dialogue":
             return self._advance_dialog(obs, shot)
@@ -400,8 +430,8 @@ class ReasoningLoop:
                 "party": signals["party"],
                 "items": signals["items"],
                 "badges": signals["badges"],
-                "plan": [{"id": s.id, "map": s.map, "talk": s.talk, "done_when": s.done_when,
-                          "status": s.status} for s in self._plan_steps],
+                "plan": [{"id": s.id, "map": s.map, "kind": s.kind, "talk": s.talk,
+                          "done_when": s.done_when, "status": s.status} for s in self._plan_steps],
                 "signals": signals,
                 "mission": self._plan.mission,
                 "milestone": self._plan.milestone,
@@ -419,6 +449,11 @@ class ReasoningLoop:
                     self._plan.mission = prop["mission"]
                 if prop.get("milestone"):
                     self._plan.milestone = prop["milestone"]
+                # standing battle goal (§7.1): a catch list steers battle_L2 toward CAPTURE.
+                # Only a non-null list edits it (None = "unchanged"); [] explicitly clears it.
+                if prop.get("catch") is not None:
+                    self._plan.battle_goals = {**self._plan.battle_goals,
+                                               "catch": list(prop["catch"] or [])}
                 # record the approaches L1 discarded so they aren't retried
                 for s in removed:
                     note = s.why or s.done_when or f"map {s.map}"
@@ -689,6 +724,18 @@ class ReasoningLoop:
     def _propose_target(self, obs, directive, default, *, stuck) -> dict:
         """Ask the mid-level proposer for the typed target (folding reflection: its note becomes the
         visible short-term objective). Deterministic default when offline. Never None."""
+        # Ground-truth PortalGraph waypoint: for a cross-map hop the graph covers, head straight to
+        # the EXACT next portal tile (deterministic) instead of asking the LLM proposer, which
+        # oscillated at gates. This is what actually crosses Viridian Forest toward Pewter.
+        tmap0 = directive.target_map if directive is not None else None
+        portal = self._portal_next(obs.player, tmap0) if (tmap0 is not None and obs.player is not None) else None
+        if portal is not None:
+            cx, cy = int(portal["coord"][0]), int(portal["coord"][1])
+            self.on_event("portal_hop", {"step": self.session.step, "from_map": obs.player.map_id,
+                                         "to_map": portal["dest_map"], "coord": [cx, cy],
+                                         "goal_map": int(tmap0)})
+            return {"kind": "tile", "x": cx, "y": cy, "portal": True,
+                    "note": f"portal toward {map_name(portal['dest_map'])}"}
         prov = getattr(self.planner, "provider", None) if self.planner else None
         if prov is None:
             return default
@@ -940,6 +987,46 @@ class ReasoningLoop:
         return self._bfs_move(player, tgt, interact=False, blocked_dirs=blocked_dirs,
                               occupied=(occupied - {tgt}))
 
+    def _bfs_full_collision(self, player, xy, blocked_dirs, occupied):
+        """First step of a BFS to ``xy`` over the FULL current-map collision (ground truth from RAM),
+        so a portal deep in a maze is always reachable — unlike the learned-map / greedy pathers that
+        stall at maze walls. None if no route or the emulator collision is unreadable."""
+        try:
+            coll = read_collision_map(self.controller.emu)
+        except Exception:
+            coll = None
+        if not coll:
+            return None
+        goal = (int(xy[0]), int(xy[1]))
+        start = (int(player.x), int(player.y))
+        if start == goal:
+            return None
+        walk = set(coll["walkable"]) | {goal}   # the door tile may be off the walkable set
+        blocked = set(occupied) - {goal}
+        prev: dict[tuple[int, int], tuple[tuple[int, int], Direction] | None] = {start: None}
+        q = deque([start])
+        found = False
+        while q:
+            cur = q.popleft()
+            if cur == goal:
+                found = True
+                break
+            cx, cy = cur
+            for d, (dx, dy) in DELTA.items():
+                nb = (cx + dx, cy + dy)
+                if nb in walk and nb not in prev and nb not in blocked:
+                    prev[nb] = (cur, d)
+                    q.append(nb)
+        if not found:
+            return None
+        step, first = goal, None
+        while prev[step] is not None:
+            first = prev[step][1]
+            step = prev[step][0]
+        if first is not None and first.value not in blocked_dirs:
+            return MoveAction(direction=first)
+        return None
+
     def _route_to_tile(self, obs, xy, blocked_dirs, avoid):
         """Route one step toward tile ``xy`` under the active pather (policy / jev / bfs)."""
         if self.pather == "policy" and getattr(self.reasoner, "choose_policy", None) is not None:
@@ -1081,6 +1168,12 @@ class ReasoningLoop:
                         return None
                 return InteractAction() if target.get("interact") else None
             avoid = set(occupied)
+            if target.get("portal"):
+                # a ground-truth portal deep in a maze (e.g. the forest north gate): solve it with a
+                # BFS over the FULL current-map collision, not the greedy policy pather that stalls.
+                mv = self._bfs_full_collision(player, xy, blocked_dirs, avoid)
+                if mv is not None:
+                    return mv
             return self._route_to_tile(obs, xy, blocked_dirs, avoid)
         if kind == "enter":
             return self._enter_map(int(target["map"]), obs, blocked_dirs, occupied)
@@ -1154,6 +1247,32 @@ class ReasoningLoop:
             return MoveAction(direction=Direction(goal_dir))
         return None
 
+    def _portal_next(self, player, tmap) -> dict | None:
+        """The next PORTAL to head toward on the way to map ``tmap``, from the ground-truth
+        PortalGraph (or None if it doesn't cover this leg). Locates the player's walkable component
+        from the LIVE collision map so it stays correct even if map state changed."""
+        pg = self.portals
+        if pg is None or player is None or player.map_id not in pg.maps or int(tmap) not in pg.maps:
+            return None
+        try:
+            coll = read_collision_map(self.controller.emu)
+        except Exception:
+            coll = None
+        walk = coll["walkable"] if coll else set()
+        comp = pg.component_at(player.map_id, player.x, player.y, walk)
+        if comp is None:
+            return None
+        portal = pg.next_portal(player.map_id, comp, int(tmap))
+        # A warp can sit on a NON-walkable door tile (you cannot step onto it — the move just fails).
+        # When the chosen portal's tile isn't walkable, prefer a sibling warp to the same destination
+        # whose tile IS walkable (e.g. the south gate has (4,0) unwalkable + (5,0) walkable -> forest).
+        if portal is not None and walk and tuple(portal["coord"]) not in walk:
+            sibs = [p for p in pg.portals_on(player.map_id)
+                    if p["dest_map"] == portal["dest_map"] and tuple(p["coord"]) in walk]
+            if sibs:
+                portal = sibs[0]
+        return portal
+
     def _servo_step(self, directive: Directive, obs, blocked_dirs: set[str]):
         """The deterministic servo: one concrete step toward ``directive.target`` (LLM+P),
         now WARP-AWARE so it uses the world model instead of walking blindly.
@@ -1192,6 +1311,7 @@ class ReasoningLoop:
         tmap = directive.target_map
         if tmap is None or player.map_id == tmap:
             return None
+
         hop = self.memory.graph.next_hop(player.map_id, tmap)
         if hop is None:
             return None  # no known route -> residual; the impossible trigger will replan
@@ -1391,6 +1511,68 @@ class ReasoningLoop:
         correcting no-op — far safer than walking into an unread box forever); else navigate."""
         return "dialogue" if (ctx.get("screen_text_raw") or "").strip() else "navigate"
 
+    @staticmethod
+    def _shop_item_qty(directive: Directive) -> tuple[str | None, int]:
+        """What to buy: the item NAME and quantity, from the directive's target ({item, qty}) or the
+        ``has_item:<X>`` success predicate. NOTE: a parsed has_item predicate stores the item as an
+        integer ID (resolve_item_id), so map it back to a NAME here — the shop macro matches names/ids
+        against the live shelf and a bare numeric string matches nothing."""
+        from ..games.pokemon_red.constants import ITEMS
+        tgt = directive.target or {}
+        raw = tgt.get("item")
+        if raw is None:
+            raw = (directive.success or {}).get("has_item")
+        if isinstance(raw, int):
+            item = ITEMS.get(raw)
+        elif isinstance(raw, str) and raw.isdigit():
+            item = ITEMS.get(int(raw))
+        else:
+            item = str(raw) if raw else None
+        try:
+            qty = max(1, int(tgt.get("qty") or 1))
+        except (TypeError, ValueError):
+            qty = 1
+        return item, qty
+
+    def _maybe_shop(self, obs, shot) -> ActionResult | None:
+        """When the Mart's BUY/SELL/QUIT counter menu is open AND the active directive names an item
+        to acquire, run the deterministic buy macro (design §6.1) instead of letting Jev flail through
+        the menu. The trigger is model-driven: L1 decides to shop by adding a step to talk to the Mart
+        clerk with ``done_when has_item:<item>`` (compiled to a routed TALK_TO / SHOP) — this fires the
+        buy once that talk opens the counter. Guarded by the unambiguous RAM shop-menu signal + a
+        resolvable item, so it never fires on a non-shopping menu."""
+        d = self._directive
+        if d is None:
+            return None
+        from ..games.pokemon_red import shop as shop_macro
+        emu = self.controller.emu
+        if not shop_macro.at_shop_menu(emu):
+            return None
+        item, qty = self._shop_item_qty(d)
+        if item is None:
+            return None
+        mode_before = detect_mode(emu)
+        res = shop_macro.shop_buy(emu, item, qty)
+        ok = bool(res.get("ok"))
+        self.on_event("shop_buy", {"step": self.session.step, "item": item, "qty": qty, "result": res})
+        if not ok:
+            # A definitive failure (item not on this shelf, can't afford) will NOT self-resolve — the
+            # has_item goal can never be met here, so re-firing the macro every step would thrash the
+            # counter. Wedge the step so L1 drops/replaces it (e.g. picks a Mart that stocks the item),
+            # and force a re-plan.
+            self._mark_step(d.quest_id, "wedged", reason=f"can't buy {item} here: {res.get('reason')}")
+            self._force_reflect = True
+        from ..core.models import WaitAction
+        rstep = ReasonStep(location="mart", objective=f"buy {qty}x {item}",
+                           reasoning=f"SHOP macro: {res.get('reason', 'purchased')}",
+                           action=WaitAction(frames=1))
+        self._prev = rstep
+        self._emit_reason(rstep, 0)
+        result = ActionResult(success=ok, result="completed" if ok else "blocked",
+                              mode_before=mode_before, mode_after=detect_mode(emu),
+                              detail=f"shop_buy {item} x{qty}: {res.get('reason', 'ok')}")
+        return self._finish(obs, rstep, result, 0, {}, shot)
+
     def _advance_dialog(self, obs, shot) -> ActionResult:
         from ..core.models import AdvanceDialogAction
         action = AdvanceDialogAction()
@@ -1566,18 +1748,90 @@ class ReasoningLoop:
         return result
 
     # --- battle sub-policy (mode dispatch routes here when in_battle) ---------
+    def _sync_battle_goals(self) -> None:
+        """Refresh `self._battle_goals` from L1's plan-level goals + the loop's level target
+        (design §7.1). Compact shape `{"catch": [...], "level_target": int}`; empty catch ->
+        GRIND. Cheap + idempotent, called each step so a plan change is picked up promptly."""
+        from ..games.pokemon_red import battle_l2
+        pg = getattr(self._plan, "battle_goals", None) if self._plan is not None else None
+        self._battle_goals = battle_l2.battle_goals_from_plan(pg, self.level_target)
+
     def _battle_turn(self, obs):
-        """Advance battle intro/result text; when the FIGHT menu is up, choose a move
-        (Jev if the executor is TypeSafe, else the first slot) and execute the turn."""
+        """One battle turn under the layered objective model (design §2).
+
+        On the battle-start edge (`in_battle` false->true) run `battle_L2` to cache ONE
+        objective — done ABOVE the intro-text early-return so a short intro can't skip it
+        (§2.1). Then, once the FIGHT menu is up, Jev picks a typed action toward the cached
+        objective and the matching macro executes it. GRIND-EXP is exactly today's fight
+        path (choose_move -> use_move), so the working fight is preserved."""
         from ..core.models import AdvanceDialogAction, MenuSelectAction
-        from ..games.pokemon_red import battle, battle_agent
+        from ..games.pokemon_red import battle, battle_actions, battle_agent, battle_l2
         emu = self.controller.emu
         mode_before = detect_mode(emu)
+
+        # --- battle-start edge (ABOVE the intro-text return): set the cached objective now,
+        # during intro text, so a very short intro can't skip battle_L2.
+        if battle.in_battle(emu) and not self._last_in_battle:
+            state = battle_l2.build_state(emu, self._battle_goals)
+            self._battle_objective = battle_l2.choose_objective(state, self._battle_goals)
+            self.on_event("battle_objective", {
+                "step": self.session.step, "objective": self._battle_objective,
+                "enemy": (state.get("enemy") or {}).get("species"),
+                "trainer": state.get("is_trainer")})
+        self._last_in_battle = battle.in_battle(emu)
+
+        # intro / result text: advance until the FIGHT/PKMN/ITEM/RUN menu is interactive.
         if not battle.fight_menu_showing(emu):
             res = self.controller.execute(AdvanceDialogAction())
             rstep = ReasonStep(location="battle", objective="advance battle text",
                                reasoning="advancing battle text", action=AdvanceDialogAction())
             return rstep, 0, {}, res
+
+        # per-turn SAFETY re-eval (design §2.1): keep the cached objective, but if CAPTURE/
+        # GRIND would faint us at critical HP, override this turn to SURVIVE (trainer) / ESCAPE
+        # (wild) so we heal or flee instead of throwing a ball into a KO.
+        state = battle_l2.build_state(emu, self._battle_goals)
+        cached = self._battle_objective or battle_l2.GRIND_EXP
+        objective = battle_l2.safety_override(cached, state)
+        if objective != cached:
+            self.on_event("battle_safety_override", {
+                "step": self.session.step, "from": cached, "to": objective,
+                "hp_frac": round(battle_l2.hp_frac(state.get("active")), 3)})
+        action = battle_agent.choose_action(objective, state)
+        kind = action.get("kind")
+
+        # --- ESCAPE -> run ---
+        if kind == "run":
+            r = battle_actions.run(emu)
+            return self._battle_result(
+                objective, "run", ok=bool(r.get("ok")), mode_before=mode_before,
+                events=[f"battle_action:run", f"escaped:{r.get('escaped')}"],
+                detail=f"battle[{objective}]: run (escaped={r.get('escaped')})",
+                action=MenuSelectAction(index=0, label="battle:run"))
+
+        # --- CAPTURE (target weak) -> throw a ball ---
+        if kind == "ball":
+            # a SUCCESSFUL catch runs a long tail (wobbles -> "Gotcha!" -> nickname prompt ->
+            # added to party); give the macro enough drain to resolve it fully in one turn,
+            # so the battle actually ENDS rather than leaving the loop mid-catch-animation.
+            r = battle_actions.throw_ball(emu, action["item"], max_advance=150)
+            return self._battle_result(
+                objective, "ball", ok=bool(r.get("ok")), mode_before=mode_before,
+                events=[f"battle_action:ball:{action['item']}", f"caught:{r.get('caught')}"],
+                detail=f"battle[{objective}]: throw {action['item']} (caught={r.get('caught')})",
+                action=MenuSelectAction(index=0, label=f"battle:ball:{action['item']}"))
+
+        # --- SURVIVE (low HP) -> use a Potion ---
+        if kind == "item":
+            r = battle_actions.use_item(emu, action["item"])
+            return self._battle_result(
+                objective, "item", ok=bool(r.get("ok")), mode_before=mode_before,
+                events=[f"battle_action:item:{action['item']}",
+                        f"hp:{r.get('active_hp_before')}->{r.get('active_hp_after')}"],
+                detail=f"battle[{objective}]: use {action['item']}",
+                action=MenuSelectAction(index=0, label=f"battle:item:{action['item']}"))
+
+        # --- GRIND-EXP (and any fallback) -> the existing move path, UNCHANGED ---
         client = getattr(self.reasoner, "client", None)
         conf = 0.0
         if client is not None:
@@ -1589,13 +1843,25 @@ class ReasoningLoop:
         result = ActionResult(
             success=bool(r.get("ok")), result="completed",
             mode_before=mode_before, mode_after=detect_mode(emu),
-            events=[f"battle_move:{r.get('move')}", f"dmg:{r.get('damage_dealt')}"],
-            detail=f"battle: {r.get('move')} dealt {r.get('damage_dealt')} (over={r.get('battle_over')})",
+            events=[f"battle_objective:{objective}", f"battle_action:move",
+                    f"battle_move:{r.get('move')}", f"dmg:{r.get('damage_dealt')}"],
+            detail=f"battle[{objective}]: {r.get('move')} dealt {r.get('damage_dealt')} (over={r.get('battle_over')})",
         )
         rstep = ReasonStep(location="battle", objective=f"use {r.get('move')}",
-                           reasoning=f"battle move {slot} ({r.get('move')}) conf {conf:.2f}",
+                           reasoning=f"[{objective}] battle move {slot} ({r.get('move')}) conf {conf:.2f}",
                            action=MenuSelectAction(index=slot, label=f"move:{r.get('move')}"))
         return rstep, 0, {"confidence": conf}, result
+
+    def _battle_result(self, objective, kind, *, ok, mode_before, events, detail, action):
+        """Build the (rstep, latency, usage, result) tuple for a non-move battle macro."""
+        result = ActionResult(
+            success=ok, result="completed",
+            mode_before=mode_before, mode_after=detect_mode(self.controller.emu),
+            events=[f"battle_objective:{objective}"] + events, detail=detail,
+        )
+        rstep = ReasonStep(location="battle", objective=f"battle:{kind}",
+                           reasoning=f"[{objective}] {detail}", action=action)
+        return rstep, 0, {}, result
 
     def _battle_type_knowledge(self, emu) -> list[str] | None:
         """Retrieve type-effectiveness guidance for the current enemy from the KB (once per

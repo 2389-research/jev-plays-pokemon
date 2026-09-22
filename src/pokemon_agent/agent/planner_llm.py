@@ -293,6 +293,11 @@ done_when MUST be exactly one of (this is the full grammar — nothing else pars
 WORKED EXAMPLES (one per objective class — copy the SHAPE, adapt the specifics):
   pickup an item  -> {"kind":"action","map":42,"talk":true,"who":"the Mart clerk",
                        "done_when":"has_item:Oak's Parcel","why":"buy/collect the parcel"}
+  buy at a Mart   -> {"kind":"action","map":56,"talk":true,"who":"the Mart clerk",
+                       "done_when":"has_item:Potion","why":"buy Potions before the gym"}
+                      Talking to a Mart clerk opens the shop and the buy runs automatically. Add this
+                      when you have money and want consumables (e.g. Potions before a gym). Only items
+                      on that Mart's shelf are bought; anything else is a harmless no-op.
   deliver an item -> {"kind":"action","map":0,"talk":true,"who":"Oak",
                        "done_when":"no_item:Oak's Parcel","why":"hand the parcel to Oak"}
                       CANONICAL: deliver -> no_item:<item>. The item LEAVING the bag proves
@@ -318,12 +323,17 @@ RULES:
   - Prefer a RAM-checkable done_when (has_item/no_item/level/badges/hp_frac/on_map) over
     "verify:" whenever one applies.
 
+You MAY also set a standing CATCH goal when you want a new team member: add "catch": ["<species>"]
+(or ["any"]) so the battle layer catches that wild Pokémon when it appears; omit it (or [] to clear)
+otherwise — the default is to catch nothing.
+
 Return ONLY JSON:
 {"assessment": "<one line: what changed and why>",
  "add": [ <new step objects as above> ],
  "remove": [ <ids of existing plan steps to drop> ],
  "mission": "<the overall mission>",
- "milestone": "<the current concrete sub-goal>"}"""
+ "milestone": "<the current concrete sub-goal>",
+ "catch": [ <species to catch, or "any"; omit for none> ]}"""
 
 
 REPAIR_SYSTEM = """You are the L1 REPAIR step for an agent playing Pokémon Red. ONE quest step
@@ -554,12 +564,16 @@ class Planner:
                 return {"add": [], "remove": []}
             add = [s for s in (data.get("add") or []) if isinstance(s, dict)]
             remove = [str(x) for x in (data.get("remove") or [])]
+            # optional standing catch goal (§7.1): a list of species (or "any"); None = unchanged.
+            raw_catch = data.get("catch")
+            catch = [str(x) for x in raw_catch] if isinstance(raw_catch, list) else None
             return {
                 "assessment": str(data.get("assessment") or ""),
                 "add": add,
                 "remove": remove,
                 "mission": str(data.get("mission") or context.get("mission") or ""),
                 "milestone": str(data.get("milestone") or context.get("milestone") or ""),
+                "catch": catch,
             }
         except Exception:
             return {"add": [], "remove": []}

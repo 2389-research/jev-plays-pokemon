@@ -38,3 +38,24 @@ def test_revise_quests_garbage_is_no_change():
 def test_revise_quests_no_provider_is_no_change():
     p = Planner(goal_map=2)          # no strategist/provider
     assert p.revise_quests(emu=None, context=_ctx())["change"] is False
+
+
+def test_l1_decide_surfaces_catch_goal():
+    # DECIDE may emit a standing catch goal (§7.1); it is surfaced as a list (None when absent).
+    obj = {"assessment": "want a flyer", "add": [], "remove": [], "catch": ["Pidgey"]}
+    p = Planner(goal_map=2, strategist=FP(obj))
+    assert p.l1_decide(_ctx(), {"assessment": "x"})["catch"] == ["Pidgey"]
+    # no catch key -> None (means "leave the standing goal unchanged").
+    p2 = Planner(goal_map=2, strategist=FP({"add": [], "remove": []}))
+    assert p2.l1_decide(_ctx(), {"assessment": "x"})["catch"] is None
+
+
+def test_l1_pipeline_carries_catch_through():
+    from pokemon_agent.agent.l1_pipeline import run_l1_pipeline
+    obj = {"assessment": "grind + catch a Pidgey en route", "catch": ["Pidgey"],
+           "add": [{"kind": "action", "map": 12, "talk": False, "who": None,
+                    "done_when": "level>=8", "why": "grind"}],
+           "remove": []}
+    p = Planner(goal_map=2, strategist=FP(obj))
+    prop = run_l1_pipeline(emu=None, context=_ctx(), planner=p, hard_event=True)
+    assert prop is not None and prop["catch"] == ["Pidgey"]

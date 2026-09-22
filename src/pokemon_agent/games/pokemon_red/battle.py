@@ -32,6 +32,16 @@ def in_battle(emu: Emulator) -> bool:
     return emu.read_memory(WISINBATTLE) != 0
 
 
+def is_trainer_battle(emu: Emulator) -> bool:
+    """True for a trainer battle, False for a wild one (or not in battle).
+
+    `wIsInBattle` (0xD057) is 1 for a wild encounter and 2 for a trainer battle
+    (0xFF is the Safari lost-battle sentinel). Trainer battles can't be run from and
+    are always GRIND/SURVIVE — never CAPTURE — so the battle layer branches on this.
+    """
+    return emu.read_memory(WISINBATTLE) == 2
+
+
 def enemy_hp(emu: Emulator) -> int:
     return _u16(emu, ENEMY_HP)
 

@@ -66,7 +66,7 @@ def catch_match(enemy_species: object, goals: dict | None) -> bool:
     enemy = _norm(enemy_species)
     for want in catch:
         w = _norm(want)
-        if w in ("any", "") or want in ("*",):
+        if w == "any" or want == "*":     # explicit wildcards only — an empty "" is NOT a catch-all
             return True
         if w and w == enemy:
             return True

@@ -99,8 +99,18 @@ def test_action_survive_no_potion_falls_back_to_move():
 
 
 def test_action_capture_full_hp_weakens_with_move():
-    full = {"species": "Pidgey", "hp": 20, "max_hp": 20}
+    # A wild big enough to survive a hit (max_hp > CATCH_SMALL_MAX_HP): weaken with a move first.
+    full = {"species": "Pidgeotto", "hp": 60, "max_hp": 60}
     assert battle_agent.choose_action(CAPTURE, _state(enemy=full))["kind"] == "move"
+
+
+def test_action_capture_small_full_hp_throws_directly():
+    # A small wild (max_hp <= CATCH_SMALL_MAX_HP): the max-damage move would KO it, losing the catch,
+    # so throw immediately instead of weakening (finding #1).
+    small = {"species": "Caterpie", "hp": 20, "max_hp": 20}
+    act = battle_agent.choose_action(CAPTURE, _state(enemy=small))
+    assert act["kind"] == "ball"
+    assert "ball" in act["item"].lower()
 
 
 def test_action_capture_low_hp_throws_ball():

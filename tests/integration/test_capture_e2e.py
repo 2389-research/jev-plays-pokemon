@@ -152,9 +152,15 @@ def test_organic_capture_weakens_then_catches_from_full_hp():
         emu.load_state(str(ROOT / "states" / "wild_battle.state"))
         emu.tick(4)
         emu.write_memory(0xCFEC, 255)                        # high catch rate (Caterpie/Weedle-class)
-        emu.write_memory(0xCFE6, 0); emu.write_memory(0xCFE7, 44)   # enough HP to survive weakening
+        # Enemy HP just above CATCH_SMALL_MAX_HP (30): big enough that a hit won't one-shot it (so the
+        # agent weakens first), small enough that the catch band (<=50%) is reached in a few turns.
+        # Current HP = 0xCFE6/7 (big-endian), max HP = 0xCFF4/5 — set BOTH so it starts at full 40/40.
+        emu.write_memory(0xCFE6, 0); emu.write_memory(0xCFE7, 40)
+        emu.write_memory(0xCFF4, 0); emu.write_memory(0xCFF5, 40)
         emu.write_memory(0xD31D, 2)
-        for off, val in [(0, 4), (1, 5), (2, 20), (3, 3), (4, 0xFF)]:  # 5 Poké Ball, 3 Potion
+        # 40 Poké Balls: a Poké Ball at ~45% HP (the catch band) lands only ~1-in-5, and Kakuna only
+        # knows Harden so our mon is never in danger — plenty of balls lets the organic catch land.
+        for off, val in [(0, 4), (1, 40), (2, 20), (3, 3), (4, 0xFF)]:  # 40 Poké Ball, 3 Potion
             emu.write_memory(0xD31E + off, val)
 
         events = []
@@ -166,7 +172,7 @@ def test_organic_capture_weakens_then_catches_from_full_hp():
         weakened = False
         threw = False
         caught = False
-        for _ in range(25):
+        for _ in range(45):
             if not battle.in_battle(emu):
                 break
             hp_before = read_battle(emu)["enemy"]["hp"]

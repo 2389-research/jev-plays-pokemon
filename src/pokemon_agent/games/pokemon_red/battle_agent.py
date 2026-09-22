@@ -19,8 +19,11 @@ from .battle_l2 import (
 )
 from .game_state import read_battle
 
-# CAPTURE: throw once the target is at/below this HP fraction; weaken (a move) above it.
+# CAPTURE: throw once the target is at/below this HP fraction; weaken (a move) above it — but only
+# if the wild is big enough to survive a hit (we have no move-power data to pick a WEAK move, so the
+# chooser would one-shot a small wild and lose the catch). Small wilds are thrown at directly.
 CATCH_HP_BAND = 0.5
+CATCH_SMALL_MAX_HP = 30   # wilds with max HP <= this are thrown at directly (a hit would likely KO)
 
 CHOOSE_MOVE_INSTRUCTIONS = (
     "You are choosing the best move in a Pokémon Red battle. You are given both "
@@ -102,9 +105,15 @@ def choose_action(objective: str, state: dict) -> dict:
         ball = _first_ball(items)
         if ball is None:                        # no ball on hand -> keep fighting
             return {"kind": "move"}
-        if hp_frac(enemy) > CATCH_HP_BAND:      # too healthy -> weaken with a move first
-            return {"kind": "move"}
-        return {"kind": "ball", "item": ball}
+        if hp_frac(enemy) <= CATCH_HP_BAND:     # already in the catch band -> throw
+            return {"kind": "ball", "item": ball}
+        try:
+            enemy_max = int(enemy.get("max_hp") or 0)
+        except (TypeError, ValueError):
+            enemy_max = 0
+        if enemy_max and enemy_max <= CATCH_SMALL_MAX_HP:
+            return {"kind": "ball", "item": ball}   # a hit would likely KO -> throw instead of weakening
+        return {"kind": "move"}                     # big enough to survive weakening
 
     # GRIND-EXP and any unknown objective -> today's fight path.
     return {"kind": "move"}

@@ -99,6 +99,17 @@ def _wait_menu(emu: Emulator, tries: int = 8) -> bool:
     return menus.menu_open(emu)
 
 
+def _close_shop(emu: Emulator, tries: int = 8) -> None:
+    """Back out of any shop sub-menu to the overworld — press B until the counter menu is gone and no
+    menu is open. Used on EVERY exit path (success and failure) so we never leave a menu half-open for
+    the next loop step to re-enter (a not-sold item or an unaffordable qty otherwise stalls the counter)."""
+    for _ in range(tries):
+        if not at_shop_menu(emu) and not menus.menu_open(emu):
+            return
+        menus.cancel(emu)
+        emu.tick(12)
+
+
 def shop_buy(emu: Emulator, item_name: str, qty: int, *, max_advance: int = 14) -> dict:
     """Buy `qty` of `item_name` from an open Mart counter. Deterministic keypress macro:
 
@@ -131,8 +142,7 @@ def shop_buy(emu: Emulator, item_name: str, qty: int, *, max_advance: int = 14) 
     shop = read_shop_list(emu)
     idx = resolve_shop_index(shop, item_name)
     if idx is None:
-        menus.cancel(emu)
-        menus.cancel(emu)
+        _close_shop(emu)
         return {"ok": False, "reason": f"{item_name!r} not sold here",
                 "shop": [s["item"] for s in shop]}
 
@@ -158,17 +168,17 @@ def shop_buy(emu: Emulator, item_name: str, qty: int, *, max_advance: int = 14) 
             break
         menus.advance(emu)
     if not confirmed:
+        # Insufficient funds (or the qty was rejected) — no YES/NO ever appeared. Back all the way
+        # out so the next loop step doesn't re-enter a half-open counter (#4).
+        _close_shop(emu)
         return {"ok": False, "reason": "no purchase confirmation appeared"}
 
     # 7) advance the "Here you are! Thank you!" text until the item list is interactive again,
-    #    then B back through the item list and root menu to leave the shop (SEE YA / QUIT).
+    #    then back out through the item list and root menu to leave the shop (SEE YA / QUIT).
     for _ in range(max_advance):
         emu.tick(6)
         if menus.cursor_pos(emu) is not None:
             break
         menus.advance(emu)
-    menus.cancel(emu)   # item list -> root BUY/SELL/QUIT
-    emu.tick(10)
-    menus.cancel(emu)   # root -> close the counter
-    emu.tick(20)
+    _close_shop(emu)   # item list -> root -> close the counter (every exit path funnels here, #3)
     return {"ok": True, "item": item_name, "qty": qty, "index": idx}

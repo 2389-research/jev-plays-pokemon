@@ -1553,14 +1553,22 @@ class ReasoningLoop:
             return None
         mode_before = detect_mode(emu)
         res = shop_macro.shop_buy(emu, item, qty)
+        ok = bool(res.get("ok"))
         self.on_event("shop_buy", {"step": self.session.step, "item": item, "qty": qty, "result": res})
+        if not ok:
+            # A definitive failure (item not on this shelf, can't afford) will NOT self-resolve — the
+            # has_item goal can never be met here, so re-firing the macro every step would thrash the
+            # counter. Wedge the step so L1 drops/replaces it (e.g. picks a Mart that stocks the item),
+            # and force a re-plan.
+            self._mark_step(d.quest_id, "wedged", reason=f"can't buy {item} here: {res.get('reason')}")
+            self._force_reflect = True
         from ..core.models import WaitAction
         rstep = ReasonStep(location="mart", objective=f"buy {qty}x {item}",
                            reasoning=f"SHOP macro: {res.get('reason', 'purchased')}",
                            action=WaitAction(frames=1))
         self._prev = rstep
         self._emit_reason(rstep, 0)
-        result = ActionResult(success=bool(res.get("ok")), result="completed",
+        result = ActionResult(success=ok, result="completed" if ok else "blocked",
                               mode_before=mode_before, mode_after=detect_mode(emu),
                               detail=f"shop_buy {item} x{qty}: {res.get('reason', 'ok')}")
         return self._finish(obs, rstep, result, 0, {}, shot)

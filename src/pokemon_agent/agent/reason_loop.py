@@ -1513,15 +1513,26 @@ class ReasoningLoop:
 
     @staticmethod
     def _shop_item_qty(directive: Directive) -> tuple[str | None, int]:
-        """What to buy for a SHOP directive: the item NAME and quantity, from the directive's
-        target ({item, qty}) or, failing that, a ``has_item:<name>`` success predicate (qty 1)."""
+        """What to buy: the item NAME and quantity, from the directive's target ({item, qty}) or the
+        ``has_item:<X>`` success predicate. NOTE: a parsed has_item predicate stores the item as an
+        integer ID (resolve_item_id), so map it back to a NAME here — the shop macro matches names/ids
+        against the live shelf and a bare numeric string matches nothing."""
+        from ..games.pokemon_red.constants import ITEMS
         tgt = directive.target or {}
-        item = tgt.get("item") or (directive.success or {}).get("has_item")
+        raw = tgt.get("item")
+        if raw is None:
+            raw = (directive.success or {}).get("has_item")
+        if isinstance(raw, int):
+            item = ITEMS.get(raw)
+        elif isinstance(raw, str) and raw.isdigit():
+            item = ITEMS.get(int(raw))
+        else:
+            item = str(raw) if raw else None
         try:
             qty = max(1, int(tgt.get("qty") or 1))
         except (TypeError, ValueError):
             qty = 1
-        return (str(item) if item else None), qty
+        return item, qty
 
     def _maybe_shop(self, obs, shot) -> ActionResult | None:
         """When the Mart's BUY/SELL/QUIT counter menu is open AND the active directive names an item

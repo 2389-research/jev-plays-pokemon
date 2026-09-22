@@ -1858,7 +1858,8 @@ class ReasoningLoop:
         conf = 0.0
         if client is not None:
             slot, conf = battle_agent.choose_move(client, emu,
-                                                  type_knowledge=self._battle_type_knowledge(emu))
+                                                  type_knowledge=self._battle_type_knowledge(emu),
+                                                  capture=getattr(self, "capture", None))
         else:
             slot = 0
         r = battle.use_move(emu, slot)

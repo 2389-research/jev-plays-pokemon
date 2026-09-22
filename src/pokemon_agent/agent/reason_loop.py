@@ -698,6 +698,18 @@ class ReasoningLoop:
     def _propose_target(self, obs, directive, default, *, stuck) -> dict:
         """Ask the mid-level proposer for the typed target (folding reflection: its note becomes the
         visible short-term objective). Deterministic default when offline. Never None."""
+        # Ground-truth PortalGraph waypoint: for a cross-map hop the graph covers, head straight to
+        # the EXACT next portal tile (deterministic) instead of asking the LLM proposer, which
+        # oscillated at gates. This is what actually crosses Viridian Forest toward Pewter.
+        tmap0 = directive.target_map if directive is not None else None
+        portal = self._portal_next(obs.player, tmap0) if (tmap0 is not None and obs.player is not None) else None
+        if portal is not None:
+            cx, cy = int(portal["coord"][0]), int(portal["coord"][1])
+            self.on_event("portal_hop", {"step": self.session.step, "from_map": obs.player.map_id,
+                                         "to_map": portal["dest_map"], "coord": [cx, cy],
+                                         "goal_map": int(tmap0)})
+            return {"kind": "tile", "x": cx, "y": cy, "portal": True,
+                    "note": f"portal toward {map_name(portal['dest_map'])}"}
         prov = getattr(self.planner, "provider", None) if self.planner else None
         if prov is None:
             return default
@@ -1218,27 +1230,6 @@ class ReasoningLoop:
         tmap = directive.target_map
         if tmap is None or player.map_id == tmap:
             return None
-
-        # 2a. Ground-truth PortalGraph hop: route straight to the EXACT next portal tile toward the
-        # goal (knows gates/buildings the coarse WorldGraph misses — e.g. crossing Viridian Forest
-        # to Pewter). We use the portal's own coordinate rather than matching live exits by dest_map,
-        # because gate return-doors report a dynamic 0xFF destination at runtime.
-        portal = self._portal_next(player, tmap)
-        if portal is not None:
-            coord = (int(portal["coord"][0]), int(portal["coord"][1]))
-            self.on_event("portal_hop", {"step": self.session.step, "from_map": player.map_id,
-                                         "to_map": portal["dest_map"], "coord": list(coord),
-                                         "goal_map": int(tmap)})
-            if (player.x, player.y) != coord:
-                mv = self._bfs_move(player, coord, interact=False,
-                                    blocked_dirs=blocked_dirs, occupied=occupied)
-                if mv is not None:
-                    return mv
-            else:  # on the portal tile: warps fire on-step; an edge/doormat tile needs a step OFF
-                d = self._warp_exit_dir(coord, obs.map_dims)
-                if d is not None and d.value not in blocked_dirs:
-                    return MoveAction(direction=d)
-            # portal known but couldn't move toward it -> fall through to the coarse logic / residual
 
         hop = self.memory.graph.next_hop(player.map_id, tmap)
         if hop is None:

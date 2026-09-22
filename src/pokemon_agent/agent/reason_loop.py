@@ -1236,7 +1236,16 @@ class ReasoningLoop:
         comp = pg.component_at(player.map_id, player.x, player.y, walk)
         if comp is None:
             return None
-        return pg.next_portal(player.map_id, comp, int(tmap))
+        portal = pg.next_portal(player.map_id, comp, int(tmap))
+        # A warp can sit on a NON-walkable door tile (you cannot step onto it — the move just fails).
+        # When the chosen portal's tile isn't walkable, prefer a sibling warp to the same destination
+        # whose tile IS walkable (e.g. the south gate has (4,0) unwalkable + (5,0) walkable -> forest).
+        if portal is not None and walk and tuple(portal["coord"]) not in walk:
+            sibs = [p for p in pg.portals_on(player.map_id)
+                    if p["dest_map"] == portal["dest_map"] and tuple(p["coord"]) in walk]
+            if sibs:
+                portal = sibs[0]
+        return portal
 
     def _servo_step(self, directive: Directive, obs, blocked_dirs: set[str]):
         """The deterministic servo: one concrete step toward ``directive.target`` (LLM+P),

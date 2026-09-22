@@ -55,25 +55,23 @@ Two link types:
 
 This supersedes the map-node `WorldGraph` for cross-map routing. `WorldGraph`'s existing `add_warp`/`observe_exits` (live RAM warp ingestion) remain as the runtime refinement/validation layer; the portal graph is the authored ground-truth spine.
 
-## 4. Build pipeline (deterministic RAM harvest → Orrery)
+## 4. Build pipeline (static pull from pokered/ROM → validate with RAM → Orrery)
 
-**Primary method — harvest from RAM (self-contained, uses validated readers, incremental).** A harvester script (`scripts/harvest_portals.py`) that, for each map, loads a save state and reads ground truth:
+**Primary source = the pokered disassembly (static, complete, no traversal required).** This is the only source consistent with "complete map from step 0": it has every map's data whether or not the agent has ever been there. A parser (`scripts/rip_portals.py`) reads, per map:
 
-1. `state.read_exits(emu)` → **warp portals** with exact coords + `dest_map` (RAM `wWarpEntries`). Pairing to the destination portal needs the **destination warp index** at `wWarpEntries+2`, which `read_exits` does not currently return — the harvester reads that byte itself (or pairs by matching the dest map's warp coords). Pairing may require loading the dest map's warp table.
-2. `map_reader.read_collision_map(emu)` → the **full current-map walkable set** (whole map, not just the screen; already validated 100% on Pallet).
-3. **Connected components** of the walkable set → the "mutually walkable on foot" portal sets (the coarse-node fix; emergent from geometry). Every portal on a map is tagged with the id of the walkable component its tile sits in; two portals are `walk_reachable` iff same component.
-4. `map_graph_data.CONNECTIONS` → **edge portals** (border → adjacent map). **Representative-tile rule (crux):** for a connection on a given border, the edge portal's `coord` is a *walkable* tile on that border; if the border's walkable tiles span more than one component, emit **one edge portal per component** (each in its own component). This is what makes the Route-2 case correct: the north-edge→Pewter portal lands only in Route-2's north component and is therefore unreachable from the south component — no shortcut. Pick a deterministic representative (e.g. the median walkable tile of that border-segment within the component).
+1. `data/maps/objects/*.asm` → **warp portals** `(map, x, y, dest_map, dest_warp_id)`; pair each to its destination portal via `dest_warp_id`. (`dest_map` of `0xFF` = dynamic "return to last map" — resolved contextually, excluded from static edges.)
+2. map headers / `constants/map_constants.asm` → **connections** (N/S/E/W → adjacent map). Same source as the existing `CONNECTIONS`.
+3. `maps/*.blk` + the tileset's blockset + `data/tilesets/*_collision.asm` → the **walkable grid** → connected components → the "mutually walkable on foot" sets. This is the same decode `map_reader.py` already performs from RAM, sourced from static files instead.
+4. **Edge portals + representative-tile rule (crux):** for a border connection, the edge portal's `coord` is a *walkable* tile on that border; if the border's walkable tiles span more than one component, emit **one edge portal per component**. This is what makes Route 2 correct — the north-edge→Pewter portal lands only in the north component, unreachable from the south component (empirically confirmed on the harvested map 13: south = comp 5, north edge/gate = comp 4).
 5. Emit portal records `{id, map, coord, kind, dest_map, dest_portal, label, component}`.
 
-**Harvest inputs already exist.** Every recorded run drops per-new-area save states; across existing runs we already have maps `0,1,12,13,37,38,39,40,41,42,43,44,50,51` (≈ the whole Brock corridor incl. interiors). Missing maps (Pewter = 2, forest North Gate, Route 22) are captured by one targeted run. Expanding the graph = adding a save state per new map.
+**RAM is the validation oracle, not the source.** `map_reader.read_collision_map` / `state.read_exits` (100%-validated on Pallet) check the parser's output for maps we happen to have save states for (`0,1,12,13,37..44,50,51`). This catches parser bugs; it does **not** gate coverage — Pewter (2), the forest North Gate (47), and every other map come straight from the static rip without visiting.
 
 **No coordinate or edge is produced by an LLM.** GLM is optional and only enriches the semantic layer (POI descriptions, region tags, friendly labels), reviewed before load.
 
-**Optional backfill (later, for completeness):** parse pokered `warp_events`/`connections`/`.blk` to fill maps we haven't visited. Not a dependency for the corridor.
+**Alternative source (self-contained fallback):** parse the ROM's own map-header/blockdata/tileset tables directly (same decode as the RAM reader, ROM-addressed) if we prefer not to depend on the pokered checkout.
 
-**Load into Orrery.** The harvested records are written to Orrery as entities (`Map`, `Portal`, `POI`) and relations (`warps_to`, `edge_connects`, `walk_reachable`, `has_coord`), workspace `6d677a16`. At run start the router loads a snapshot into the in-memory portal graph (cache); Orrery is the system of record and the KG L1 queries.
-
-**Validation gate:** each harvested map's warps/collision are checked against a live RAM read of that map before it is trusted (parser/harvester correctness), region by region.
+**Load into Orrery.** The ripped records are written to Orrery as entities (`Map`, `Portal`, `POI`) and relations (`warps_to`, `edge_connects`, `walk_reachable`, `has_coord`), workspace `6d677a16`. At run start the router loads a snapshot into the in-memory portal graph (cache); Orrery is the system of record and the KG L1 queries.
 
 ## 5. Representation surfaced to the agent
 

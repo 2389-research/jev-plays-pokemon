@@ -42,19 +42,23 @@ A capture record, one per decision, appended to `<record-dir>/decisions.jsonl`:
 - **Model-backed** (distill + decision-replay): `l1_brainstorm`, `l1_decide`, `l1_repair`, `l2_propose_target`, `l2_next_waypoint`, `jev_flow`, `jev_npc`, `jev_policy`, `battle_move`.
 - **Deterministic** (replay/attribution only): `battle_l2_objective`, `battle_choose_action`, `portal_next`, `servo_move`.
 
-**Hook point:** a small `Capture` helper the loop holds (like `on_event`). Model providers already return `(content, latency, usage)`; the layer methods that call them (`l1_decide`, `_propose_target`, `choose_flow`, `choose_move`, …) call `capture.record(layer, input=state, output_raw=content, parsed=…, confidence=…, tokens=…, latency=…)`. Deterministic layers call `capture.record(layer, input=…, output=…, kind="deterministic")`. The record is buffered per step and flushed to `decisions.jsonl`. **The input passed is exactly what the model/function consumed** — so it is a faithful, replayable example. No behavior change: capture is side-effecting logging only.
+**Hook placement (locked).** The hook goes INSIDE each layer method, at the point where `content`/`latency`/`usage` (and the input `state`) are still in scope — because these methods currently do `content, _, _ = prov.chat_json(...)` and return only a *parsed* dict, discarding tokens/latency/raw. So this is ~8 edits across `planner_llm.py` (`l1_brainstorm`, `l1_decide`, `l1_repair`, `l1_review`/`strategize`, `propose_target`, `next_waypoint`), `typesafe_reasoner.py` (`system_one`/`choose_flow` — expose `usage["confidence"]`/`probabilities`), and `battle_agent.choose_move` (capture the discarded raw `ans`) — NOT a wrap at return boundaries. Each calls `capture.record(layer, input=state, output_raw=content, parsed=…, confidence=…, tokens=…, latency=…)`. The `Capture` helper is held on the loop like `on_event` (a side-effect-only `_tee`), buffered per step, flushed to `decisions.jsonl`. **Correct layer sites:** `propose_target`/`next_waypoint` live in `planner_llm.py` (the loop's `_propose_target` delegates to them). Deterministic layers call `capture.record(layer, input=…, output=…, kind="deterministic")` at their decision point.
+
+**Multi-round LLM loops (the one real subtlety).** `l1_brainstorm`/`l1_review`/`strategize` run through `_llm_with_search`, which can issue up to ~4 `chat_json` calls (KB-search rounds) per decision. Capture rule: emit **one record per decision** (the layer's final input → final parsed output) as the distillation/replay unit, with `tokens` = the sum across rounds and a `search_queries` list; ALSO emit the intermediate rounds as separate records sharing a `group_id` and their own `seq` (kind `"model_round"`) for analyzing the search behavior. Distillation/decision-replay use the decision record; the round records are optional detail.
+
+**The input passed is exactly what the model/function consumed** — a faithful, replayable example. No behavior change: capture is side-effecting logging only.
 
 ## 4. Outcome labeling
 
-- **Per step** — a progress vector computed from the log delta and attached to that step's decisions: `{bfs_dist_delta (toward goal, via PortalGraph), level_delta, items_delta, hp_delta, map_changed, battle_result, caught, wedged}`.
+- **Per step** — a progress vector attached to that step's decisions: `{map_hop_delta, level_delta, items_delta, hp_delta, map_changed, battle_result, caught, wedged}`. Note: `map_hop_delta` is the change in **`len(route(cur_map, cur_component, goal_map))`** — a MAP-HOP distance from PortalGraph (there is no scalar tile distance), so it's coarse (0 for moves within a map) and needs the current component; that's fine as a directional signal, but the labeler must know it's map-hop granularity.
 - **Per episode** — computed at run-end into `<record-dir>/outcome.json`: `{reached_goal_map, badges, caught_count, delivered, steps, terminal_reason}`, plus per-map arrival steps. Each decision record is joined to its episode outcome at export time (by `run_id`).
 
-Most signals are derivable from the existing `log.jsonl` + `PortalGraph`; the labeler is a pure post-processor over a record-dir (can run offline on past runs too).
+**Where the signals come from (grounding):** `map_changed`, `items_delta`, `hp_delta`, `level_delta` derive from `log.jsonl` (level/hp require parsing the party strings, formatted `"SPECIES L# hp/max"` — see the parse-contract note below). `badges`, `caught`, and `delivered` are NOT in the base per-step record — they come from the `events` stream / per-caller `extra`, so the labeler reads events, not just base fields (or we record structured party/flags in `extra` on capture runs to avoid lossy re-parsing). The labeler is a pure post-processor over a record-dir (runs offline on past runs too).
 
 ## 5. Replay anchors & the two replay modes
 
 - **Decision replay (no emulator):** the captured `input` is self-contained, so `replay --layer l2_propose_target --model <candidate>` feeds each stored input to a candidate model and diffs its output against the recorded one (and against the step's outcome). This is the eval harness for a distilled/candidate model — thousands of authentic decision points, ground-truthed.
-- **Behavioral replay (from a save state):** each decision's `anchor` is a loadable emulator state for that step. To make *any* point replayable we add **step-anchored saves** — a `state_every` (default e.g. 1 for a capture run, or N) writing `<record-dir>/states/step<NN>.state`, reusing the recorder's existing `_maybe_state`. Then `replay --from-step 341 --swap l2=<local model>` reloads that state and runs the agent forward with the swapped layer, to observe downstream effects. (Storage: step saves are ~160 KB each; a capture run trades disk for full replayability — gated by the capture flag.)
+- **Behavioral replay (from a save state):** each decision's `anchor` is a loadable emulator state for that step. To make *any* point replayable we add **step-anchored saves** via the recorder's existing periodic branch (`state_every=1` under `--capture distill`). NOTE the recorder writes `states/map{mid}_step{step}.state` (not `step<NN>.state`), so the `anchor` stores that exact path and the labeler/replay glob by step rather than assume a name; and the current `_maybe_state` guard skips a step whose `map_id` is null (rare, mid-warp) — those steps won't be behavior-replayable, which is acceptable. Then `replay --from-step 341 --swap l2=<local model>` reloads that state and runs the agent forward with the swapped layer, to observe downstream effects. (Storage: step saves are ~160 KB each; a capture run trades disk for full replayability — gated by the flag.)
 
 ## 6. Storage & delivery
 
@@ -74,6 +78,17 @@ Most signals are derivable from the existing `log.jsonl` + `PortalGraph`; the la
 - **Decision replay (integration):** feed a captured input back to the same model → parses to the same decision shape; a stub "candidate" diffs correctly.
 - **Behavioral replay (integration, ROM-guarded):** a step-anchored save reloads and the agent continues.
 - A short live `--capture distill` run produces a real `decisions.jsonl` + `outcome.json` + step saves to inspect.
+
+## 8a. Phasing (three deliverables — build in order)
+
+This is really three plans; land the first standalone (it's the risky "zero behavior change" surface):
+1. **Instrumentation core** — the `Capture` hook at the ~8 model sites + deterministic sites, the outcome labeler, and step-anchored saves. Ship + verify no behavior change before anything else.
+2. **`distill_export.py`** — per-layer datasets + filters.
+3. **Replay/eval harness** — decision-replay (`--layer/--model`) and behavioral-replay + the `--swap layer=model` interface (`L2Provider`-style). Meaningful chunk; does not block (1)/(2).
+
+**YAGNI:** deterministic-layer capture (§3) has no distillation payoff yet — implement it behind the same `--capture distill` flag (off by default) so the core stays lean.
+
+**Party parse contract (for the labeler):** party appears in the log as strings `"SPECIES L# hp/max"` (e.g. `"Squirtle L9 8/27"`). The labeler parses `L(\d+)` and `(\d+)/(\d+)` for level/hp; to avoid lossy re-parsing, capture runs SHOULD also write a structured party (`[{species, level, hp, max}]`) into the step `extra`.
 
 ## 9. Out of scope / open questions
 

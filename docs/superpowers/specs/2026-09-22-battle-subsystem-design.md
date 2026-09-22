@@ -47,6 +47,8 @@ Each turn Jev maps (objective, live state) → one action:
 - SURVIVE → `use_item(Potion)` or switch, else a defensive move.
 This extends today's `battle_agent.choose_move` into a `choose_action` returning a typed battle action.
 
+**Item disambiguation is a Jev decision, not string-matching.** Macros take a *chosen item* (a live-list index or an unambiguous id). When an intent maps to several candidates on the actual shelf/bag — "a ball" → Poké Ball / Great Ball / Ultra Ball, or a fuzzy/accented name — the macro surfaces the live candidates and **Jev picks one** (a calibrated choice); the macro then executes that index deterministically. No accent-folding or brittle name heuristics: mechanics stay deterministic, the fuzzy choice is the model's.
+
 ## 3. Menu mechanics (exact, from pokered) → macros
 
 All macros are deterministic keypress sequences on top of `menus.py`, each with a **RAM-checkable outcome**.
@@ -55,7 +57,7 @@ All macros are deterministic keypress sequences on top of `menus.py`, each with 
 - **`run()`** — battle menu → cursor to RUN → A. Outcome: `in_battle` false (if it succeeds; may fail and cost the turn).
 - **`use_item(item, target)`** — battle: ITEM → bag → item → target mon; overworld: START → ITEM → bag → item → target. Outcome: item count −1 and the effect (e.g. HP up for a Potion).
 - **`use_move(slot)`** — exists today; becomes the GRIND-EXP / weaken action.
-- **`buy(item, qty)`** (SHOP executor) — talk clerk → BUY → item list → item → quantity (UP ×qty) → YES → B → SEE YA. Outcome: item count +qty; money − qty×price.
+- **`buy(item, qty)`** (SHOP executor) — **IMPLEMENTED (Phase 1)**: talk clerk → BUY (root index 0) → resolve the item's index from the live shop list (RAM `wListPointer`) → quantity (UP ×(qty−1)) → YES → B/B out. Root menu is BUY/SELL/**QUIT** (not "SEE YA"). Outcome: item count +qty; money − qty×price. (Early Viridian shelf = Poké Ball/Antidote/Parlyz Heal/Burn Heal — no Potion — which confirms the runtime-lookup rule.)
 
 **Fixed vs. looked-up indices (important):** a menu's *structural* indices are constant and encoded in the macro, pinned by a fixture test (§5) — the 2×2 `FIGHT PKMN / ITEM RUN`, the `BUY/SELL/SEE YA` order, the `YES/NO` order. But the index of a *specific item* (the ball in `throw_ball`, the Potion in `use_item`, the item in `buy`) is **data-dependent** — bag order changes and lists can scroll past one screen — so it MUST be computed at runtime from the live bag / shop contents (`read_items` and the on-screen shop list), never hardcoded. Macros therefore take an item *name* and resolve its current index each call.
 

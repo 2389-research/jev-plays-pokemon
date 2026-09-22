@@ -12,7 +12,7 @@
 
 - Battle today is **fight-only.** `reason_loop._battle_turn` (dispatched at `step_once` when `ctx["in_battle"]`) advances intro text, then when the FIGHT menu is up calls `battle_agent.choose_move` + `battle.use_move`. There is **no ITEM, no RUN, no catch.** A wild battle can only end by fainting the enemy (or the player).
 - **No item/catch/shop task macros exist.** `menus.py` has only generic primitives (`select_option(index)`, `answer_yesno`, `advance`, `cancel`). The `SHOP` intent is target-bearing (routes to the Mart) but has **no buy executor** — it reaches the counter and flails.
-- **Live menu handling is per-step Jev.** The flow router sends `menu.open → Jev`, which picks options one step at a time with no notion of a multi-step task ("buy 3 Potions"). This is the exact fragility the heal *macro* fixed at the Poké Center counter.
+- **Live menu handling is per-step Jev.** The flow router sends `menu.open → Jev`, which picks options one step at a time with no notion of a multi-step task ("buy 3 Potions"). Healing works reliably today because it is expressed as a single decision (a `HEAL`→talk-the-nurse directive with `done_when hp_frac>=0.95` + counter-bump/advance-dialog handling) rather than Jev flailing at the counter — the same *macro-like reliability from one decision* we want here. Note the nurse is a yes/no; the Mart `buy` flow (BUY→list→quantity→YES) is materially more complex and is genuinely new mechanics, not "already solved."
 - L1 already reasons correctly about these needs ("catch a Pidgey for backup", "buy Potions before the gym", "grind to L12"); it just has no mechanism to carry them out.
 
 **Design principle (validated on navigation):** separate the DECISION (what/when — L1/Jev) from the MECHANICS (the exact keypress sequence — deterministic macro). Per-step LLM choosing through a fixed menu flow is fragile; a macro parameterized by a single decision is reliable.
@@ -27,7 +27,7 @@
 | pathfinder / servo | **macros** (throw_ball / use_item / run / use_move / buy) | mechanics |
 
 ### 2.1 What fires `battle_L2` (control flow — the crux)
-`battle_L2` runs **once on the battle-start transition** (`in_battle` false→true, detectable in `_battle_turn` by caching the last `in_battle`), NOT every turn. It reads L1's standing goals + the encounter (species, level, is-trainer-vs-wild, our party/HP/items) and sets ONE **battle objective**, cached for the fight. It re-evaluates ONLY on real triggers:
+`battle_L2` runs **once on the battle-start transition** (`in_battle` false→true, detectable by caching the last `in_battle` on the loop — a new instance attr, absent today), NOT every turn. **Ordering matters:** the edge-detect + objective-set must sit ABOVE `_battle_turn`'s intro-text / `fight_menu_showing` early-return, so the objective is set at the start of the encounter (during intro text) — not only after the menu first appears, which a very short intro could skip. It reads L1's standing goals + the encounter (species, level, is-trainer-vs-wild, our party/HP/items) and sets ONE **battle objective**, cached for the fight. It re-evaluates ONLY on real triggers:
 - our active mon drops to critical HP → re-eval (may flip to SURVIVE or ESCAPE);
 - (CAPTURE) the target reaches a catchable HP band → Jev throws.
 
@@ -57,7 +57,7 @@ All macros are deterministic keypress sequences on top of `menus.py`, each with 
 - **`use_move(slot)`** — exists today; becomes the GRIND-EXP / weaken action.
 - **`buy(item, qty)`** (SHOP executor) — talk clerk → BUY → item list → item → quantity (UP ×qty) → YES → B → SEE YA. Outcome: item count +qty; money − qty×price.
 
-Exact cursor indices per menu are encoded in the macro and pinned by a fixture test (§5), never inferred at runtime.
+**Fixed vs. looked-up indices (important):** a menu's *structural* indices are constant and encoded in the macro, pinned by a fixture test (§5) — the 2×2 `FIGHT PKMN / ITEM RUN`, the `BUY/SELL/SEE YA` order, the `YES/NO` order. But the index of a *specific item* (the ball in `throw_ball`, the Potion in `use_item`, the item in `buy`) is **data-dependent** — bag order changes and lists can scroll past one screen — so it MUST be computed at runtime from the live bag / shop contents (`read_items` and the on-screen shop list), never hardcoded. Macros therefore take an item *name* and resolve its current index each call.
 
 ## 4. Integration & new capabilities
 
@@ -90,5 +90,5 @@ Every macro has a RAM-checkable outcome, so tests are deterministic assertions, 
 
 1. **How L1 expresses battle goals** — a structured `battle_goals` field (e.g. `{"catch": ["Pidgey"], "conserve": ["Poke Ball"]}`) on the plan vs. free-text the battle_L2 parses. Recommend structured, small.
 2. **Weaken policy for CAPTURE** — a fixed HP band + status preference, or a Jev calibrated choice. Start fixed; make it Jev if needed.
-3. **Balls/items in RAM** — confirm the bag-item and money read paths (item list at `wBagItems`, money BCD) for the outcome checks; add readers if missing.
+3. **Balls/items in RAM** — RESOLVED: the readers already exist and are sufficient. `game_state.read_items` (WBAGITEMS 0xD31E → ordered `{item, qty}`), `read_money` (BCD 0xD347), `read_party`, `read_battle` (enemy species/HP/level), and `predicates` already supports `has_item` / `money`. No new readers needed — planning should budget zero for them; the macros both *drive* menus via these (runtime item-index lookup, §3) and *verify* outcomes via them.
 4. **Safari Zone** — a different battle menu (no FIGHT); out of scope for the Brock run, note for later.

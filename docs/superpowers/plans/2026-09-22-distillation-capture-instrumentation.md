@@ -220,6 +220,11 @@ git commit -m "distill: Capture helper — per-decision buffer + decisions.jsonl
 
 The labeler is a pure post-processor over a finished record-dir (`log.jsonl` + `decisions.jsonl`). Per spec §4: per-step progress vector + per-episode `outcome.json`. Party is parsed from the log strings `"SPECIES L# hp/max"` (spec "party parse contract").
 
+**Grounding warning (verified against the real recorder).** The base `log.jsonl` does NOT contain a `caught` event, a `battle_end.result`, or a `deliver` intent — spec §4 flagged this. So derive from signals that ARE persisted:
+- **caught** = the party list grew vs the previous step (the recorder writes `party` every step). This is the robust log-only catch signal; use it for `caught_count`.
+- **battle_result** / **delivered** are best-effort: parse the persisted `detail` string, and (for capture runs) prefer structured flags written into the step `extra`. Mark them best-effort in Phase 1; a clean structured emission is a small follow-up, not a blocker.
+The map-derived fields (`reached_goal_map`, `map_arrival_steps`, `steps`) come from real `map_id`/`step` log fields and are exact.
+
 - [ ] **Step 1: Write the failing test**
 
 ```python
@@ -239,18 +244,19 @@ def test_step_progress_deltas():
 
 
 def test_label_run_writes_outcome(tmp_path):
+    # Rows mirror the REAL recorder schema: party/items/map_id/step are top-level; a catch is a
+    # party-length increase (there is no synthetic "caught" event in log.jsonl).
     log = tmp_path / "log.jsonl"
     rows = [
         {"step": 0, "map_id": 1, "party": ["Squirtle L5 18/18"], "items": [], "events": []},
-        {"step": 1, "map_id": 1, "party": ["Squirtle L6 20/20"], "items": ["Potion"],
-         "events": [{"kind": "battle_end", "result": "win"}]},
+        {"step": 1, "map_id": 1, "party": ["Squirtle L6 20/20"], "items": ["Potion"], "events": []},
         {"step": 2, "map_id": 2, "party": ["Squirtle L6 20/20", "Pidgey L4 12/12"],
-         "items": ["Potion"], "events": [{"kind": "caught", "species": "Pidgey"}]},
+         "items": ["Potion"], "events": []},   # party grew 1 -> 2  => a catch
     ]
     log.write_text("\n".join(json.dumps(r) for r in rows))
     out = label_run(tmp_path, goal_map=2)
     assert out["reached_goal_map"] is True
-    assert out["caught_count"] == 1
+    assert out["caught_count"] == 1            # detected from party growth
     assert out["steps"] == 3
     assert (tmp_path / "outcome.json").exists()
     # per-map arrival step recorded
@@ -297,10 +303,13 @@ def step_progress(prev: dict | None, cur: dict) -> dict:
     so it is left out here (added by the export join when available) — this is the log-only
     directional signal."""
     prev = prev or {}
-    plvl, php = _party_level_hp(prev.get("party") or [])
-    clvl, chp = _party_level_hp(cur.get("party") or [])
+    p_party, c_party = prev.get("party") or [], cur.get("party") or []
+    plvl, php = _party_level_hp(p_party)
+    clvl, chp = _party_level_hp(c_party)
     events = cur.get("events") or []
     kinds = {e.get("kind") for e in events}
+    # battle_result is best-effort: the base log's battle_end event carries no result key, so this
+    # is None on real logs unless a structured flag is added later. Kept for forward-compat.
     battle = next((e.get("result") for e in events if e.get("kind") == "battle_end"), None)
     return {
         "map_changed": prev.get("map_id") != cur.get("map_id") and prev != {},
@@ -308,7 +317,7 @@ def step_progress(prev: dict | None, cur: dict) -> dict:
         "hp_delta": chp - php,
         "items_delta": len(cur.get("items") or []) - len(prev.get("items") or []),
         "battle_result": battle,
-        "caught": "caught" in kinds,
+        "caught": len(c_party) > len(p_party),   # party grew => a catch (log-only signal)
         "wedged": any(k in kinds for k in ("step_wedged", "quest_step_wedged")),
     }
 
@@ -331,10 +340,12 @@ def label_run(record_dir: str | Path, *, goal_map: int | None = None,
     caught = 0
     arrivals: dict[str, int] = {}
     reached = False
+    prev_party = None
     for r in rows:
-        for e in (r.get("events") or []):
-            if e.get("kind") == "caught":
-                caught += 1
+        party_n = len(r.get("party") or [])
+        if prev_party is not None and party_n > prev_party:
+            caught += party_n - prev_party      # a catch => the party grew (log-only signal)
+        prev_party = party_n
         mid = r.get("map_id")
         if mid is not None and str(mid) not in arrivals:
             arrivals[str(mid)] = r.get("step")
@@ -344,8 +355,8 @@ def label_run(record_dir: str | Path, *, goal_map: int | None = None,
         "reached_goal_map": reached,
         "goal_map": goal_map,
         "caught_count": caught,
-        "delivered": any(e.get("kind") == "directive_done" and e.get("intent") == "deliver"
-                         for r in rows for e in (r.get("events") or [])),
+        # best-effort in Phase 1 (no clean persisted signal): parse detail, else structured extra.
+        "delivered": any("deliver" in str(r.get("detail") or "").lower() for r in rows),
         "steps": len(rows),
         "terminal_reason": terminal_reason,
         "map_arrival_steps": arrivals,
@@ -446,6 +457,8 @@ In `_finish`, immediately after the `self.recorder.record(...)` call (~1741):
 self.capture.flush()
 ```
 
+**Flush-coverage hazard (must verify).** `begin_step` resets the per-step buffer, and `flush()` fires only in `_finish`. If ANY `step_once` return path bypasses `_finish`, that step's buffered records are silently dropped at the next `begin_step`. Before finishing this task, trace every `step_once` exit (battle turn, `_advance_dialog`/dialog paths, `_jev_turn`, servo, `_safe_flow`, early returns) and confirm each funnels through `_finish`. If any does not, either route it through `_finish` or move the flush to a single central point that always runs at end-of-step (e.g. a `try/finally` around the `step_once` body). Add a quick assertion-style check: run a demo for K steps with `--capture decisions` and confirm `decisions.jsonl` has records spanning the full step range, not gaps.
+
 At run-end (the `finally` that saves the resume checkpoint — search `save_resume_checkpoint`), add:
 
 ```python
@@ -522,21 +535,27 @@ Expected: FAIL — no `l2_propose_target` record.
 
 - [ ] **Step 3: Implement — the record pattern at each site**
 
-The uniform edit: change `content, _, _ = prov.chat_json(SYS, state)` to keep all three, then record after parsing. Example for `l1_decide` (561):
+The uniform edit: change `content, _, _ = prov.chat_json(SYS, state)` to keep all three, then record after parsing. **`chat_json` returns `(raw_content, latency_ms, usage)`** — the 2nd element is latency, the 3rd is the usage dict (token counts live inside it). Do NOT confuse them. Example for `l1_decide` (561):
 
 ```python
-content, _tok, _usage = prov.chat_json(DECIDE_SYSTEM, state)
+content, _lat, _usage = prov.chat_json(DECIDE_SYSTEM, state)
 # ... existing parse into `result` ...
 cap = getattr(self, "capture", None)
 if cap is not None:
+    _tok = _usage.get("total_tokens", 0) if isinstance(_usage, dict) else 0
     cap.record("l1_decide", model=getattr(prov, "model", None),
                input=state, output_raw=content, parsed=result,
-               tokens=_tok, latency_ms=_usage.get("latency_ms", 0) if isinstance(_usage, dict) else 0,
-               extra={"tokens_usage": _usage})
+               tokens=_tok, latency_ms=_lat, extra={"usage": _usage})
 return result
 ```
 
+**Confirm the usage token key** against a live LunaRoute response before relying on it (`total_tokens` is the expected key; if the dict nests it, e.g. `usage["usage"]["total_tokens"]`, adjust). The Task 4 test's `_Prov` returns `(content, 55, {"total_tokens": 120})` and asserts `tokens==120, latency_ms==55`, so this extraction is what makes it pass.
+
 Apply the same shape (distinct `layer` string) to: `l1_triage` → `"l1_triage"`, `l1_repair` → `"l1_repair"`, `next_waypoint` → `"l2_next_waypoint"`, `propose_target` → `"l2_propose_target"`. Use the method's real input `state`/`s` variable as `input=` and its parsed return as `parsed=`. **Do not** move the `return`; record just before it.
+
+**Multiple return points (`propose_target` has ~5: tile/enter/approach_npc/exit/unresolved; `next_waypoint` has a retry loop).** Record ONCE per call, capturing the winning `content`/latency/tokens from the `chat_json` that produced the returned target. Cleanest: bind `content, _lat, _usage` from the model call into locals, build the resolved dict, then record right before the single terminal `return` — refactor multiple returns into one resolved-dict return if that's simpler than recording at each exit. A call that returns without any model call (early cache/short-circuit) should record nothing.
+
+**Also confirm `revise_quests` (planner_llm.py:439).** It runs `_llm_with_search` with `L1_SYSTEM` and is a model site. Check whether the live loop's L1 path (`l1_pipeline.run_l1_pipeline`) calls `revise_quests` or the triage→brainstorm→decide pipeline. If `revise_quests` is on the live path, instrument it as a multi-round site in Task 5 (`layer="l1_revise"`); if it's dead code on the current path, note that and skip.
 
 - [ ] **Step 4: Run to verify it passes + full suite**
 
@@ -569,19 +588,25 @@ from pokemon_agent.logging.capture import Capture
 from pokemon_agent.agent.planner_llm import Planner
 
 
+class _Knowledge:               # stub KB so _llm_with_search treats a "search" list as a round
+    def query_texts(self, queries, k=3): return ["(kb result)"]
+
+
 class _SearchProv:
     def __init__(self): self.n = 0
     def chat_json(self, system, user, image=None):
         self.n += 1
+        # A round is ONLY triggered when the parsed "search" is a non-empty LIST and knowledge is set
+        # (planner_llm.py:385-386). A string does NOT trigger it.
         if self.n == 1:
-            return ('{"search":"where is Brock"}', 30, {})   # a KB-search round
-        return ('{"assessment":"go north","change":true}', 40, {})  # final
+            return ('{"search": ["where is Brock"]}', 30, {"total_tokens": 10})   # KB-search round
+        return ('{"assessment":"go north","change":true}', 40, {"total_tokens": 20})  # final
 
 
 def test_brainstorm_emits_one_decision_plus_rounds(tmp_path):
     cap = Capture(tmp_path, mode="distill"); cap.begin_step(9, None)
     p = Planner(goal_map=2, level_target=0, reflector=None,
-                provider=_SearchProv(), strategist=_SearchProv(), knowledge=None)
+                provider=_SearchProv(), strategist=_SearchProv(), knowledge=_Knowledge())
     p.capture = cap
     # drive l1_brainstorm (or _llm_with_search directly) so it does >=1 search round + a final
     p.l1_brainstorm(emu=None, context={"player": {"x": 1, "y": 1}})
@@ -590,7 +615,8 @@ def test_brainstorm_emits_one_decision_plus_rounds(tmp_path):
     decisions = [r for r in recs if r["layer"] == "l1_brainstorm" and r["kind"] == "model"]
     rounds = [r for r in recs if r["kind"] == "model_round"]
     assert len(decisions) == 1
-    assert decisions[0]["tokens"] >= 0
+    assert decisions[0]["tokens"] == 30              # sum of round(10) + final(20)
+    assert len(rounds) >= 1                           # the search round WAS emitted
     assert all(r["group_id"] == decisions[0]["group_id"] for r in rounds)
 ```
 
@@ -636,7 +662,7 @@ from pokemon_agent.logging.capture import Capture
 class _Ans:
     choice = "up"; confidence = 0.83; probabilities = {"up": 0.83, "down": 0.17}
 class _Resp:
-    answers = {"policy": _Ans()}
+    answers = {"pol": _Ans()}   # choose_policy reads resp.answers["pol"] (NOT "policy")
 class _Client:
     def system_one(self, state, questions): return _Resp()
 
@@ -665,19 +691,27 @@ Expected: FAIL.
 
 - [ ] **Step 3: Implement — the Jev record pattern**
 
-At each site, after `ans = resp.answers[key]` and the confidence/probabilities reads:
+This is **pseudocode, not a copy-paste block** — the answer key, the confidence local, and the presence of a `latency` local differ per method. Adapt at each site:
+
+Layer names align with spec §3 (`jev_flow`, `jev_npc`, `jev_policy`), plus `jev_action`/`jev_path` for the two sites the spec's list doesn't enumerate:
+- `step` (158): the executor action Choice — key `"action"`, has `confidence` + `latency` locals; layer **`"jev_action"`** (it is the per-step action chooser, distinct from the dialogue-flow router). **NB the recorded raw `choice` can differ from the executed action** (SAYCAN `option_bias` re-rank ~234, low-conf→wait gate ~249): record `parsed={"choice": ans.choice}` as the decision target, and add `extra={"executed": <the final action kind/label>}` so replay can see both. `step`'s early menu branch (`_menu_step`, return ~201) is a separate site — record it there too or note it's uncaptured.
+- `path_step` (278): layer **`"jev_path"`**; use its own answer key + confidence local.
+- `choose_policy` (374): key `"pol"`, confidence local is **`conf`** (not `confidence`), and there is **no `latency` local** (pass `latency_ms=0`); layer **`"jev_policy"`**.
+- `choose_flow` (334): the dialogue/menu flow router — layer **`"jev_flow"`** (matches spec). Returns a dict of **two** answers (`dialogue`, `menu`) via `resp.answers.get(name)`, each with its own confidence — there is no single `ans`. Record the combined `out` dict (or emit one record per sub-answer).
+- `choose_npc` (invoked at `reason_loop.py:1090`): layer **`"jev_npc"`** (spec §3).
+
+General shape (adjust the names):
 
 ```python
 cap = getattr(self, "capture", None)
 if cap is not None:
-    cap.record("jev_policy",  # or jev_flow / jev_path / jev_menu
-               model=getattr(self.client, "model", "typesafe"),
+    cap.record(LAYER, model=getattr(self.client, "model", "typesafe"),
                input=state, output_raw=str(ans.choice), parsed={"choice": ans.choice},
-               confidence=confidence, latency_ms=locals().get("latency", 0),
+               confidence=conf, latency_ms=lat_or_0,
                extra={"probabilities": getattr(ans, "probabilities", None)})
 ```
 
-Layers: `step` → `"jev_flow"`, `path_step` → `"jev_path"`, `choose_policy` → `"jev_policy"`, `choose_flow` → `"jev_menu"`. Record just before each method's `return`; do not alter the returned value.
+Record just before each method's `return`; never alter the returned value.
 
 - [ ] **Step 4: Run to verify it passes + suite**
 
@@ -745,14 +779,16 @@ recorder = RunRecorder(emu, rec_dir, state_every=state_every)
 
 And pass `capture_mode=args.capture` into `ReasoningLoop(...)`.
 
-- [ ] **Step 3:** Manually verify `--capture off` is the default and a normal run is byte-for-byte unchanged (no `decisions.jsonl` written). Run a 5-step demo:
+**Wiring caveat (verified):** capture only exists under `--mode reason` — the recorder (line 253) and `ReasoningLoop` (line 256) are built inside `if args.mode == "reason":`. The default `--mode plan-act` builds neither, so `--capture` is a **no-op** there. `--mode reason` also forces `--provider lunaroute` (line ~149), so a fully-offline CLI demo of capture isn't possible; use a real provider (or rely on Task 10 Step 1's in-process mock-provider invariance test, which does not go through the CLI). Add a one-line help note on the flag that it applies only to `--mode reason`.
+
+- [ ] **Step 3:** Manually verify `--capture off` (default) writes NO `decisions.jsonl`, and `--capture decisions` does. Use `--mode reason` (short run, real provider):
 
 ```bash
-uv run python scripts/run_agent.py --demo --steps 5            # no decisions.jsonl
-uv run python scripts/run_agent.py --demo --steps 5 --capture decisions   # decisions.jsonl appears
+uv run python scripts/run_agent.py --mode reason --steps 5 --goal-map 12    # default: no decisions.jsonl
+uv run python scripts/run_agent.py --mode reason --steps 5 --goal-map 12 --capture decisions   # decisions.jsonl appears
 ```
 
-Expected: first run's record-dir has NO `decisions.jsonl`; second run's does.
+Expected: first run's record-dir has NO `decisions.jsonl`; second run's does. (If offline, skip this manual step and rely on Task 10.)
 
 - [ ] **Step 4: Commit** — `git commit -m "distill: --capture {off,decisions,distill} flag + step-anchored saves"`
 
@@ -804,4 +840,6 @@ def test_capture_does_not_change_actions(tmp_path):
 - The action sequence is provably identical with capture on vs off (Task 10 Step 1).
 - Full test suite green.
 
-**Follow-on (separate plans, not this one):** Phase 2 `scripts/distill_export.py` (per-layer datasets + filters); Phase 3 replay/eval harness (`replay --layer/--model`, behavioral replay from anchors, `--swap layer=model`).
+**Deferred to Phase 2 (noted, not a Phase-1 gap):** the per-step progress vector (`step_progress`) is implemented + unit-tested here but is **joined onto each step's decisions at export time**, not persisted per-step in Phase 1 (spec §4 "attached to that step's decisions" is realized by the export join). `label_run` writes only the episode-level `outcome.json` in Phase 1.
+
+**Follow-on (separate plans, not this one):** Phase 2 `scripts/distill_export.py` (per-layer datasets + filters + the per-step progress join); Phase 3 replay/eval harness (`replay --layer/--model`, behavioral replay from anchors, `--swap layer=model`).

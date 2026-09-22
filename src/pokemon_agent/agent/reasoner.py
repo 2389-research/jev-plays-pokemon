@@ -196,6 +196,9 @@ class Reasoner:
         targets: list[dict] | None = None,
         route_hint: str | None = None,
         blocked_dirs: set[str] | None = None,
+        directive=None,   # accepted (ignored) for interface parity with TypeSafeReasoner.step, so the
+                          # shared _jev_turn menu path works under --decider llm (Jev uses directive; the
+                          # generative reasoner reasons from game_state/targets instead).
     ) -> tuple[ReasonStep, int, dict]:
         user = {
             "primary_goal": primary_goal,

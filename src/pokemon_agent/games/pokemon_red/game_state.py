@@ -187,6 +187,22 @@ def _uppercase_run(emu: Emulator, addr: int, length: int) -> bool:
     return any(0x80 <= emu.read_memory(addr + i) <= 0x99 for i in range(length))
 
 
+def decode_textbox_raw(emu: Emulator) -> str:
+    """The letters decoded from the bottom text-box region (rows 12-17), WITHOUT any dialog/no-dialog
+    classification — just the raw ≥3-alpha lines joined. Empty => no text at all. The Jev flow router
+    feeds THIS to the model (so it sees an all-lowercase line the has_upper heuristic would zero); the
+    model, not a string heuristic, decides whether it's a dialogue box or a background-picture blob."""
+    try:
+        lines = []
+        for row in range(12, 18):
+            s = _decode(emu, WTILEMAP + row * 20, 20, stop_at_terminator=False).strip()
+            if sum(c.isalpha() for c in s) >= 3:
+                lines.append(s)
+        return " ".join(lines).strip()
+    except Exception:
+        return ""
+
+
 def read_screen_text(emu: Emulator) -> tuple[str, bool]:
     """Decode the on-screen textbox region into text, and whether a real dialog/menu
     is active. Text boxes occupy the bottom rows (12-17). A row counts as text only
@@ -205,7 +221,16 @@ def read_screen_text(emu: Emulator) -> tuple[str, bool]:
                 lines.append(s)
                 has_upper = has_upper or _uppercase_run(emu, base, 20)
         text = " ".join(lines).strip()
-        return (text, True) if (text and has_upper) else ("", False)
+        # A real dialog/menu box has an uppercase font tile OR reads like natural language. The
+        # uppercase check ALONE wrongly rejects an all-lowercase dialogue line (a continuation like
+        # "...strong, they can protect me!"), leaving the agent stuck: a box is up so it can't move,
+        # but it reads as overworld and never presses A to close it. A full-screen cutscene picture,
+        # by contrast, decodes to a REPEATED char ("aaaa…") — so real language is distinguished by
+        # letter VARIETY (many distinct letters), not by casing.
+        words = [w for w in text.split() if sum(c.isalpha() for c in w) >= 2]
+        distinct = len({c for c in text.lower() if c.isalpha()})
+        looks_like_language = len(words) >= 2 and distinct >= 5
+        return (text, True) if (text and (has_upper or looks_like_language)) else ("", False)
     except Exception:
         return "", False
 
@@ -320,6 +345,7 @@ def read_context(emu: Emulator) -> dict:
         "battle_kind": _BATTLE_KIND.get(inb, f"#{inb}"),
         "text_active": text_active,
         "screen_text": text,
+        "screen_text_raw": decode_textbox_raw(emu),  # raw decode (unclassified) for the Jev flow router
         "menu": menu,          # {open, kind, cursor_index, num_options, options} when a menu is up
     }
     try:

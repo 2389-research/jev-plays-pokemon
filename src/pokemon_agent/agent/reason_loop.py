@@ -38,6 +38,7 @@ from ..games.pokemon_red.progress import progress_vector
 from ..games.pokemon_red.routes import next_direction
 from ..games.pokemon_red.state import detect_mode, read_player
 from ..observations.builder import ObservationBuilder
+from .l1_pipeline import run_l1_pipeline
 from .memory import AgentMemory
 from .navigator import Navigator
 from .plan import AgentPlan, Directive, Intent
@@ -55,7 +56,9 @@ SERVO_FAIL_LIMIT = 6  # consecutive servo no-route steps before the directive is
 JEV_OVERRIDE_CONF = 0.6  # Jev may override the BFS pathing suggestion only at/above this confidence
 POLICY_BUDGET = 15       # steps a Jev-chosen routing policy runs before it's re-selected for the area
 JEV_NPC_CONF = 0.4  # trust Jev's NPC pick only at/above this confidence (else fall back to nearest)
+FLOW_MIN_CONF = 0.55  # trust Jev's flow-gate pick (dialogue vs navigate) only at/above this; else _safe_flow
 WARP_BACK = 0xFF     # a warp's dest_map of 0xFF means "return to the map you came from" (wLastMap)
+RESUME_EVERY = 50    # steps between always-on resumable checkpoints written into the record-dir
 TARGET_REPROPOSE_LIMIT = 2  # times the proposer may re-pick a DIFFERENT target to unstick before L1
 
 # screen-relative neighbor of the player in the local walkability window (up = north)
@@ -123,6 +126,9 @@ class ReasoningLoop:
         self.stuck = StuckDetector()
         self.checkpoint_every = checkpoint_every
         self.checkpoint_dir = Path(checkpoint_dir) if checkpoint_dir else None
+        # always-on resumable checkpoint: any recorded run drops latest.state + latest.mem.json in its
+        # own record-dir (periodically + at run-end), so the run can be continued with --resume-from.
+        self._resume_dir = recorder.dir if recorder is not None else None
         self.goal_map = goal_map
         self.level_target = level_target
         self.knowledge = knowledge           # Orrery KB (also used for battle type lookups)
@@ -160,13 +166,16 @@ class ReasoningLoop:
         self._target: dict | None = None
         self._target_map: int | None = None
         self._target_stuck = 0          # consecutive legs the current target made no progress
+        self._counter_bumped = False    # bumped a counter this leg (talk-over-counter NPCs: nurse/clerk)
+        self._edge_attempt: tuple | None = None  # (map,x,y) we last tried to step OFF to cross a map edge
         self._recent_targets: deque = deque(maxlen=6)
         # Jev-picked routing POLICY (shortest / dodge-grass / farm-exp), re-chosen per leg/area
         self._policy: str | None = None
         self._policy_map: int | None = None
         self._policy_age = 0
-        self._farm_last: Direction | None = None   # farm-exp pacing: last graze step (for back-and-forth)
+        self._farm_last: Direction | None = None   # farm-exp: last step (to forbid two laterals in a row)
         self._farm_age = 0
+        self._farm_weave = 1   # farm-exp weave sign (+1/-1): alternates lateral lanes into a zig-zag
         self._prev_map: int | None = None  # last DISTINCT map (resolves 0xFF "return" warps)
         self._recent: deque[str] = deque(maxlen=recent_max)
         self._prev: ReasonStep | None = None
@@ -179,7 +188,8 @@ class ReasoningLoop:
         self._legs_since_l1 = 0                  # legs since the last L1 review (cadence trigger)
         self._blocked_for_n = 0                  # consecutive legs blocked (>= BLOCK_TRIGGER fires L1)
         self._l1_event = False                   # a one-shot event asked for an L1 review next gate
-        self._l1_last = None                     # last L1 review's {change, assessment} (for the recorder)
+        self._l1_last = None                     # last L1 review's {change, assessment, trace} (for the recorder)
+        self._l1_trace: list[dict] = []          # current/last review's pipeline stage events
 
     # ------------------------------------------------------------------ step
     def step_once(self) -> ActionResult:
@@ -228,18 +238,22 @@ class ReasoningLoop:
         ctx = (obs.game_state or {}).get("context") or {}
         ctx_kind = ctx.get("kind")
 
-        # --- mode controllers own the step (battle / passive dialog) ---
+        # --- battle owns the step (deterministic RAM bit — a fact, never a classification) ---
         if ctx.get("in_battle"):
             rstep, latency, usage, result = self._battle_turn(obs)
             self._prev = rstep
             self._emit_reason(rstep, latency)
             return self._finish(obs, rstep, result, latency, usage, shot)
-        if ctx_kind == "dialog":
-            return self._advance_dialog(obs, shot)
 
-        # --- menu is a mode: Jev operates it (a bounded 1-of-N calibrated choice) ---
-        if ctx_kind == "menu":
+        # --- FLOW ROUTER: menu is deterministic (RAM cursor); navigate-vs-dialogue is a calibrated
+        # Jev choice (falls back to the deterministic ctx_kind detector when Jev isn't wired). Replaces
+        # the brittle has_upper dialog heuristic as the router. ---
+        flow = self._route_flow(obs, ctx)
+        if flow == "menu":
             return self._jev_turn(obs, player_desc, self._blocked_dirs(obs, None), None, shot)
+        if flow == "dialogue":
+            return self._advance_dialog(obs, shot)
+        # flow == "navigate" -> fall through to the navigation path below
 
         # --- overworld: LunaRoute sets the target, deterministic BFS routes to it. Jev is NOT a
         # navigator — when there's no clean route the DECISION goes up to LunaRoute (re-plan /
@@ -352,13 +366,24 @@ class ReasoningLoop:
         return any((s.done_when or "").startswith("hp_frac")
                    for s in self._plan_steps if s.status in ("pending", "active"))
 
-    def _run_l1(self, obs, emergency: bool = False) -> None:
-        """L1 strategic review: ask the planner whether the standing plan needs to change; if so,
-        deterministically reconcile the proposal into the canonical plan (preserving progress) and
-        recompile the quest queue. Durable strategy (mission/milestone/tried_failed) lives on the
-        AgentPlan in memory. ``emergency`` (near-faint) is surfaced in the context so L1 inserts a
-        routed heal quest. Never raises: any failure emits ``l1_failed`` and changes nothing. The
-        gate counters are cleared in ``finally`` so a failing review doesn't re-fire every step."""
+    def _record_l1_trace(self, event: dict) -> None:
+        """``on_trace`` callback for ``run_l1_pipeline``: append each pipeline stage event
+        (triage/brainstorm/decide/invalid_criterion) to the current review's trace. ``_run_l1``
+        resets ``_l1_trace`` at the start of each review and merges it into ``_l1_last`` so the
+        recorder captures WHY L1 decided what it decided, not just the final change/assessment."""
+        self._l1_trace.append(event)
+
+    def _run_l1(self, obs, emergency: bool = False, hard_event: bool = False) -> None:
+        """L1 strategic review: run the L1 pipeline (triage/brainstorm/decide/validate) to see
+        whether the standing plan needs to change; if so, deterministically reconcile the proposal
+        into the canonical plan (preserving progress) and recompile the quest queue. Durable
+        strategy (mission/milestone/tried_failed) lives on the AgentPlan in memory. ``emergency``
+        (near-faint) is surfaced in the context so L1 inserts a routed heal quest. ``hard_event``
+        tells the pipeline this review was forced by an event (wedge/emergency/plan-exhausted)
+        rather than the periodic cadence, so it skips the cheap triage gate. Never raises: any
+        failure emits ``l1_failed`` and changes nothing. The gate counters are cleared in
+        ``finally`` so a failing review doesn't re-fire every step."""
+        self._l1_trace: list[dict] = []   # reset per review; _record_l1_trace appends pipeline stages
         try:
             if self.planner is None:
                 return
@@ -381,8 +406,9 @@ class ReasoningLoop:
                 "mission": self._plan.mission,
                 "milestone": self._plan.milestone,
             }
-            prop = self.planner.revise_quests(emu, context) or {}
-            if prop.get("change"):
+            prop = run_l1_pipeline(emu, context, self.planner, hard_event=(hard_event or emergency),
+                                   on_trace=self._record_l1_trace)
+            if prop is not None:
                 removed_ids = set(prop.get("remove") or [])
                 removed = [s for s in self._plan_steps if s.id in removed_ids]
                 self._plan_steps = reconcile_quests(
@@ -409,7 +435,8 @@ class ReasoningLoop:
                         self._directive = None   # the committed default is gone -> advance to L1's first real step
                     self._plan_steps = [s for s in self._plan_steps if not s.provisional]
                 self._recompile_quest()
-                self._l1_last = {"change": True, "assessment": prop.get("assessment")}
+                self._l1_last = {"change": True, "assessment": prop.get("assessment"),
+                                 "trace": self._l1_trace}
                 self.on_event("l1_review", {"step": self.session.step, "change": True,
                                             "assessment": prop.get("assessment"),
                                             "add": len(prop.get("add", [])),
@@ -417,11 +444,11 @@ class ReasoningLoop:
                 self.on_event("quest", {"step": self.session.step, "len": len(self._quest),
                                         "plan": [d.reason for d in self._quest]})
             else:
-                self._l1_last = {"change": False, "assessment": prop.get("assessment")}
+                self._l1_last = {"change": False, "assessment": "", "trace": self._l1_trace}
                 self.on_event("l1_review", {"step": self.session.step, "change": False,
-                                            "assessment": prop.get("assessment")})
+                                            "assessment": ""})
         except Exception as e:  # never let a strategic review break the loop
-            self._l1_last = {"change": False, "assessment": "l1_failed"}
+            self._l1_last = {"change": False, "assessment": "l1_failed", "trace": self._l1_trace}
             self.on_event("l1_failed", {"step": self.session.step, "error": str(e)})
         finally:
             # clear the cadence/event gate even on failure, so a raising review doesn't re-fire
@@ -431,13 +458,25 @@ class ReasoningLoop:
             self._l1_event = False
 
     # --------------------------------------------------- directive lifecycle
-    def _mark_step(self, quest_id: str | None, status: str) -> None:
-        """Set the status of the plan step tagged ``quest_id`` (no-op if it's not in the plan)."""
+    def _mark_step(self, quest_id: str | None, status: str, reason: str | None = None) -> None:
+        """Set the status of the plan step tagged ``quest_id`` (no-op if it's not in the plan) and
+        emit a completion-provenance event naming WHY the step transitioned — the log alone should
+        show a step's acceptance criterion + fate, no RAM forensics required. ``reason`` is the
+        best-available explanation for a ``wedged`` transition (falls back to a static string)."""
         if quest_id is None:
             return
         for s in self._plan_steps:
             if s.id == quest_id:
                 s.status = status
+                if status == "done":
+                    # NB: key is "step_kind", not "kind" — the recorder's on_event stamps the event
+                    # type under "kind" ("step_done"), so a payload "kind" would clobber that marker.
+                    self.on_event("step_done", {"step": self.session.step, "id": s.id,
+                                                "done_when": s.done_when, "step_kind": s.kind})
+                elif status == "wedged":
+                    self.on_event("step_wedged", {"step": self.session.step, "id": s.id,
+                                                  "done_when": s.done_when,
+                                                  "reason": reason or "no route / blocked"})
                 return
 
     def _step_by_qid(self, quest_id: str | None) -> QuestStep | None:
@@ -465,7 +504,7 @@ class ReasoningLoop:
         if (self._directive is not None and not satisfied
                 and (self._servo_fail >= SERVO_FAIL_LIMIT or self._blocked_for_n >= BLOCK_TRIGGER)):
             if self._directive.quest_id is not None:
-                self._mark_step(self._directive.quest_id, "wedged")
+                self._mark_step(self._directive.quest_id, "wedged", reason=self._directive.reason)
             self._blocked_for_n = 0
             self._servo_fail = 0
             self._l1_event = True     # L1 replaces just this step at the next gate (below)
@@ -478,7 +517,10 @@ class ReasoningLoop:
         # heal errand is already in the plan.
         ran_l1 = False
         if self._l1_due() or (emergency and not self._has_heal_step()):
-            self._run_l1(obs, emergency=emergency)
+            # event-driven (wedge / near-faint / navigation deadlock) -> hard_event, so the pipeline
+            # skips its cheap triage gate; a review firing ONLY off the periodic cadence is not.
+            hard_event = bool(self._l1_event) or self._blocked_for_n >= BLOCK_TRIGGER or emergency
+            self._run_l1(obs, emergency=emergency, hard_event=hard_event)
             ran_l1 = True
 
         # --- 3. bootstrap: L1 owns the plan. On an empty plan, let L1 populate it FIRST (so we don't
@@ -487,11 +529,12 @@ class ReasoningLoop:
         # default — which _run_l1 drops the moment L1 supplies real steps.
         if not self._plan_steps:
             if not ran_l1 and self.planner is not None and (self.planner.strategist or self.planner.provider):
-                self._run_l1(obs)
+                # bootstrap on an empty plan is plan-exhausted, not a periodic cadence tick -> hard_event
+                self._run_l1(obs, hard_event=True)
             if not self._plan_steps:
                 gm = self.goal_map if self.goal_map is not None else (obs.player.map_id if obs.player else 0)
                 self._plan_steps.append(QuestStep(id=self._next_qid(), map=gm, done_when="on_map",
-                                                  status="pending", provisional=True))
+                                                  status="pending", provisional=True, kind="travel"))
                 self._recompile_quest()
 
         # --- 3b. the active directive's step was removed/replaced by L1 -> advance to the plan ----
@@ -503,10 +546,18 @@ class ReasoningLoop:
         # --- 4. termination / advance -----------------------------------------------------------
         if self._directive is None or satisfied:
             if self._directive is not None:
+                qid = self._directive.quest_id
+                # A step can compile to SEVERAL directives sharing one quest_id (a talk/fetch step is
+                # TRAVEL(reach map) + TALK_TO(criterion)). Mark the STEP done only when its FINAL
+                # directive completes — NOT the intermediate travel half. Otherwise the step
+                # false-completes on arrival (e.g. a heal marked hp_frac>=1.0 the instant you enter
+                # the Poké Center, before ever reaching the nurse), which also drives re-plan thrash.
+                more_for_step = bool(self._quest) and self._quest[0].quest_id == qid
                 self.on_event("directive_done", {"step": self.session.step,
                                                  "intent": self._directive.intent.value,
                                                  "reason": self._directive.reason})
-                self._mark_step(self._directive.quest_id, "done")
+                if not more_for_step:
+                    self._mark_step(qid, "done")
                 self._servo_fail = 0
             if self._quest:
                 self._directive = self._quest.popleft()
@@ -549,6 +600,8 @@ class ReasoningLoop:
         self._target = None
         self._target_map = None      # defensive: never pair a stale map with the (now cleared) target
         self._target_stuck = 0
+        self._counter_bumped = False  # a fresh leg re-bumps a counter before talking over it
+        self._edge_attempt = None
         self._recent_targets.clear()
         self.on_event("directive", {"step": self.session.step, "intent": self._directive.intent.value,
                                     "target": self._directive.target, "success": self._directive.success,
@@ -587,13 +640,26 @@ class ReasoningLoop:
         goal_dir = next_direction(self.memory.graph, player.map_id, tmap)
         return {"kind": "edge", "dir": goal_dir, "next_map": next_map}
 
-    @staticmethod
-    def _target_reached(target, obs) -> bool:
+    def _target_reached(self, target, obs) -> bool:
         """Only a 'tile' target can be 'reached' in place (others resolve to a move each frame and
-        end when the map changes / an interaction fires)."""
+        end when the map changes / an interaction fires). EXCEPTION: a map-EDGE opening is reached by
+        stepping OFF it (one more move) to cross to the next map — standing on the boundary tile is
+        NOT the end, so return it un-reached and let the router step off. Guard against a boundary
+        tile that ISN'T a real crossing (a walkable edge with no adjacent map): once we've already
+        issued the step-off from this exact tile and we're still standing on it, it's a dead end ->
+        treat it as reached so we re-propose instead of stepping into the wall forever."""
         if target.get("kind") != "tile":
             return False
-        return (obs.player.x, obs.player.y) == (int(target["x"]), int(target["y"]))
+        xy = (int(target["x"]), int(target["y"]))
+        if (obs.player.x, obs.player.y) != xy:
+            return False
+        dims = getattr(obs, "map_dims", None)
+        if dims:
+            w, h = dims
+            on_edge = xy[0] <= 0 or xy[1] <= 0 or xy[0] >= w - 1 or xy[1] >= h - 1
+            if on_edge and self._edge_attempt != (obs.player.map_id, xy[0], xy[1]):
+                return False   # first arrival at an edge opening -> step OFF to cross (not yet reached)
+        return True
 
     def _current_target(self, directive, obs) -> dict | None:
         """Hold the current typed target across frames; (re)pick via the proposer on
@@ -638,6 +704,7 @@ class ReasoningLoop:
                 door = next((e for e in (obs.exits or []) if e.get("dest_map") == hop[0]), None)
                 if door is not None:
                     exit_tile = (int(door["x"]), int(door["y"]))
+        reach = self._reachable_cells(player, occupied)
         ctx = {
             "map_view": obs.map_view,
             "player": {"x": player.x, "y": player.y, "map_id": player.map_id},
@@ -651,7 +718,8 @@ class ReasoningLoop:
                      for n in ((obs.game_state or {}).get("npcs") or []) if "x" in n and "y" in n],
             "recent_trail": list(self._recent)[-8:],
             "recent_targets": [dict(t) for t in self._recent_targets],
-            "reachable": self._reachable_cells(player, occupied),
+            "reachable": reach,
+            "candidate_exits": self._candidate_exits(obs, reach),
             "default": default,
             "stuck": stuck,
             "why": ("the last target was unreachable or made no progress; propose a DIFFERENT one"
@@ -735,34 +803,62 @@ class ReasoningLoop:
         return MoveAction(direction=d) if d is not None else None
 
     def _farm_step(self, obs, wp, avoid):
-        """farm-exp GRAZING: pace back-and-forth across adjacent grass (each grass step rolls a wild
-        encounter) while periodically advancing toward the goal — the way a player walks in and out
-        of a grass patch to grind. Every 4th step it advances toward the target so it still makes
-        progress; the rest it oscillates over grass tiles."""
+        """farm-exp = WEAVE FORWARD toward the waypoint through grass. The motion is a zig-zag that
+        always trends to the goal: we never take two lateral steps in a row, so forward steps always
+        outnumber sideways ones and net displacement is toward the destination (no pacing in one row).
+          - After any lateral step, the next step ADVANCES (forward is open here — enforced below).
+          - Otherwise, ~every 3rd step (or whenever the forward tile isn't grass) we shift ONE lane
+            sideways onto grass, alternating left/right lanes (the zig-zag), then advance again.
+          - If the forward tile is a wall, hand off to the goal-directed router to get around it.
+        Every grass tile we touch rolls a wild encounter, so weaving through grass grinds EXP while we
+        keep closing on the waypoint — instead of oscillating in place until the level target is hit."""
         from .routing import policy_first_step
         player = obs.player
         tiles = self.world.tiles.get(player.map_id, {})
         terr = self.world.terrain.get(player.map_id, {})
+        px, py = player.x, player.y
+        gx, gy = tuple(wp)
+        dx, dy = gx - px, gy - py
 
-        def grass_walkable(d: Direction) -> bool:
-            nb = (player.x + DELTA[d][0], player.y + DELTA[d][1])
-            return terr.get(nb) == "grass" and tiles.get(nb) != WALL and nb not in avoid
+        if abs(dy) >= abs(dx):            # goal lies mainly north/south -> advance on Y, weave on X
+            fwd = Direction.SOUTH if dy > 0 else Direction.NORTH
+            lat_pos, lat_neg = Direction.EAST, Direction.WEST
+        else:                             # goal mainly east/west -> advance on X, weave on Y
+            fwd = Direction.EAST if dx > 0 else Direction.WEST
+            lat_pos, lat_neg = Direction.SOUTH, Direction.NORTH
+
+        def nb(d):
+            return (px + DELTA[d][0], py + DELTA[d][1])
+        def walkable(d):
+            return tiles.get(nb(d)) != WALL and nb(d) not in avoid
+        def grass(d):
+            return walkable(d) and terr.get(nb(d)) == "grass"
 
         self._farm_age += 1
-        grass_dirs = [d for d in DELTA if grass_walkable(d)]
-        # every 4th step (or when there's no grass to pace) advance toward the goal
-        if not grass_dirs or self._farm_age % 4 == 0:
-            d = policy_first_step(self.world, player.map_id, (player.x, player.y), tuple(wp),
-                                  "farm-exp", avoid)
+
+        # Wall straight ahead: let the goal-directed router find the way around (it still favours grass).
+        if not walkable(fwd):
+            d = policy_first_step(self.world, player.map_id, (px, py), tuple(wp), "farm-exp", avoid)
             self._farm_last = None
             return MoveAction(direction=d) if d is not None else None
-        # otherwise graze: prefer reversing the last graze step (walk back into the grass you came
-        # from) to keep triggering encounters in place; else step onto any adjacent grass.
-        rev = {Direction.NORTH: Direction.SOUTH, Direction.SOUTH: Direction.NORTH,
-               Direction.EAST: Direction.WEST, Direction.WEST: Direction.EAST}
-        d = rev[self._farm_last] if (self._farm_last and rev[self._farm_last] in grass_dirs) else grass_dirs[0]
-        self._farm_last = d
-        return MoveAction(direction=d)
+
+        # Never two laterals in a row -> forward is open here, so ADVANCE. Guarantees net forward motion.
+        if self._farm_last in (lat_pos, lat_neg):
+            self._farm_last = fwd
+            return MoveAction(direction=fwd)
+
+        # Weave a lane every ~3rd step, or whenever the forward tile isn't grass (so we grind on the way):
+        # take ONE lateral step onto grass, preferring the current lane sign, then flip the sign (zig-zag).
+        if self._farm_age % 3 == 0 or not grass(fwd):
+            for lat in ((lat_pos, lat_neg) if self._farm_weave > 0 else (lat_neg, lat_pos)):
+                if grass(lat):
+                    self._farm_weave = -self._farm_weave
+                    self._farm_last = lat
+                    return MoveAction(direction=lat)
+
+        # Advance toward the goal (through grass when it is grass; forward is open regardless).
+        self._farm_last = fwd
+        return MoveAction(direction=fwd)
 
     def _pick_policy(self, obs) -> str:
         """Jev chooses the routing objective for this leg from HP / level / objective / grass."""
@@ -919,11 +1015,33 @@ class ReasoningLoop:
         nx, ny = int(npc["x"]), int(npc["y"])
         adj = {Direction.NORTH: (nx, ny + 1), Direction.SOUTH: (nx, ny - 1),
                Direction.EAST: (nx - 1, ny), Direction.WEST: (nx + 1, ny)}  # tile you stand on to face npc
+        # COUNTER TALK: an NPC behind a real COUNTER tile (nurse, Mart clerk) can't be stood next to —
+        # the adjacent tile IS the counter. You talk to them from 2 tiles away in a straight line,
+        # over the counter. When the intervening cell is an actual counter (RAM's per-tileset talk-over
+        # tiles, never a generic wall), the stand tile is that 2-away cell instead of the (blocked) one.
+        counters = getattr(self.world, "counters", {}).get(getattr(player, "map_id", None), set())
+        far = {Direction.NORTH: (nx, ny + 2), Direction.SOUTH: (nx, ny - 2),
+               Direction.EAST: (nx - 2, ny), Direction.WEST: (nx + 2, ny)}
+        counter_dirs = set()
+        for d, mid in list(adj.items()):
+            if mid in counters:
+                adj[d] = far[d]        # reach the counter NPC from across the counter
+                counter_dirs.add(d)
         facing_map = {"north": Direction.NORTH, "south": Direction.SOUTH,
                       "east": Direction.EAST, "west": Direction.WEST}
         for d, stand in adj.items():
             if (player.x, player.y) == stand:
-                if facing_map.get(getattr(player, "facing", None)) == d:
+                facing_ok = facing_map.get(getattr(player, "facing", None)) == d
+                if d in counter_dirs:
+                    # COUNTER TALK (nurse/clerk): arriving on the tile already facing the counter is
+                    # NOT enough — the game only registers a talk-over-counter after you BUMP the
+                    # counter (a blocked step into it). Bump once per leg, then interact; once the
+                    # dialog opens, dialog-mode drives the rest.
+                    if not facing_ok or not self._counter_bumped:
+                        self._counter_bumped = True
+                        return MoveAction(direction=d)   # blocked step into the counter -> bump/turn
+                    return InteractAction()
+                if facing_ok:
                     return InteractAction()          # adjacent AND facing -> talk
                 return MoveAction(direction=d)        # adjacent, turn to face (a blocked step turns you)
         others = occupied - {(nx, ny)}
@@ -951,6 +1069,16 @@ class ReasoningLoop:
                 if door is not None:
                     d = self._warp_exit_dir(xy, obs.map_dims)
                     return MoveAction(direction=d) if d is not None else None
+                # a map-EDGE opening L2 routed to (a boundary tile, no warp): step OFF the edge to
+                # cross to the adjacent map — the router owns the crossing, L2 only named the tile.
+                if obs.map_dims:
+                    w, h = obs.map_dims
+                    if xy[0] <= 0 or xy[1] <= 0 or xy[0] >= w - 1 or xy[1] >= h - 1:
+                        d = self._warp_exit_dir(xy, obs.map_dims)
+                        if d is not None:
+                            self._edge_attempt = (player.map_id, xy[0], xy[1])  # so a dead-end edge can't loop
+                            return MoveAction(direction=d)
+                        return None
                 return InteractAction() if target.get("interact") else None
             avoid = set(occupied)
             return self._route_to_tile(obs, xy, blocked_dirs, avoid)
@@ -1221,6 +1349,48 @@ class ReasoningLoop:
         # (no wall-learning on a blocked move — the RAM collision map is ground truth.)
         return result
 
+    def _route_flow(self, obs, ctx) -> str:
+        """Which control FLOW is active (battle handled upstream): 'menu' | 'dialogue' | 'navigate'.
+
+        Menu is deterministic — the RAM cursor-arrow signal (A on a menu SELECTS, so a menu must never
+        reach the dialogue/A-mash path). The genuinely fuzzy boundary — a text box is up vs the overworld
+        is free — is a calibrated Jev choice fed the RAW decoded text (so it sees an all-lowercase line
+        the old has_upper heuristic would have zeroed). When Jev isn't wired (e.g. --decider llm), or it
+        errors, fall back to the deterministic ctx_kind detector. Low confidence -> _safe_flow."""
+        menu = ctx.get("menu") or {}
+        raw = (ctx.get("screen_text_raw") or "").strip()
+        choose = getattr(self.reasoner, "choose_flow", None)
+        if choose is None:                                   # no Jev -> deterministic fallback
+            if menu.get("open"):
+                return "menu"
+            return "dialogue" if ctx.get("kind") == "dialog" else "navigate"
+        if not raw and not menu.get("open"):                 # no text at all -> no box -> skip the Jev call
+            return "navigate"
+        try:
+            last = getattr(getattr(self._prev, "action", None), "type", "") or ""
+            ans = choose(screen_text=raw, has_text=bool(raw),
+                         text_box_id=int(ctx.get("text_box_id") or 0), last_action=last)
+        except Exception:                                    # Jev call failed -> deterministic fallback
+            if menu.get("open"):
+                return "menu"
+            return "dialogue" if ctx.get("kind") == "dialog" else "navigate"
+        d_ans, d_conf = ans.get("dialogue", ("no", 0.0))
+        m_ans, m_conf = ans.get("menu", ("no", 0.0))
+        if menu.get("open") or (m_ans == "yes" and m_conf >= FLOW_MIN_CONF):   # menu first (RAM or Jev)
+            return "menu"
+        if d_ans == "yes" and d_conf >= FLOW_MIN_CONF:
+            return "dialogue"
+        if max(d_conf, m_conf) < FLOW_MIN_CONF:              # Jev hedged -> safe default
+            return self._safe_flow(ctx)
+        return "navigate"
+
+    @staticmethod
+    def _safe_flow(ctx) -> str:
+        """Low-confidence fallback (menu handled upstream): fail toward closing a box. Raw text present
+        -> dialogue (advancing a real box clears the stall; A on the overworld is a cheap, self-
+        correcting no-op — far safer than walking into an unread box forever); else navigate."""
+        return "dialogue" if (ctx.get("screen_text_raw") or "").strip() else "navigate"
+
     def _advance_dialog(self, obs, shot) -> ActionResult:
         from ..core.models import AdvanceDialogAction
         action = AdvanceDialogAction()
@@ -1230,6 +1400,34 @@ class ReasoningLoop:
         self._prev = rstep
         self._emit_reason(rstep, 0)
         return self._finish(obs, rstep, result, 0, {}, shot)
+
+    def _candidate_exits(self, obs, reachable) -> list[dict]:
+        """Every reachable WAY OFF this map, as coordinates L2 can route to — so it SELECTS a specific
+        exit instead of us guessing the nearest door. Two kinds, both deterministic from RAM (never
+        guessed): warp DOORS (from obs.exits, with their known destination map) and map-EDGE openings
+        (reachable walkable tiles sitting on the map boundary — the tiles you can step off to reach the
+        adjacent map). L2 may pick one of these or any other walkable tile; they are hints, not a menu."""
+        out: list[dict] = []
+        doors: set[tuple[int, int]] = set()
+        for e in (obs.exits or []):
+            try:
+                x, y = int(e["x"]), int(e["y"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            doors.add((x, y))
+            out.append({"x": x, "y": y, "kind": "door",
+                        "dest_map": e.get("dest_map"), "dest": e.get("dest_name")})
+        dims = getattr(obs, "map_dims", None)
+        if dims and reachable:
+            w, h = dims
+            for (x, y) in reachable:
+                if (x, y) in doors:
+                    continue
+                d = ("N" if y <= 0 else "S" if y >= h - 1 else
+                     "W" if x <= 0 else "E" if x >= w - 1 else None)
+                if d is not None:
+                    out.append({"x": x, "y": y, "kind": "edge", "dir": d})
+        return out
 
     def _reachable_cells(self, player, npcs: set[tuple[int, int]]) -> set[tuple[int, int]]:
         """BFS-reachable cells from the player over the ingested collision, avoiding walls,
@@ -1347,7 +1545,9 @@ class ReasoningLoop:
                               if d else None),
                 "mission": (self._plan.mission if self._plan else None),
                 "milestone": (self._plan.milestone if self._plan else None),
-                "plan_steps": [{"id": s.id, "map": s.map, "status": s.status}
+                "plan_steps": [{"id": s.id, "map": s.map, "status": s.status,
+                               "done_when": s.done_when, "kind": s.kind, "why": s.why,
+                               "talk": s.talk, "who": s.who}
                                for s in self._plan_steps],
                 "l1_last": self._l1_last,
                 "quest_remaining": [q.reason for q in self._quest],
@@ -1361,6 +1561,8 @@ class ReasoningLoop:
         self.session.step += 1
         if self.checkpoint_every and self.checkpoint_dir and self.session.step % self.checkpoint_every == 0:
             self._checkpoint()
+        if self._resume_dir is not None and self.session.step % RESUME_EVERY == 0:
+            self.save_resume_checkpoint()
         return result
 
     # --- battle sub-policy (mode dispatch routes here when in_battle) ---------
@@ -1420,12 +1622,28 @@ class ReasoningLoop:
         route = self.memory.graph.route(player.map_id, d.target_map)
         return (len(route) - 1) if route else None
 
-    def _checkpoint(self) -> None:
-        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    def _write_resume(self, dest: Path) -> None:
+        """Write a resumable checkpoint pair to `dest`: latest.state (full PyBoy save) + latest.mem.json
+        (world map, graph, interactions, reflection plan, map history, blocked edges)."""
+        dest.mkdir(parents=True, exist_ok=True)
         self.memory.plan = self._plan
-        self.controller.emu.save_state(self.checkpoint_dir / "latest.state")
-        self.memory.save(self.checkpoint_dir / "latest.mem.json")
+        self.controller.emu.save_state(dest / "latest.state")
+        self.memory.save(dest / "latest.mem.json")
+
+    def _checkpoint(self) -> None:
+        self._write_resume(self.checkpoint_dir)
         self.on_event("checkpoint", {"step": self.session.step, "dir": str(self.checkpoint_dir)})
+
+    def save_resume_checkpoint(self) -> None:
+        """Always-on continuation snapshot into the record-dir (periodic + at run-end). No-op when the
+        run isn't being recorded. Lets any run be continued later with `--resume-from <record-dir>`."""
+        if self._resume_dir is None:
+            return
+        try:
+            self._write_resume(self._resume_dir)
+            self.on_event("checkpoint", {"step": self.session.step, "dir": str(self._resume_dir), "resume": True})
+        except Exception as e:   # a checkpoint must never crash the run
+            self.on_event("checkpoint_failed", {"step": self.session.step, "error": str(e)})
 
     def _confirmed_wall(self, direction) -> bool:
         """True only if the LIVE collision map says the tile ahead is blocked.
@@ -1504,10 +1722,15 @@ class ReasoningLoop:
         )
 
     def run(self, max_steps: int = 40) -> None:
-        for _ in range(max_steps):
-            if not self.session.running:
-                break
-            self.step_once()
+        try:
+            for _ in range(max_steps):
+                if not self.session.running:
+                    break
+                self.step_once()
+        finally:
+            # Always leave a resumable snapshot at the end (budget reached, stop, or crash), so the run
+            # can be continued from exactly where it stopped rather than the last new-area state.
+            self.save_resume_checkpoint()
 
 
 def _desc(action) -> str:

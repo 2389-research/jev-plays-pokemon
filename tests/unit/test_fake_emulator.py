@@ -27,6 +27,12 @@ def test_screenshot_dimensions_and_bytes():
     assert len(shot.data) > 0
 
 
+def test_write_memory_round_trips():
+    emu = FakeEmulator()
+    emu.write_memory(0xD16C, 42)
+    assert emu.read_memory(0xD16C) == 42
+
+
 def test_save_and_load_state_roundtrip(tmp_path):
     emu = FakeEmulator(start=(2, 1))
     p = tmp_path / "s.state"

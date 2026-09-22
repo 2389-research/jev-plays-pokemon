@@ -121,6 +121,70 @@ def test_resolve_approach_npc_interacts_when_adjacent_and_facing():
     assert isinstance(move, InteractAction)
 
 
+def test_candidate_exits_lists_doors_and_reachable_edge_openings():
+    # L2 should be handed every way OFF the map as a coordinate: warp doors (with dest) AND reachable
+    # map-boundary openings (edge tiles), so it can SELECT one instead of us guessing the nearest door.
+    loop, _ = _nav_loop(0)
+    obs = SimpleNamespace(map_dims=(6, 8),
+                          exits=[{"x": 2, "y": 7, "dest_map": 40, "dest_name": "Oaks Lab"}])
+    reachable = {(2, 7), (3, 0), (0, 4), (2, 3)}  # door tile, north-edge, west-edge, interior tile
+    cands = loop._candidate_exits(obs, reachable)
+    doors = [c for c in cands if c["kind"] == "door"]
+    edges = {(c["x"], c["y"], c["dir"]) for c in cands if c["kind"] == "edge"}
+    assert doors == [{"x": 2, "y": 7, "kind": "door", "dest_map": 40, "dest": "Oaks Lab"}]
+    assert edges == {(3, 0, "N"), (0, 4, "W")}          # boundary openings, with direction
+    assert (2, 3) not in {(c["x"], c["y"]) for c in cands}  # interior tile is not a way off
+
+
+def test_propose_target_accepts_bare_coordinate_with_why():
+    # L2's primary output is just a coordinate + why — no "kind" needed.
+    p = Planner(goal_map=0, provider=FakeProvider('{"x":3,"y":4,"why":"head south toward the north edge exit"}'))
+    t = p.propose_target(emu=None, context=_ctx())
+    assert t["kind"] == "tile" and (t["x"], t["y"]) == (3, 4)
+    assert "south" in t["note"]
+
+
+def test_resolve_tile_at_map_edge_steps_off_to_cross():
+    # routing to a boundary opening tile: on arrival the ROUTER steps off the edge to cross maps.
+    loop, _ = _nav_loop(0)
+    player = SimpleNamespace(x=3, y=0, map_id=0, facing="north")   # already ON the north boundary
+    obs = SimpleNamespace(player=player, map_dims=(6, 8), exits=[], game_state={})
+    move = loop._resolve_target({"kind": "tile", "x": 3, "y": 0}, _d(Intent.TRAVEL), obs, set(), set())
+    assert isinstance(move, MoveAction) and move.direction == Direction.NORTH
+
+
+def test_approach_counter_npc_bumps_then_talks_across_the_counter():
+    # A counter NPC (nurse at 3,1) sits behind a COUNTER cell (3,2): you can't stand adjacent, you
+    # talk from 2 tiles away (3,3) — but ONLY after bumping the counter (a blocked step into it).
+    loop, _ = _nav_loop(41)
+    walk = {(x, y) for x in range(6) for y in range(8)}
+    loop.world.ingest_collision(41, 6, 8, walk, {(3, 2)}, None)   # (3,2) is a counter cell
+    player = SimpleNamespace(x=3, y=3, map_id=41, facing="north")  # at the across-counter tile, facing it
+    obs = SimpleNamespace(player=player, map_dims=(6, 8),
+                          game_state={"npcs": [{"x": 3, "y": 1, "sprite": "Nurse"}]}, exits=[])
+    tgt = {"kind": "approach_npc", "sprite": "Nurse"}
+    loop._counter_bumped = False
+    bump = loop._approach_npc(tgt, _d(Intent.TALK_TO), obs, set(), set())
+    assert isinstance(bump, MoveAction) and bump.direction == Direction.NORTH   # bump the counter first
+    assert loop._counter_bumped is True
+    talk = loop._approach_npc(tgt, _d(Intent.TALK_TO), obs, set(), set())
+    assert isinstance(talk, InteractAction)                                     # then talk across it
+
+
+def test_approach_non_counter_npc_two_away_routes_closer_not_talks():
+    # WITHOUT a counter between them, an NPC 2 tiles away is not talkable over the gap: the agent
+    # must route to the 1-adjacent tile, not interact across open ground.
+    loop, _ = _nav_loop(41)
+    walk = {(x, y) for x in range(6) for y in range(8)}
+    loop.world.ingest_collision(41, 6, 8, walk, set(), None)      # no counters
+    player = SimpleNamespace(x=3, y=3, map_id=41, facing="north")
+    obs = SimpleNamespace(player=player, map_dims=(6, 8),
+                          game_state={"npcs": [{"x": 3, "y": 1, "sprite": "Nurse"}]}, exits=[])
+    move = loop._approach_npc({"kind": "approach_npc", "sprite": "Nurse"},
+                              _d(Intent.TALK_TO), obs, set(), set())
+    assert isinstance(move, MoveAction)          # routes toward the adjacent tile (3,2), no talk-over
+
+
 def test_resolve_tile_interacts_on_arrival_when_flagged():
     loop, _ = _nav_loop(0)
     player = SimpleNamespace(x=2, y=2, map_id=0, facing="south")
@@ -464,3 +528,154 @@ def test_collision_is_reread_every_step_not_cached(monkeypatch):
     loop.step_once()
     assert loop.world.bounds[0] == (20, 18)           # re-read corrected it (not cached once)
     assert calls["n"] >= 2                              # collision is read on EVERY step
+
+
+# --- flow router (_route_flow): Jev routes navigate-vs-dialogue; menu is deterministic RAM ---
+class _FlowStub:
+    def __init__(self, ans): self.ans = ans
+    def choose_flow(self, **kw): return self.ans
+
+
+def test_route_flow_jev_routes_confident_dialogue():
+    loop, _ = _nav_loop(0)
+    loop.reasoner = _FlowStub({"dialogue": ("yes", 0.9), "menu": ("no", 0.9)})
+    ctx = {"screen_text_raw": "This is private property!", "menu": {"open": False}, "kind": "overworld"}
+    assert loop._route_flow(None, ctx) == "dialogue"
+
+
+def test_route_flow_no_text_skips_jev_and_navigates():
+    loop, _ = _nav_loop(0)
+    loop.reasoner = _FlowStub({"dialogue": ("yes", 0.99), "menu": ("no", 0.99)})  # must NOT be consulted
+    assert loop._route_flow(None, {"screen_text_raw": "", "menu": {"open": False}}) == "navigate"
+
+
+def test_route_flow_menu_open_is_deterministic_and_wins():
+    # A on a menu SELECTS -> the RAM cursor signal must route to menu even when Jev reads the text as
+    # dialogue (the nurse YES/NO decodes as prose, so Jev leans dialogue — RAM must win).
+    loop, _ = _nav_loop(0)
+    loop.reasoner = _FlowStub({"dialogue": ("yes", 0.99), "menu": ("no", 0.3)})
+    ctx = {"screen_text_raw": "Shall we heal your POKMON?", "menu": {"open": True}}
+    assert loop._route_flow(None, ctx) == "menu"
+
+
+def test_route_flow_low_confidence_falls_to_dialogue_when_text_present():
+    loop, _ = _nav_loop(0)
+    loop.reasoner = _FlowStub({"dialogue": ("yes", 0.3), "menu": ("no", 0.3)})   # both hedged
+    ctx = {"screen_text_raw": "some ambiguous text", "menu": {"open": False}}
+    assert loop._route_flow(None, ctx) == "dialogue"      # safe = close the box
+
+
+def test_route_flow_deterministic_fallback_without_jev():
+    loop, _ = _nav_loop(0)
+    loop.reasoner = object()                              # no choose_flow -> ctx_kind dispatch
+    assert loop._route_flow(None, {"screen_text_raw": "x", "menu": {"open": False},
+                                   "kind": "dialog"}) == "dialogue"
+    assert loop._route_flow(None, {"screen_text_raw": "", "menu": {"open": False},
+                                   "kind": "overworld"}) == "navigate"
+
+
+# --- farm-exp grinding drifts toward the goal through grass (never paces in place) ---
+def test_farm_step_advances_through_grass_toward_goal():
+    loop, _ = _nav_loop(0)
+    loop.world.terrain[0] = {(2, 1): "grass", (1, 2): "grass", (3, 2): "grass"}  # N=forward, W/E=side
+    loop.world.tiles[0] = {}
+    player = SimpleNamespace(x=2, y=2, map_id=0, facing="north")
+    obs = SimpleNamespace(player=player, map_dims=(6, 6), game_state={}, exits=[])
+    loop._farm_age = 1                                   # not a weave step
+    mv = loop._farm_step(obs, (2, 0), set())             # goal is due north
+    assert isinstance(mv, MoveAction) and mv.direction == Direction.NORTH   # forward, on grass
+
+
+def test_farm_step_weaves_sideways_every_third_step_never_backward():
+    loop, _ = _nav_loop(0)
+    loop.world.terrain[0] = {(2, 1): "grass", (1, 2): "grass", (3, 2): "grass"}
+    loop.world.tiles[0] = {}
+    player = SimpleNamespace(x=2, y=2, map_id=0, facing="north")
+    obs = SimpleNamespace(player=player, map_dims=(6, 6), game_state={}, exits=[])
+    loop._farm_age = 2                                   # -> 3 inside -> weave step
+    mv = loop._farm_step(obs, (2, 0), set())
+    assert mv.direction in (Direction.WEST, Direction.EAST)   # perpendicular weave, never south (backward)
+
+
+def _run_farm(loop, start, goal, steps):
+    """Simulate N farm-exp steps in an all-grass field, returning the path of (x,y) and the moves taken."""
+    x, y = start
+    path, moves = [(x, y)], []
+    d2v = {Direction.NORTH: (0, -1), Direction.SOUTH: (0, 1), Direction.EAST: (1, 0), Direction.WEST: (-1, 0)}
+    for _ in range(steps):
+        player = SimpleNamespace(x=x, y=y, map_id=0, facing="north")
+        obs = SimpleNamespace(player=player, map_dims=(20, 20), game_state={}, exits=[])
+        mv = loop._farm_step(obs, goal, set())
+        assert mv is not None
+        vx, vy = d2v[mv.direction]
+        x, y = x + vx, y + vy
+        path.append((x, y)); moves.append(mv.direction)
+    return path, moves
+
+
+def test_farm_step_weaves_FORWARD_never_paces_in_one_row():
+    # The core guarantee: over a run the agent nets progress toward the goal AND weaves across lanes —
+    # it does NOT ping-pong left/right in the same row waiting for a battle.
+    loop, _ = _nav_loop(0)
+    loop.world.tiles[0] = {}
+    loop.world.terrain[0] = {(x, y): "grass" for x in range(20) for y in range(20)}  # open grass field
+    start, goal = (5, 12), (5, 0)                        # goal is due north
+    path, moves = _run_farm(loop, start, goal, 12)
+
+    # (a) net FORWARD: ended well north of the start (y decreases going north), not stuck on the row
+    assert path[-1][1] <= start[1] - 6, f"expected strong northward progress, got {path}"
+    # (b) it actually weaved: visited more than one column
+    assert len({p[0] for p in path}) > 1, "never weaved sideways"
+    # (c) never two lateral steps in a row (that is what caused row ping-pong)
+    lat = {Direction.EAST, Direction.WEST}
+    assert not any(a in lat and b in lat for a, b in zip(moves, moves[1:])), f"two laterals in a row: {moves}"
+
+
+# --- always-on resumable checkpoints (continue a run from where it stopped) ---
+def _recorded_loop(tmp_path, map_id=0):
+    from pokemon_agent.logging.run_recorder import RunRecorder
+    loop, emu = _nav_loop(map_id)
+    rec = RunRecorder(emu, tmp_path / "rec")
+    loop.recorder = rec
+    loop._resume_dir = rec.dir          # what __init__ sets when a recorder is present
+    return loop, emu, rec
+
+
+def test_save_resume_checkpoint_writes_resumable_pair(tmp_path):
+    from pokemon_agent.agent.memory import AgentMemory
+    loop, emu, rec = _recorded_loop(tmp_path)
+    loop.save_resume_checkpoint()
+    # memory file is really written (and round-trips), and the emulator state was saved to latest.state
+    assert (rec.dir / "latest.mem.json").exists()
+    assert AgentMemory.load(rec.dir / "latest.mem.json") is not None
+    assert str(rec.dir / "latest.state") in emu.saved_states
+
+
+def test_run_always_writes_final_resume_checkpoint(tmp_path):
+    # even a zero-step run leaves a resumable snapshot (the finally clause), so a budget-capped or
+    # crashed run can be continued from exactly where it stopped.
+    loop, emu, rec = _recorded_loop(tmp_path)
+    loop.run(max_steps=0)
+    assert (rec.dir / "latest.mem.json").exists()
+    assert str(rec.dir / "latest.state") in emu.saved_states
+
+
+def test_resume_checkpoint_is_noop_without_recorder():
+    loop, _ = _nav_loop(0)
+    assert loop._resume_dir is None            # no recorder -> nothing to resume into
+    loop.save_resume_checkpoint()              # must not raise
+    loop.run(max_steps=0)                      # finally clause must not raise either
+
+
+def test_farm_step_advances_through_open_lane_when_forward_isnt_grass():
+    # A vertical NON-grass lane straight ahead with grass on both sides: the agent must still climb the
+    # lane (net north) rather than oscillate east/west across it forever.
+    loop, _ = _nav_loop(0)
+    loop.world.tiles[0] = {}
+    terr = {}
+    for y in range(20):
+        terr[(4, y)] = "floor"; terr[(6, y)] = "floor"   # grass columns flanking the bare lane at x=5
+    loop.world.terrain[0] = terr
+    start, goal = (5, 12), (5, 0)
+    path, _ = _run_farm(loop, start, goal, 10)
+    assert path[-1][1] < start[1], f"did not advance north up the lane: {path}"

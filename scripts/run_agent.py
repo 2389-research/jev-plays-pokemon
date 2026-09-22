@@ -94,6 +94,9 @@ def main() -> None:
     ap.add_argument("--checkpoint-dir", default=None, help="checkpoint dir (default runs/ckpt)")
     ap.add_argument("--resume", action="store_true",
                     help="resume memory + emulator state from --checkpoint-dir/latest")
+    ap.add_argument("--resume-from", default=None,
+                    help="continue a previous recorded run: load latest.state + latest.mem.json from "
+                         "this record-dir (e.g. runs/full-run-20260921-154251)")
     ap.add_argument("--goal-map", type=int, default=None,
                     help="travel-target map id for the route hint (e.g. 2 = Pewter City)")
     ap.add_argument("--level-target", type=int, default=0,
@@ -230,15 +233,18 @@ def main() -> None:
         from pokemon_agent.agent.memory import AgentMemory
         ckpt_dir = Path(args.checkpoint_dir) if args.checkpoint_dir else (states_dir.parent / "runs" / "ckpt")
         memory = AgentMemory()
-        if args.resume:
-            memfile = ckpt_dir / "latest.mem.json"
-            statefile = ckpt_dir / "latest.state"
+        # --resume-from <record-dir> continues a prior recorded run from its always-on checkpoint;
+        # --resume continues from the explicit --checkpoint-dir. --resume-from wins if both are given.
+        resume_src = Path(args.resume_from) if args.resume_from else (ckpt_dir if args.resume else None)
+        if resume_src is not None:
+            memfile = resume_src / "latest.mem.json"
+            statefile = resume_src / "latest.state"
             if memfile.exists() and statefile.exists():
                 memory = AgentMemory.load(memfile)
                 emu.load_state(statefile)
-                print(f"resumed memory+state from {ckpt_dir} (map_history={memory.map_history[-6:]})")
+                print(f"resumed memory+state from {resume_src} (map_history={memory.map_history[-6:]})")
             else:
-                print(f"--resume: no checkpoint at {ckpt_dir}, starting fresh")
+                print(f"resume: no checkpoint at {resume_src} (need latest.state + latest.mem.json), starting fresh")
         recorder = None
         if not args.no_record and args.mode == "reason":
             from pokemon_agent.logging.run_recorder import RunRecorder, unique_run_dir

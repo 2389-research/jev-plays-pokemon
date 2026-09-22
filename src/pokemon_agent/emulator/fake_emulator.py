@@ -37,6 +37,7 @@ class FakeEmulator:
         self.frame = 0
         self._held: set[GameButton] = set()
         self.saved_states: dict[str, tuple[int, int, int]] = {}
+        self._ram: dict[int, int] = {}
 
     # --- movement ---------------------------------------------------------
     def _walkable(self, x: int, y: int) -> bool:
@@ -111,11 +112,16 @@ class FakeEmulator:
         return set()  # the fake grid world has no one-way ledges
 
     def read_memory(self, address: int, bank: int | None = None) -> int:
+        if address in self._ram:
+            return self._ram[address]
         return {
             ADDR_PLAYER_X: self.x,
             ADDR_PLAYER_Y: self.y,
             ADDR_MAP_ID: self.map_id,
         }.get(address, 0)
+
+    def write_memory(self, address: int, value: int, bank: int | None = None) -> None:
+        self._ram[address] = value
 
     def save_state(self, path: Path) -> None:
         self.saved_states[str(path)] = (self.x, self.y, self.map_id)

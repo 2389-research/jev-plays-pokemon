@@ -1,3 +1,5 @@
+import pytest
+
 from pokemon_agent.agent.plan import Directive, Intent
 
 
@@ -12,7 +14,7 @@ from pokemon_agent.agent.quest_reconciler import QuestStep, compile_steps_to_dir
 
 
 def test_compile_travel_only_step():
-    s = QuestStep(id="q1", map=1, talk=False, who=None, done_when="on_map", why="go")
+    s = QuestStep(id="q1", map=1, talk=False, who=None, done_when="on_map", why="go", kind="travel")
     ds = compile_steps_to_directives([s])
     assert len(ds) == 1 and ds[0].intent == Intent.TRAVEL and ds[0].quest_id == "q1"
     assert ds[0].success == {"on_map": 1}
@@ -29,7 +31,7 @@ def test_compile_talk_step_adds_talk_to_with_sprite_and_criterion():
 
 
 def test_compile_bad_done_when_falls_back_to_on_map():
-    s = QuestStep(id="q3", map=2, talk=False, who=None, done_when="garbage", why="x")
+    s = QuestStep(id="q3", map=2, talk=False, who=None, done_when="garbage", why="x", kind="travel")
     ds = compile_steps_to_directives([s])
     assert ds[0].success == {"on_map": 2}     # unparseable criterion -> safe default for a travel step
 
@@ -76,3 +78,32 @@ def test_reconcile_dedups_by_map_and_criterion():
     cur = [_mk("q2", 1, "active"), _mk("q3", 2, "pending", dw="on_map")]
     out = reconcile_quests(cur, {"add": [{"map": 2, "talk": False, "done_when": "on_map", "why": "dup"}], "remove": []}, next_id=_ids())
     assert sum(1 for s in out if s.map == 2 and (s.done_when or "on_map") == "on_map") == 1
+
+
+def test_travel_step_keeps_on_map():
+    d = compile_steps_to_directives([QuestStep(id="t", map=2, kind="travel")])
+    assert d[0].success == {"on_map": 2}
+
+def test_action_step_without_criterion_raises():
+    with pytest.raises(ValueError):
+        compile_steps_to_directives([QuestStep(id="a", map=40, kind="action")])
+
+def test_action_step_with_on_map_raises():
+    with pytest.raises(ValueError):
+        compile_steps_to_directives([QuestStep(id="a", map=40, kind="action", done_when="on_map")])
+
+def test_grind_action_step_talk_false_still_requires_criterion():
+    with pytest.raises(ValueError):
+        compile_steps_to_directives([QuestStep(id="g", map=13, kind="action", talk=False)])
+
+def test_action_step_with_real_criterion_ok():
+    d = compile_steps_to_directives([QuestStep(id="d", map=40, kind="action",
+                                               done_when="no_item:oaks_parcel")])
+    assert "no_item" in d[-1].success
+
+def test_reconcile_carries_kind_default_action():
+    out = reconcile_quests([], {"add": [{"map": 40, "done_when": "no_item:oaks_parcel"}]},
+                           next_id=lambda: "q1")
+    assert out[0].kind == "action"
+    out2 = reconcile_quests([], {"add": [{"map": 2, "kind": "travel"}]}, next_id=lambda: "q2")
+    assert out2[0].kind == "travel"

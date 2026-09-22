@@ -330,6 +330,46 @@ class TypeSafeReasoner:
         except Exception:
             return None, conf, probs
 
+    # --- Jev routes the control FLOW (N parallel calibrated yes/no questions in one call) ----
+    def choose_flow(self, *, screen_text="", has_text=False, text_box_id=0, last_action=""):
+        """Route the control FLOW as N short, focused, CALIBRATED yes/no questions asked in ONE
+        parallel `system_one` call (battle is handled deterministically upstream; menu is cross-checked
+        against RAM). Returns {"dialogue": (ans, conf), "menu": (ans, conf)} with ans in {"yes","no"}.
+
+        The decisive feature is SCREEN_TEXT (decoded from the on-screen text-box region, rows 12-17):
+        empty or a repeated-char blob usually means no box. Wording/features tuned via the flow-gate
+        probe (scripts/probe_flow_gate.py) before this is wired into the loop."""
+        from typesafe_sdk import Choice
+        state = {
+            "screen_text": (screen_text or "")[:120],
+            "has_decoded_text": bool(has_text),
+            "text_box_id": int(text_box_id or 0),
+            "player_last_action": last_action or "",
+            "note": "SCREEN_TEXT is decoded from the on-screen text-box area; it may be empty (no box) "
+                    "or a repeated-character blob (a background picture, not real text).",
+        }
+        # NB: the questions describe the OBSERVABLE screen state only — never our action ("press A").
+        # Jev classifies what's on screen; our code decides how to act on each flow.
+        questions = {
+            "dialogue": Choice(
+                instructions="Is a dialogue / message text box currently shown on screen — a character "
+                             "speaking, or a message being displayed to the player?",
+                criteria={"yes": "a dialogue / message text box IS on screen (SCREEN_TEXT is real prose)",
+                          "no": "no message box — SCREEN_TEXT is empty or a background-picture blob"}),
+            "menu": Choice(
+                instructions="Is a selectable menu or list (with a cursor) currently shown on screen?",
+                criteria={"yes": "a menu / selectable list IS on screen",
+                          "no": "no menu is on screen"}),
+        }
+        resp = self.client.system_one(state=state, questions=questions)
+        out = {}
+        for name in questions:
+            ans = resp.answers.get(name)
+            choice = ans.choice if (ans is not None and isinstance(ans.choice, str)) else "no"
+            conf = float(getattr(ans, "confidence", 0.0) or 0.0) if ans is not None else 0.0
+            out[name] = (choice if choice in ("yes", "no") else "no", conf)
+        return out
+
     # --- Jev picks the ROUTING POLICY for a leg (a calibrated 1-of-N objective choice) ----
     def choose_policy(self, *, hp_frac=None, level=None, level_target=0, objective="",
                       area="", grass_nearby=True):

@@ -16,7 +16,7 @@
   .col { display:flex; flex-direction:column; gap:8px; }
   #map { min-width:280px; }
   #state { flex:1; min-width:300px; }
-  .k { color:#7aa2f7; } .v { color:#e0af68; } .muted{color:#888;} .go{color:#9ece6a;}
+  .k { color:#7aa2f7; } .v { color:#e0af68; } .muted{color:#888;} .go{color:#9ece6a;} .wedge{color:#f7768e;}
   table { border-collapse:collapse; } td,th{ padding:1px 8px 1px 0; text-align:left; }
   .ev { color:#9ece6a; } .badge{ background:#222; border:1px solid #444; border-radius:4px; padding:1px 6px; margin-right:6px; display:inline-block; margin-bottom:3px;}
   h3 { margin: 10px 0 3px; color:#bb9af7; font-size:12px; text-transform:uppercase; letter-spacing:.5px;}
@@ -100,6 +100,17 @@ function setPlaying(on){
 }
 function setFollow(on){ follow = on; $('live').classList.toggle('on', on); if(on){ i = clamp(steps.length-1); render(); } }
 function fmtTarget(t){ if(!t) return '—'; return ['kind','map','x','y'].filter(k=>t[k]!==undefined).map(k=>k+'='+t[k]).join(' '); }
+// compact one-liner for an L1 pipeline trace stage ({stage, ...}); unknown stages fall back to the name
+function fmtTraceStage(t){
+  const stage = t.stage || '?';
+  if (stage === 'triage') return 'triage' + (t.change!==undefined ? (t.change?': change':': no-change') : '');
+  if (stage === 'brainstorm') return 'brainstorm' + (t.assessment ? ': '+t.assessment : '');
+  if (stage === 'decide') return `decide(+${(t.add!==undefined?t.add:0)}/-${((t.remove||[]).length)||0})`;
+  if (stage === 'invalid_criterion') return 'invalid_criterion' + (t.error ? ': '+t.error : '');
+  return stage;
+}
+// a plan step's status -> text color, matching the existing palette
+function stepStatusClass(status){ return status==='active' ? 'go' : status==='wedged' ? 'wedge' : status==='done' ? 'muted' : 'v'; }
 
 function render() {
   if (!steps.length) { $('state').textContent = 'no steps yet'; $('screen').src=''; $('mapview').textContent='—'; return; }
@@ -110,6 +121,25 @@ function render() {
   $('screen').src = r.shot ? runDir + r.shot + '?' + r.step : '';
   $('mapview').textContent = r.map_view || '(no map_view logged this step)';
   const p = r.player || {}, d = r.directive || {}, quest = r.quest_remaining||[];
+  // --- plan steps: acceptance criterion per step + why the current one finished (Task 10) ---
+  const planSteps = r.plan_steps || [];
+  // step_done/step_wedged both carry {id, done_when}; only step_wedged also carries `reason` —
+  // that's used to tell them apart (their event `kind` can collide with the step's own kind).
+  const stepEvs = (r.events||[]).filter(e => e.id !== undefined && e.done_when !== undefined);
+  const l1RanThisStep = (r.events||[]).some(e => e.kind === 'l1_review' || e.kind === 'l1_failed');
+  const l1Trace = (r.l1_last && r.l1_last.trace) || [];
+  const planHtml = planSteps.length ? `
+    <h3>plan steps (${planSteps.length})</h3>
+    ${planSteps.map(s => `<div>${esc(s.id)}`
+        + (s.kind ? ` <span class=badge>${esc(s.kind)}</span>` : '')
+        + ` <span class=k>map</span> <span class=v>${esc(s.map)}</span>`
+        + (s.done_when ? ` · <span class=muted>${esc(s.done_when)}</span>` : '')
+        + ` · <span class=${stepStatusClass(s.status)}>${esc(s.status)}</span></div>`).join('')}
+    ${stepEvs.map(e => e.reason !== undefined
+        ? `<div class=wedge>⚠ ${esc(e.id)} wedged: ${esc(e.reason)}</div>`
+        : `<div class=go>✓ ${esc(e.id)} done: ${esc(e.done_when)}</div>`).join('')}
+    ${(l1RanThisStep && l1Trace.length) ? `<div class=muted style="margin-top:2px">L1: ${l1Trace.map(fmtTraceStage).map(esc).join(' → ')}</div>` : ''}
+  ` : '';
   $('objective').innerHTML = `
     <h3>objective</h3><div class=pill><span class=go>${esc(r.objective||'—')}</span></div>
     <div style="margin-top:4px"><span class=k>intent</span> <span class=v>${esc(d.intent||'—')}</span>
@@ -118,7 +148,8 @@ function render() {
     <div><span class=k>goal map</span> <span class=v>${esc(r.goal_map)}</span>
        &nbsp;<span class=k>L2 waypoint</span> <span class=v>${r.waypoint?('('+r.waypoint[0]+','+r.waypoint[1]+')'):'—'}</span>
        &nbsp;<span class=k>routing policy</span> <span class=pill style="color:#ff9e64">${esc(r.routing_policy||'—')}</span></div>
-    ${r.in_quest ? `<h3>quest todo (${quest.length})</h3>`+quest.map(q=>`<div class=muted>• ${esc(q)}</div>`).join('') : ''}`;
+    ${r.in_quest ? `<h3>quest todo (${quest.length})</h3>`+quest.map(q=>`<div class=muted>• ${esc(q)}</div>`).join('') : ''}
+    ${planHtml}`;
   const npcs = (r.npcs||[]).map(n=>`<tr><td>(${n.x},${n.y})</td><td>${esc(n.sprite)}</td><td class=muted>${esc(n.kind)}</td></tr>`).join('');
   const evs = (r.events||[]).map(e=>`<span class="badge ev">${esc(e.kind)}${e.policy?': '+esc(e.policy)+' c'+e.conf:''}${e.dir?': '+esc(e.dir)+(e.bfs?'/bfs '+esc(e.bfs):'')+' c'+e.conf:''}${e.query?': '+esc(e.query):''}${e.reason?' — '+esc(e.reason):''}</span>`).join(' ');
   $('state').innerHTML = `

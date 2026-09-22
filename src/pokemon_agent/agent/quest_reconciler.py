@@ -14,12 +14,22 @@ class QuestStep:
     why: str = ""
     status: str = "pending"          # pending | active | done | wedged
     provisional: bool = False        # a synthesized bootstrap default; superseded once L1 adds real steps
+    kind: str = "action"             # "travel" = reach a map (on_map completion ok);
+                                      # "action" = done by a state change (needs a real criterion)
 
 
-def _criterion(done_when: str | None, map_id: int) -> dict:
+def _criterion(done_when: str | None, map_id: int, kind: str) -> dict:
     from .planner_llm import Planner
     parsed = Planner._parse_done_when(done_when, map_id)
-    return parsed if parsed is not None else {"on_map": map_id}
+    if kind == "travel":
+        # a travel leg completes on ARRIVAL by definition — always on_map, ignoring any (bogus)
+        # criterion a directly-constructed step might carry (validate_step gates L1-emitted ones).
+        return {"on_map": map_id}
+    # kind == "action": a real, non-on_map criterion is REQUIRED (never complete-on-arrival)
+    if parsed is None or parsed == {"on_map": map_id}:
+        raise ValueError(
+            f"action quest step (map {map_id}) needs a checkable done_when, got {done_when!r}")
+    return parsed
 
 
 def compile_steps_to_directives(steps: list[QuestStep]) -> list[Directive]:
@@ -29,7 +39,7 @@ def compile_steps_to_directives(steps: list[QuestStep]) -> list[Directive]:
     on_map on the travel directive)."""
     out: list[Directive] = []
     for s in steps:
-        crit = _criterion(s.done_when, s.map)
+        crit = _criterion(s.done_when, s.map, s.kind)
         nm = map_name(s.map)
         if s.talk:
             out.append(Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": s.map},
@@ -68,5 +78,6 @@ def reconcile_quests(current, proposal, *, next_id):
             continue
         have.add(key)
         new_steps.append(QuestStep(id=next_id(), map=mp, talk=bool(a.get("talk")),
-                                   who=(a.get("who") or None), done_when=dw, why=str(a.get("why") or "")[:80]))
+                                   who=(a.get("who") or None), done_when=dw, why=str(a.get("why") or "")[:80],
+                                   kind=str(a.get("kind") or "action")))
     return done + active + new_steps + pending

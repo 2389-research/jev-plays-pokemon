@@ -13,6 +13,7 @@ from pokemon_agent.games.pokemon_red.game_state import (
 # Gen-1 font tiles
 SP = 0x7F
 UP = {c: 0x80 + (ord(c) - ord("A")) for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"}
+LOW = {c: 0xA0 + (ord(c) - ord("a")) for c in "abcdefghijklmnopqrstuvwxyz"}
 COLON = 0x9C
 
 
@@ -37,6 +38,16 @@ def test_real_dialogue_is_detected():
     _row(mem, 12, [UP["O"], UP["A"], UP["K"], COLON, SP, UP["H"], UP["I"]])
     text, active = read_screen_text(MemFake(mem))
     assert active is True and "OAK" in text
+
+
+def test_all_lowercase_dialogue_is_detected():
+    # a continuation line with NO uppercase (e.g. "...strong, they can protect me!") must still read
+    # as dialogue. Otherwise the agent gets permanently stuck: it walked into an NPC, a text box is up
+    # so it can't move, but it thinks it's overworld and never presses A to close the conversation.
+    mem = {}
+    _row(mem, 12, [SP if c == " " else LOW[c] for c in "strong they can"])
+    text, active = read_screen_text(MemFake(mem))
+    assert active is True and "strong" in text
 
 
 def test_cutscene_graphics_are_not_dialogue():

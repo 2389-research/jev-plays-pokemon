@@ -254,6 +254,10 @@ class ReasoningLoop:
         ctx = (obs.game_state or {}).get("context") or {}
         ctx_kind = ctx.get("kind")
 
+        # keep the compact battle-goals (catch list + level_target) in sync with L1's plan each
+        # step, so the battle layer sees the CURRENT goals on the next battle-start edge (§7.1).
+        self._sync_battle_goals()
+
         # --- battle owns the step (deterministic RAM bit — a fact, never a classification) ---
         if ctx.get("in_battle"):
             rstep, latency, usage, result = self._battle_turn(obs)
@@ -445,6 +449,11 @@ class ReasoningLoop:
                     self._plan.mission = prop["mission"]
                 if prop.get("milestone"):
                     self._plan.milestone = prop["milestone"]
+                # standing battle goal (§7.1): a catch list steers battle_L2 toward CAPTURE.
+                # Only a non-null list edits it (None = "unchanged"); [] explicitly clears it.
+                if prop.get("catch") is not None:
+                    self._plan.battle_goals = {**self._plan.battle_goals,
+                                               "catch": list(prop["catch"] or [])}
                 # record the approaches L1 discarded so they aren't retried
                 for s in removed:
                     note = s.why or s.done_when or f"map {s.map}"
@@ -1718,6 +1727,14 @@ class ReasoningLoop:
         return result
 
     # --- battle sub-policy (mode dispatch routes here when in_battle) ---------
+    def _sync_battle_goals(self) -> None:
+        """Refresh `self._battle_goals` from L1's plan-level goals + the loop's level target
+        (design §7.1). Compact shape `{"catch": [...], "level_target": int}`; empty catch ->
+        GRIND. Cheap + idempotent, called each step so a plan change is picked up promptly."""
+        from ..games.pokemon_red import battle_l2
+        pg = getattr(self._plan, "battle_goals", None) if self._plan is not None else None
+        self._battle_goals = battle_l2.battle_goals_from_plan(pg, self.level_target)
+
     def _battle_turn(self, obs):
         """One battle turn under the layered objective model (design §2).
 
@@ -1749,8 +1766,16 @@ class ReasoningLoop:
                                reasoning="advancing battle text", action=AdvanceDialogAction())
             return rstep, 0, {}, res
 
-        objective = self._battle_objective or battle_l2.GRIND_EXP
+        # per-turn SAFETY re-eval (design §2.1): keep the cached objective, but if CAPTURE/
+        # GRIND would faint us at critical HP, override this turn to SURVIVE (trainer) / ESCAPE
+        # (wild) so we heal or flee instead of throwing a ball into a KO.
         state = battle_l2.build_state(emu, self._battle_goals)
+        cached = self._battle_objective or battle_l2.GRIND_EXP
+        objective = battle_l2.safety_override(cached, state)
+        if objective != cached:
+            self.on_event("battle_safety_override", {
+                "step": self.session.step, "from": cached, "to": objective,
+                "hp_frac": round(battle_l2.hp_frac(state.get("active")), 3)})
         action = battle_agent.choose_action(objective, state)
         kind = action.get("kind")
 
@@ -1765,7 +1790,10 @@ class ReasoningLoop:
 
         # --- CAPTURE (target weak) -> throw a ball ---
         if kind == "ball":
-            r = battle_actions.throw_ball(emu, action["item"])
+            # a SUCCESSFUL catch runs a long tail (wobbles -> "Gotcha!" -> nickname prompt ->
+            # added to party); give the macro enough drain to resolve it fully in one turn,
+            # so the battle actually ENDS rather than leaving the loop mid-catch-animation.
+            r = battle_actions.throw_ball(emu, action["item"], max_advance=150)
             return self._battle_result(
                 objective, "ball", ok=bool(r.get("ok")), mode_before=mode_before,
                 events=[f"battle_action:ball:{action['item']}", f"caught:{r.get('caught')}"],

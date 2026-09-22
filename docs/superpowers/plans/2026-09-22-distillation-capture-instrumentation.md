@@ -22,7 +22,7 @@
 - The per-step record is written by `self.recorder.record(...)` inside `_finish` at `reason_loop.py:1741`. Flush `Capture` there (same place, same step number `self.session.step`).
 - `RunRecorder.__init__(..., state_every: int = 0)` already writes `states/map<M>_step<N>.state` every step when `state_every=1` (`run_recorder.py:121-135`). Step-anchoring = pass `state_every=1`; the anchor is the **glob** `states/*_step<N>.state` (map id is not known at capture time).
 - Planner decision methods (`planner_llm.py`): single-call `l1_triage` (503), `l1_decide` (561), `l1_repair` (597); L2 `next_waypoint` (696), `propose_target` (750); multi-round via `_llm_with_search` (369-395) → `l1_brainstorm` (511), `strategize` (396).
-- Jev methods (`typesafe_reasoner.py`): `step` (158, the executor Choice — layer `jev_flow`), `path_step` (278, `jev_path`), `choose_policy` (374, `jev_policy`), `choose_flow` (334, `jev_menu`). `battle_agent.choose_move` (122, `battle_move`).
+- Jev methods (`typesafe_reasoner.py`): `step` (158, the executor action Choice — layer `jev_action`), `path_step` (278, `jev_path`), `choose_policy` (374, `jev_policy`), `choose_flow` (334, the dialogue/menu flow router — `jev_flow`), `choose_npc` (invoked `reason_loop.py:1090` — `jev_npc`). `battle_agent.choose_move` (122, `battle_move`).
 - CLI: `scripts/run_agent.py` argparse (73+), `RunRecorder(emu, rec_dir)` at 253, `ReasoningLoop(...)` at 257.
 
 ---
@@ -588,8 +588,11 @@ from pokemon_agent.logging.capture import Capture
 from pokemon_agent.agent.planner_llm import Planner
 
 
-class _Knowledge:               # stub KB so _llm_with_search treats a "search" list as a round
-    def query_texts(self, queries, k=3): return ["(kb result)"]
+class _Knowledge:               # stub KB so _llm_with_search treats a "search" list as a round.
+    # Must match the REAL signature: query_texts(text, *, top_k=5, max_chars=1600) — the loop calls
+    # it as self.knowledge.query_texts(q, top_k=4), so **kwargs (or the keyword-only params) is required
+    # or the call raises TypeError and l1_brainstorm swallows it before recording.
+    def query_texts(self, text, **kwargs): return ["(kb result)"]
 
 
 class _SearchProv:
@@ -646,7 +649,7 @@ git commit -m "distill: capture multi-round L1 sites (brainstorm/strategize) —
 ## Task 6: Instrument the Jev reasoner sites (with confidence)
 
 **Files:**
-- Modify: `src/pokemon_agent/agent/typesafe_reasoner.py` (`__init__`; `step` 158, `path_step` 278, `choose_policy` 374, `choose_flow` 334)
+- Modify: `src/pokemon_agent/agent/typesafe_reasoner.py` (`__init__`; `step` 158, `path_step` 278, `choose_policy` 374, `choose_flow` 334, `choose_npc`)
 - Test: `tests/unit/test_capture_jev.py`
 
 Give `TypeSafeReasoner` a `self.capture = None`. Each site already builds `state`, calls `client.system_one`, and reads `ans.choice`/`ans.confidence`/`ans.probabilities`. Record after the answer is read, capturing `confidence` and (in `extra`) `probabilities`.
@@ -722,7 +725,7 @@ Expected: PASS; suite green.
 
 ```bash
 git add src/pokemon_agent/agent/typesafe_reasoner.py tests/unit/test_capture_jev.py
-git commit -m "distill: capture Jev sites (flow/path/policy/menu) with calibrated confidence"
+git commit -m "distill: capture Jev sites (action/path/policy/flow/npc) with calibrated confidence"
 ```
 
 ---
@@ -784,8 +787,9 @@ And pass `capture_mode=args.capture` into `ReasoningLoop(...)`.
 - [ ] **Step 3:** Manually verify `--capture off` (default) writes NO `decisions.jsonl`, and `--capture decisions` does. Use `--mode reason` (short run, real provider):
 
 ```bash
-uv run python scripts/run_agent.py --mode reason --steps 5 --goal-map 12    # default: no decisions.jsonl
-uv run python scripts/run_agent.py --mode reason --steps 5 --goal-map 12 --capture decisions   # decisions.jsonl appears
+# --demo (or --rom <path>) is required or build_emulator raises SystemExit.
+uv run python scripts/run_agent.py --demo --mode reason --steps 5 --goal-map 12    # default: no decisions.jsonl
+uv run python scripts/run_agent.py --demo --mode reason --steps 5 --goal-map 12 --capture decisions   # decisions.jsonl appears
 ```
 
 Expected: first run's record-dir has NO `decisions.jsonl`; second run's does. (If offline, skip this manual step and rely on Task 10.)

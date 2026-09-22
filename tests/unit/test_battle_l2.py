@@ -114,3 +114,53 @@ def test_action_capture_no_ball_falls_back_to_move():
     weak = {"species": "Pidgey", "hp": 3, "max_hp": 20}
     act = battle_agent.choose_action(CAPTURE, _state(enemy=weak, items=[{"item": "Potion", "qty": 1}]))
     assert act["kind"] == "move"
+
+
+# ---------------------------------------------------------------- safety_override (§2.1)
+
+from pokemon_agent.games.pokemon_red.battle_l2 import (  # noqa: E402
+    battle_goals_from_plan,
+    safety_override,
+)
+
+CRITICAL = {"species": "Squirtle", "level": 6, "hp": 2, "max_hp": 22}  # ~9%, below critical band
+
+
+def test_safety_override_capture_wild_flips_to_escape():
+    # CAPTURE + our mon at critical HP in a WILD battle -> ESCAPE (cut losses, don't faint).
+    assert safety_override(CAPTURE, _state(active=CRITICAL)) == ESCAPE
+
+
+def test_safety_override_grind_trainer_flips_to_survive():
+    # GRIND-EXP + critical HP in a TRAINER battle (can't run) -> SURVIVE (heal).
+    assert safety_override(GRIND_EXP, _state(is_trainer=True, active=CRITICAL)) == SURVIVE
+
+
+def test_safety_override_healthy_mon_is_unchanged():
+    assert safety_override(CAPTURE, _state()) == CAPTURE
+    assert safety_override(GRIND_EXP, _state()) == GRIND_EXP
+
+
+def test_safety_override_leaves_survive_and_escape_alone():
+    # Already-defensive objectives are never overridden, even at critical HP.
+    assert safety_override(SURVIVE, _state(active=CRITICAL)) == SURVIVE
+    assert safety_override(ESCAPE, _state(active=CRITICAL)) == ESCAPE
+
+
+# ---------------------------------------------------------------- battle_goals_from_plan (§7.1)
+
+def test_battle_goals_from_plan_carries_catch_and_level_target():
+    goals = battle_goals_from_plan({"catch": ["Pidgey"]}, level_target=12)
+    assert goals == {"catch": ["Pidgey"], "level_target": 12}
+
+
+def test_battle_goals_from_plan_defaults_empty():
+    assert battle_goals_from_plan(None) == {"catch": [], "level_target": 0}
+    assert battle_goals_from_plan({}) == {"catch": [], "level_target": 0}
+
+
+def test_derived_goals_drive_capture_objective():
+    # End-to-end of the pure layer: a plan catch goal -> derived goals -> CAPTURE objective.
+    goals = battle_goals_from_plan({"catch": ["Kakuna"]}, level_target=10)
+    state = _state(enemy={"species": "Kakuna", "hp": 20, "max_hp": 20})
+    assert choose_objective(state, goals) == CAPTURE

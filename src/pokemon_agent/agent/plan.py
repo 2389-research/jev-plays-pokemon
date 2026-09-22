@@ -98,6 +98,13 @@ class AgentPlan(BaseModel):
     stack: list[Directive] = Field(default_factory=list,
                                    description="suspended directives (a higher need preempted them)")
 
+    # --- standing battle goals (L1 -> battle_L2, design §7.1) ---
+    # A small structured field L1's DECIDE may set to steer the in-battle objective layer,
+    # e.g. {"catch": ["Pidgey"]} or {"catch": ["any"]} to want a team member. Empty by
+    # default, which the battle layer reads as GRIND (nothing regresses).
+    battle_goals: dict = Field(default_factory=dict,
+                               description='in-battle goals, e.g. {"catch": ["Pidgey"]} — steers battle_L2')
+
     # --- strategy / anti-stuck (option generation + tried-and-failed ledger) ---
     hypotheses: list[str] = Field(default_factory=list,
                                   description="alternative approaches to try if the current one fails")

@@ -103,6 +103,31 @@ def choose_objective(state: dict, goals: dict | None = None) -> str:
     return GRIND_EXP
 
 
+def safety_override(objective: str, state: dict) -> str:
+    """Per-turn safety override (design §2.1 critical-HP trigger). Pure + testable.
+
+    Don't faint while trying to catch or grind: if the cached objective is CAPTURE or
+    GRIND-EXP and our active mon is at CRITICAL HP, flip to SURVIVE (trainer — must win, so
+    heal) or ESCAPE (wild — cut losses). Any other objective (already SURVIVE/ESCAPE, or a
+    healthy mon) is returned unchanged. This is a per-turn override, NOT a re-plan: the loop
+    keeps the initial cached objective and re-derives this each turn from the live state."""
+    if objective not in (CAPTURE, GRIND_EXP):
+        return objective
+    if hp_frac(state.get("active")) <= CRITICAL_HP_FRAC:
+        return SURVIVE if state.get("is_trainer") else ESCAPE
+    return objective
+
+
+def battle_goals_from_plan(plan_goals: dict | None, level_target: int = 0) -> dict:
+    """Derive the compact battle-goals dict the battle layer reads (design §7.1) from L1's
+    plan-level goals + the loop's level target. Shape: `{"catch": [...], "level_target": int}`.
+
+    `plan_goals` is the (optional) `battle_goals` field L1 sets on the plan — currently a
+    `{"catch": [species|"any", ...]}` map; anything absent defaults empty (→ GRIND)."""
+    catch = list((plan_goals or {}).get("catch") or [])
+    return {"catch": catch, "level_target": int(level_target or 0)}
+
+
 def build_state(emu: Emulator, goals: dict | None = None) -> dict:
     """Assemble the pure `choose_objective`/`choose_action` state dict from live RAM."""
     b = read_battle(emu) or {}

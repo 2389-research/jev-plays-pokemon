@@ -15,36 +15,15 @@ import pytest
 
 from pokemon_agent.actions.controller import ActionController
 from pokemon_agent.agent.reason_loop import ReasoningLoop
-from pokemon_agent.agent.reasoner import ReasonStep, ReflectionPlan
 from pokemon_agent.agent.session import Session
-from pokemon_agent.core.models import Direction, GoalState, MoveAction
+from pokemon_agent.core.models import GoalState
 from pokemon_agent.emulator.fake_emulator import FakeEmulator
 from pokemon_agent.logging.run_recorder import RunRecorder
 from pokemon_agent.observations.builder import ObservationBuilder
+from tests.support.stub_reasoner import StubReasoner as _StubReasoner
 
 ROOT = Path(__file__).resolve().parents[2]
 ROM_PATH = ROOT / "roms" / "pokemon_red.gb"
-
-
-class _StubReasoner:
-    """Deterministic decider — always steps SOUTH. A `provider` stub lets the loop build its
-    Planner (so overworld legs call propose_target -> an `l2_propose_target` capture record)."""
-
-    class _Prov:
-        model = "stub"
-        def chat_json(self, system, user, image=None):
-            return ('{"kind":"exit"}', 7, {"total_tokens": 5})
-
-    def __init__(self):
-        self.provider = self._Prov()
-
-    def reflect(self, **kwargs):
-        return ReflectionPlan(next_objective="go south"), 1, {}
-
-    def step(self, **kwargs):
-        rstep = ReasonStep(location="l", objective="o", reasoning="r",
-                           action=MoveAction(direction=Direction.SOUTH))
-        return rstep, 1, {"confidence": 0.9}
 
 
 def _run_demo(rec_dir: Path, *, capture_mode: str, steps: int, goal_map=None) -> list:

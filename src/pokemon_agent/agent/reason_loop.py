@@ -259,6 +259,9 @@ class ReasoningLoop:
         # the brittle has_upper dialog heuristic as the router. ---
         flow = self._route_flow(obs, ctx)
         if flow == "menu":
+            shopped = self._maybe_shop(obs, shot)   # SHOP directive at an open Mart counter -> buy macro
+            if shopped is not None:
+                return shopped
             return self._jev_turn(obs, player_desc, self._blocked_dirs(obs, None), None, shot)
         if flow == "dialogue":
             return self._advance_dialog(obs, shot)
@@ -1484,6 +1487,47 @@ class ReasoningLoop:
         -> dialogue (advancing a real box clears the stall; A on the overworld is a cheap, self-
         correcting no-op — far safer than walking into an unread box forever); else navigate."""
         return "dialogue" if (ctx.get("screen_text_raw") or "").strip() else "navigate"
+
+    @staticmethod
+    def _shop_item_qty(directive: Directive) -> tuple[str | None, int]:
+        """What to buy for a SHOP directive: the item NAME and quantity, from the directive's
+        target ({item, qty}) or, failing that, a ``has_item:<name>`` success predicate (qty 1)."""
+        tgt = directive.target or {}
+        item = tgt.get("item") or (directive.success or {}).get("has_item")
+        try:
+            qty = max(1, int(tgt.get("qty") or 1))
+        except (TypeError, ValueError):
+            qty = 1
+        return (str(item) if item else None), qty
+
+    def _maybe_shop(self, obs, shot) -> ActionResult | None:
+        """When the active directive is a SHOP and the Mart's BUY/SELL/QUIT counter menu is open,
+        run the deterministic buy macro (design §6.1) instead of letting Jev flail through the menu.
+        Guarded: fires only on the unambiguous RAM signal (the root shop menu is up) with a known
+        item to buy. Returns an ActionResult when it handled the step, else None (normal flow)."""
+        d = self._directive
+        if d is None or d.intent is not Intent.SHOP:
+            return None
+        from ..games.pokemon_red import shop as shop_macro
+        emu = self.controller.emu
+        if not shop_macro.at_shop_menu(emu):
+            return None
+        item, qty = self._shop_item_qty(d)
+        if item is None:
+            return None
+        mode_before = detect_mode(emu)
+        res = shop_macro.shop_buy(emu, item, qty)
+        self.on_event("shop_buy", {"step": self.session.step, "item": item, "qty": qty, "result": res})
+        from ..core.models import WaitAction
+        rstep = ReasonStep(location="mart", objective=f"buy {qty}x {item}",
+                           reasoning=f"SHOP macro: {res.get('reason', 'purchased')}",
+                           action=WaitAction(frames=1))
+        self._prev = rstep
+        self._emit_reason(rstep, 0)
+        result = ActionResult(success=bool(res.get("ok")), result="completed",
+                              mode_before=mode_before, mode_after=detect_mode(emu),
+                              detail=f"shop_buy {item} x{qty}: {res.get('reason', 'ok')}")
+        return self._finish(obs, rstep, result, 0, {}, shot)
 
     def _advance_dialog(self, obs, shot) -> ActionResult:
         from ..core.models import AdvanceDialogAction

@@ -132,3 +132,62 @@ def test_capture_at_critical_hp_does_not_throw_and_flees():
         assert loop._battle_objective == CAPTURE
     finally:
         emu.close()
+
+
+def test_organic_capture_weakens_then_catches_from_full_hp():
+    """The agent runs the WHOLE battle section to capture: a wild at FULL HP + a standing catch goal
+    -> battle_L2 picks CAPTURE -> choose_action WEAKENS with moves while the foe is healthy, then
+    THROWS Poké Balls once it's in the catch band -> caught. Not the pre-weakened e2e fixture; here
+    it must fight it down first. Uses states/wild_battle.state (full-HP Kakuna) + a fair catch rate."""
+    if not ROM_PATH.exists() or not (ROOT / "states" / "wild_battle.state").exists():
+        pytest.skip("ROM/wild-battle fixture not present")
+    from pokemon_agent.agent.plan import AgentPlan
+    from pokemon_agent.emulator.pyboy_adapter import PyBoyEmulator
+    from pokemon_agent.games.pokemon_red import battle
+    from pokemon_agent.games.pokemon_red.battle_l2 import CAPTURE
+    from pokemon_agent.games.pokemon_red.game_state import read_battle, read_party
+
+    emu = PyBoyEmulator(str(ROM_PATH), window="null")
+    try:
+        emu.load_state(str(ROOT / "states" / "wild_battle.state"))
+        emu.tick(4)
+        emu.write_memory(0xCFEC, 255)                        # high catch rate (Caterpie/Weedle-class)
+        emu.write_memory(0xCFE6, 0); emu.write_memory(0xCFE7, 44)   # enough HP to survive weakening
+        emu.write_memory(0xD31D, 2)
+        for off, val in [(0, 4), (1, 5), (2, 20), (3, 3), (4, 0xFF)]:  # 5 Poké Ball, 3 Potion
+            emu.write_memory(0xD31E + off, val)
+
+        events = []
+        loop = _loop(emu, events)
+        loop._plan = AgentPlan(battle_goals={"catch": ["any"]})   # L1 standing goal
+
+        start_hp = read_battle(emu)["enemy"]["hp"]
+        party_before = len(read_party(emu))
+        weakened = False
+        threw = False
+        caught = False
+        for _ in range(25):
+            if not battle.in_battle(emu):
+                break
+            hp_before = read_battle(emu)["enemy"]["hp"]
+            balls_before = _qty(__import__("pokemon_agent.games.pokemon_red.game_state",
+                                           fromlist=["read_items"]).read_items(emu), "Poke Ball")
+            loop.step_once()
+            if battle.in_battle(emu):
+                if read_battle(emu)["enemy"]["hp"] < hp_before:
+                    weakened = True                      # a move brought the foe down
+            balls_after = _qty(__import__("pokemon_agent.games.pokemon_red.game_state",
+                                          fromlist=["read_items"]).read_items(emu), "Poke Ball")
+            if balls_after < balls_before:
+                threw = True                             # a ball was thrown
+            if len(read_party(emu)) > party_before:
+                caught = True
+                break
+
+        assert loop._battle_objective == CAPTURE, "a catch goal on a wild should pick CAPTURE"
+        assert weakened, "it should weaken the full-HP wild with moves before throwing"
+        assert threw, "it should throw a ball once the foe is in the catch band"
+        assert caught and len(read_party(emu)) == party_before + 1   # party +1
+        assert not battle.in_battle(emu)
+    finally:
+        emu.close()

@@ -94,6 +94,7 @@
       "dest_warp": 1,
       "dest_portal": "redshouse1f:warp1",
       "component": 2,
+      "direction": "interior",
       "label": "PalletTown warp 1 -> REDS_HOUSE_1F",
       "note": null
     },
@@ -109,6 +110,7 @@
       "dest_warp": 1,
       "dest_portal": "blueshouse:warp1",
       "component": 2,
+      "direction": "interior",
       "label": "PalletTown warp 2 -> BLUES_HOUSE",
       "note": null
     },
@@ -124,6 +126,7 @@
       "dest_warp": 2,
       "dest_portal": "oakslab:warp2",
       "component": 2,
+      "direction": "interior",
       "label": "PalletTown warp 3 -> OAKS_LAB",
       "note": null
     },
@@ -139,6 +142,7 @@
       "dest_warp": 1,
       "dest_portal": "viridianpokecenter:warp1",
       "component": 0,
+      "direction": "interior",
       "label": "ViridianCity warp 1 -> VIRIDIAN_POKECENTER",
       "note": null
     },
@@ -154,6 +158,7 @@
       "dest_warp": 1,
       "dest_portal": "viridianmart:warp1",
       "component": 0,
+      "direction": "interior",
       "label": "ViridianCity warp 2 -> VIRIDIAN_MART",
       "note": null
     },
@@ -169,6 +174,7 @@
       "dest_warp": 1,
       "dest_portal": "viridianschoolhouse:warp1",
       "component": 0,
+      "direction": "interior",
       "label": "ViridianCity warp 3 -> VIRIDIAN_SCHOOL_HOUSE",
       "note": null
     },
@@ -184,6 +190,7 @@
       "dest_warp": 1,
       "dest_portal": "viridiannicknamehouse:warp1",
       "component": 0,
+      "direction": "interior",
       "label": "ViridianCity warp 4 -> VIRIDIAN_NICKNAME_HOUSE",
       "note": null
     },
@@ -199,6 +206,7 @@
       "dest_warp": 1,
       "dest_portal": "viridiangym:warp1",
       "component": 0,
+      "direction": "north",
       "label": "ViridianCity warp 5 -> VIRIDIAN_GYM",
       "note": null
     },
@@ -214,6 +222,7 @@
       "dest_warp": 1,
       "dest_portal": "museum1f:warp1",
       "component": 1,
+      "direction": "north",
       "label": "PewterCity warp 1 -> MUSEUM_1F",
       "note": null
     },
@@ -229,6 +238,7 @@
       "dest_warp": 3,
       "dest_portal": "museum1f:warp3",
       "component": 2,
+      "direction": "north",
       "label": "PewterCity warp 2 -> MUSEUM_1F",
       "note": null
     },
@@ -244,6 +254,7 @@
       "dest_warp": 1,
       "dest_portal": "pewtergym:warp1",
       "component": 1,
+      "direction": "interior",
       "label": "PewterCity warp 3 -> PEWTER_GYM",
       "note": null
     },
@@ -259,6 +270,7 @@
       "dest_warp": 1,
       "dest_portal": "pewternidoranhouse:warp1",
       "component": 1,
+      "direction": "interior",
       "label": "PewterCity warp 4 -> PEWTER_NIDORAN_HOUSE",
       "note": null
     },
@@ -274,6 +286,7 @@
       "dest_warp": 1,
       "dest_portal": "pewtermart:warp1",
       "component": 1,
+      "direction": "interior",
       "label": "PewterCity warp 5 -> PEWTER_MART",
       "note": null
     },
@@ -289,6 +302,7 @@
       "dest_warp": 1,
       "dest_portal": "pewterspeechhouse:warp1",
       "component": 1,
+      "direction": "south",
       "label": "PewterCity warp 6 -> PEWTER_SPEECH_HOUSE",
       "note": null
     },
@@ -304,6 +318,7 @@
       "dest_warp": 1,
       "dest_portal": "pewterpokecenter:warp1",
       "component": 1,
+      "direction": "interior",
       "label": "PewterCity warp 7 -> PEWTER_POKECENTER",
       "note": null
     },
@@ -319,6 +334,7 @@
       "dest_warp": 1,
       "dest_portal": "diglettscaveroute2:warp1",
       "component": 1,
+      "direction": "north",
       "label": "Route2 warp 1 -> DIGLETTS_CAVE_ROUTE_2",
       "note": null
     },
@@ -334,6 +350,7 @@
       "dest_warp": 2,
       "dest_portal": "viridianforestnorthgate:warp2",
       "component": 0,
+      "direction": "north",
       "label": "Route2 warp 2 -> VIRIDIAN_FOREST_NORTH_GATE",
       "note": null
     },
@@ -349,6 +366,7 @@
       "dest_warp": 1,
       "dest_portal": "route2tradehouse:warp1",
       "component": 1,
+      "direction": "interior",
       "label": "Route2 warp 3 -> ROUTE_2_TRADE_HOUSE",
       "note": null
     },
@@ -364,6 +382,7 @@
       "dest_warp": 2,
       "dest_portal": "route2gate:warp2",
       "component": 5,
+      "direction": "east",
       "label": "Route2 warp 4 -> ROUTE_2_GATE",
       "note": null
     },
@@ -379,6 +398,7 @@
       "dest_warp": 3,
       "dest_portal": "route2gate:warp3",
       "component": 9,
+      "direction": "interior",
       "label": "Route2 warp 5 -> ROUTE_2_GATE",
       "note": null
     },
@@ -394,6 +414,7 @@
       "dest_warp": 3,
       "dest_portal": "viridianforestsouthgate:warp3",
       "component": 10,
+      "direction": "west",
       "label": "Route2 warp 6 -> VIRIDIAN_FOREST_SOUTH_GATE",
       "note": null
     },
@@ -409,6 +430,7 @@
       "dest_warp": 2,
       "dest_portal": "route2:warp2",
       "component": 0,
+      "direction": "north",
       "label": "ViridianForestNorthGate warp 1 -> LAST_MAP",
       "note": "LAST_MAP -> map 13 (paired north-side door; twin slot entered)"
     },
@@ -424,6 +446,7 @@
       "dest_warp": 2,
       "dest_portal": "route2:warp2",
       "component": 0,
+      "direction": "north",
       "label": "ViridianForestNorthGate warp 2 -> LAST_MAP",
       "note": "LAST_MAP -> map 13 (incoming warp targets slot 2)"
     },
@@ -439,6 +462,7 @@
       "dest_warp": 1,
       "dest_portal": "viridianforest:warp1",
       "component": 0,
+      "direction": "south",
       "label": "ViridianForestNorthGate warp 3 -> VIRIDIAN_FOREST",
       "note": null
     },
@@ -454,6 +478,7 @@
       "dest_warp": 1,
       "dest_portal": "viridianforest:warp1",
       "component": 0,
+      "direction": "south",
       "label": "ViridianForestNorthGate warp 4 -> VIRIDIAN_FOREST",
       "note": null
     },
@@ -469,6 +494,7 @@
       "dest_warp": 4,
       "dest_portal": "viridianforest:warp4",
       "component": 0,
+      "direction": "north",
       "label": "ViridianForestSouthGate warp 1 -> VIRIDIAN_FOREST",
       "note": null
     },
@@ -484,6 +510,7 @@
       "dest_warp": 5,
       "dest_portal": "viridianforest:warp5",
       "component": 0,
+      "direction": "north",
       "label": "ViridianForestSouthGate warp 2 -> VIRIDIAN_FOREST",
       "note": null
     },
@@ -499,6 +526,7 @@
       "dest_warp": 6,
       "dest_portal": "route2:warp6",
       "component": 0,
+      "direction": "south",
       "label": "ViridianForestSouthGate warp 3 -> LAST_MAP",
       "note": "LAST_MAP -> map 13 (incoming warp targets slot 3)"
     },
@@ -514,6 +542,7 @@
       "dest_warp": 6,
       "dest_portal": "route2:warp6",
       "component": 0,
+      "direction": "south",
       "label": "ViridianForestSouthGate warp 4 -> LAST_MAP",
       "note": "LAST_MAP -> map 13 (paired south-side door; twin slot entered)"
     },
@@ -529,6 +558,7 @@
       "dest_warp": 3,
       "dest_portal": "viridianforestnorthgate:warp3",
       "component": 0,
+      "direction": "north",
       "label": "ViridianForest warp 1 -> VIRIDIAN_FOREST_NORTH_GATE",
       "note": null
     },
@@ -544,6 +574,7 @@
       "dest_warp": 4,
       "dest_portal": "viridianforestnorthgate:warp4",
       "component": 0,
+      "direction": "north",
       "label": "ViridianForest warp 2 -> VIRIDIAN_FOREST_NORTH_GATE",
       "note": null
     },
@@ -559,6 +590,7 @@
       "dest_warp": 2,
       "dest_portal": "viridianforestsouthgate:warp2",
       "component": 0,
+      "direction": "south",
       "label": "ViridianForest warp 3 -> VIRIDIAN_FOREST_SOUTH_GATE",
       "note": null
     },
@@ -574,6 +606,7 @@
       "dest_warp": 2,
       "dest_portal": "viridianforestsouthgate:warp2",
       "component": 0,
+      "direction": "south",
       "label": "ViridianForest warp 4 -> VIRIDIAN_FOREST_SOUTH_GATE",
       "note": null
     },
@@ -589,6 +622,7 @@
       "dest_warp": 2,
       "dest_portal": "viridianforestsouthgate:warp2",
       "component": 0,
+      "direction": "south",
       "label": "ViridianForest warp 5 -> VIRIDIAN_FOREST_SOUTH_GATE",
       "note": null
     },
@@ -604,6 +638,7 @@
       "dest_warp": 2,
       "dest_portal": "viridianforestsouthgate:warp2",
       "component": 0,
+      "direction": "south",
       "label": "ViridianForest warp 6 -> VIRIDIAN_FOREST_SOUTH_GATE",
       "note": null
     },

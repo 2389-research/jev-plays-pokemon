@@ -77,25 +77,35 @@ def first_hop(mid, comp, goal_map):
     return path[1][0] if len(path) > 1 else goal_map
 
 
+CARDINAL = {"north": "NORTH", "south": "SOUTH", "east": "EAST", "west": "WEST"}
+
+
 def render(mid, comp, goal_map):
-    """The scoped natural-language view (names, no coordinates)."""
+    """The scoped natural-language view (names + compass direction of travel, no coordinates)."""
     lines = [f"YOU ARE: {map_name(mid)}."]
-    nb = neighbors(mid, comp)
-    lines.append("\nON FOOT FROM HERE you can go to:")
-    for dm in nb:
-        lines.append(f"  - {map_name(dm)}")
-    # compact nearby connectivity (1-2 hops), as adjacency in natural language
-    lines.append("\nAREA CONNECTIONS (how places link up):")
+    lines.append("\nEXITS FROM HERE (the compass direction you travel to take each):")
+    for dm, p in neighbors(mid, comp).items():
+        d = p.get("direction", "interior")
+        way = f"go {CARDINAL[d]}" if d in CARDINAL else "go inside"
+        lines.append(f"  - {way}  ->  {map_name(dm)}")
+    # directed nearby connectivity: which way you travel between areas (cardinal links only)
+    lines.append("\nHOW AREAS CONNECT (direction of travel between them):")
     seen = set()
     frontier = {mid}
     for _ in range(3):
         nxt = set()
         for m in sorted(frontier):
-            dests = sorted({p["dest_map"] for p in PORTALS.values() if p["map"] == m and p["dest_map"] is not None})
-            if m not in seen and dests:
-                lines.append(f"  {map_name(m)} connects to: " + ", ".join(map_name(d) for d in dests))
+            if m in seen:
+                continue
+            links = {}
+            for p in PORTALS.values():
+                if p["map"] == m and p["dest_map"] is not None and p.get("direction") in CARDINAL:
+                    links[(p["direction"], p["dest_map"])] = None
+            if links:
+                lines.append(f"  {map_name(m)}:  " +
+                             ";  ".join(f"{CARDINAL[d]} -> {map_name(dm)}" for (d, dm) in links))
                 seen.add(m)
-            nxt.update(dests)
+            nxt.update(dm for (_, dm) in links)
         frontier = nxt - seen
     lines.append(f"\nGOAL: reach {map_name(goal_map)}.")
     return "\n".join(lines)

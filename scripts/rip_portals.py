@@ -346,6 +346,22 @@ def build_portal_graph(map_names: list[str]) -> dict:
     def pid_edge(md: MapData, direction: str, comp_id: int) -> str:
         return f"{md.name.lower()}:edge_{direction}_c{comp_id}"
 
+    def warp_direction(md: MapData, x: int, y: int) -> str:
+        """Compass bearing of a warp EXTRACTED from its tile position on the map (top edge -> north
+        exit, bottom -> south, etc.). 'interior' = a door not on an edge (e.g. a mid-map building
+        entrance), which isn't a compass exit."""
+        fx = x / max(md.width - 1, 1)
+        fy = y / max(md.height - 1, 1)
+        if fy <= 0.20:
+            return "north"
+        if fy >= 0.80:
+            return "south"
+        if fx <= 0.20:
+            return "west"
+        if fx >= 0.80:
+            return "east"
+        return "interior"
+
     # ---- warp portals ------------------------------------------------------
     for md in maps.values():
         for wp in md.warps:
@@ -374,6 +390,7 @@ def build_portal_graph(map_names: list[str]) -> dict:
                 "dest_warp": dest_slot,
                 "dest_portal": dest_portal,
                 "component": comp_id,
+                "direction": warp_direction(md, x, y),
                 "label": f"{md.name} warp {slot} -> {dest_const}",
                 "note": note,
             }

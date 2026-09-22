@@ -961,6 +961,46 @@ class ReasoningLoop:
         return self._bfs_move(player, tgt, interact=False, blocked_dirs=blocked_dirs,
                               occupied=(occupied - {tgt}))
 
+    def _bfs_full_collision(self, player, xy, blocked_dirs, occupied):
+        """First step of a BFS to ``xy`` over the FULL current-map collision (ground truth from RAM),
+        so a portal deep in a maze is always reachable — unlike the learned-map / greedy pathers that
+        stall at maze walls. None if no route or the emulator collision is unreadable."""
+        try:
+            coll = read_collision_map(self.controller.emu)
+        except Exception:
+            coll = None
+        if not coll:
+            return None
+        goal = (int(xy[0]), int(xy[1]))
+        start = (int(player.x), int(player.y))
+        if start == goal:
+            return None
+        walk = set(coll["walkable"]) | {goal}   # the door tile may be off the walkable set
+        blocked = set(occupied) - {goal}
+        prev: dict[tuple[int, int], tuple[tuple[int, int], Direction] | None] = {start: None}
+        q = deque([start])
+        found = False
+        while q:
+            cur = q.popleft()
+            if cur == goal:
+                found = True
+                break
+            cx, cy = cur
+            for d, (dx, dy) in DELTA.items():
+                nb = (cx + dx, cy + dy)
+                if nb in walk and nb not in prev and nb not in blocked:
+                    prev[nb] = (cur, d)
+                    q.append(nb)
+        if not found:
+            return None
+        step, first = goal, None
+        while prev[step] is not None:
+            first = prev[step][1]
+            step = prev[step][0]
+        if first is not None and first.value not in blocked_dirs:
+            return MoveAction(direction=first)
+        return None
+
     def _route_to_tile(self, obs, xy, blocked_dirs, avoid):
         """Route one step toward tile ``xy`` under the active pather (policy / jev / bfs)."""
         if self.pather == "policy" and getattr(self.reasoner, "choose_policy", None) is not None:
@@ -1102,6 +1142,12 @@ class ReasoningLoop:
                         return None
                 return InteractAction() if target.get("interact") else None
             avoid = set(occupied)
+            if target.get("portal"):
+                # a ground-truth portal deep in a maze (e.g. the forest north gate): solve it with a
+                # BFS over the FULL current-map collision, not the greedy policy pather that stalls.
+                mv = self._bfs_full_collision(player, xy, blocked_dirs, avoid)
+                if mv is not None:
+                    return mv
             return self._route_to_tile(obs, xy, blocked_dirs, avoid)
         if kind == "enter":
             return self._enter_map(int(target["map"]), obs, blocked_dirs, occupied)

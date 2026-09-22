@@ -34,6 +34,7 @@ def step_progress(prev: dict | None, cur: dict) -> dict:
     so it is left out here (added by the export join when available) — this is the log-only
     directional signal."""
     prev = prev or {}
+    has_baseline = prev != {}   # the first observed step has no predecessor => no measurable delta
     p_party, c_party = prev.get("party") or [], cur.get("party") or []
     plvl, php = _party_level_hp(p_party)
     clvl, chp = _party_level_hp(c_party)
@@ -43,12 +44,13 @@ def step_progress(prev: dict | None, cur: dict) -> dict:
     # is None on real logs unless a structured flag is added later. Kept for forward-compat.
     battle = next((e.get("result") for e in events if e.get("kind") == "battle_end"), None)
     return {
-        "map_changed": prev.get("map_id") != cur.get("map_id") and prev != {},
-        "level_delta": clvl - plvl,
-        "hp_delta": chp - php,
-        "items_delta": len(cur.get("items") or []) - len(prev.get("items") or []),
+        "map_changed": has_baseline and prev.get("map_id") != cur.get("map_id"),
+        "level_delta": (clvl - plvl) if has_baseline else 0,
+        "hp_delta": (chp - php) if has_baseline else 0,
+        "items_delta": (len(cur.get("items") or []) - len(prev.get("items") or [])) if has_baseline else 0,
         "battle_result": battle,
-        "caught": len(c_party) > len(p_party),   # party grew => a catch (log-only signal)
+        # party grew vs the previous step => a catch (log-only signal); no baseline => not a catch
+        "caught": has_baseline and len(c_party) > len(p_party),
         "wedged": any(k in kinds for k in ("step_wedged", "quest_step_wedged")),
     }
 

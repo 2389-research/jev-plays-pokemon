@@ -17,6 +17,7 @@ load-bearing for the happy path.
 from __future__ import annotations
 
 import json
+import time
 
 from ..games.pokemon_red import needs
 from ..games.pokemon_red.constants import MAP_NAMES_RAW
@@ -386,26 +387,50 @@ class Planner:
         return target
 
     def _llm_with_search(self, provider, system: str, state: dict, *, final_key: str,
-                         max_rounds: int = 3) -> dict:
+                         max_rounds: int = 3, capture_layer: str | None = None) -> dict:
         """Run an LLM call where the model MAY use the knowledge base as a tool: each round it
         returns either {"search": [...]} (we run the queries, feed results back as
         KNOWLEDGE_GATHERED) or its final JSON object (which contains ``final_key``). The model
-        decides when and what to look up. Returns the final parsed dict."""
+        decides when and what to look up. Returns the final parsed dict.
+
+        Distillation capture (§3, best-effort): when ``capture_layer`` is set, each intermediate
+        KB-search round is emitted as a ``model_round`` sharing a ``group_id``, and the final
+        parse is emitted as ONE decision record whose ``tokens`` is the sum across rounds and
+        whose ``extra.search_queries`` lists what was looked up. Never changes behavior."""
+        cap = getattr(self, "capture", None) if capture_layer else None
+        gid = f"{capture_layer}-{id(state)}-{time.time_ns()}" if cap is not None else None
+        tok_sum = 0
+        search_queries: list[str] = []
+
+        def _tok(usage):
+            return usage.get("total_tokens", 0) if isinstance(usage, dict) else 0
+
         gathered: list[dict] = []
         data: dict = {}
         for round_i in range(max_rounds + 1):
             s = {**state, "knowledge_gathered": gathered, "search_rounds_left": max_rounds - round_i}
             try:
-                content, _, _ = provider.chat_json(system, s)
+                content, _lat, _usage = provider.chat_json(system, s)
                 data = json.loads(strip_fences(content))
             except Exception:
                 return data
+            tok_sum += _tok(_usage)
             queries = data.get("search")
             is_search = (isinstance(queries, list) and queries and self.knowledge is not None
                          and final_key not in data and round_i < max_rounds)
             if not is_search:
+                if cap is not None:
+                    cap.record(capture_layer, group_id=gid, model=getattr(provider, "model", None),
+                               input=s, output_raw=content, parsed=data, tokens=tok_sum,
+                               latency_ms=_lat, extra={"search_queries": search_queries,
+                                                       "rounds": round_i, "usage": _usage})
                 return data
+            if cap is not None:
+                cap.record_round(capture_layer, group_id=gid, model=getattr(provider, "model", None),
+                                 input=s, output_raw=content, parsed=data, tokens=_tok(_usage),
+                                 latency_ms=_lat)
             for q in [str(x) for x in queries][:3]:
+                search_queries.append(q)
                 res = self.knowledge.query_texts(q, top_k=4)
                 gathered.append({"query": q, "results": res})
                 if self.on_search:
@@ -431,7 +456,8 @@ class Planner:
                 "maps": {str(mid): name for mid, name in MAP_NAMES_RAW.items()},
             }
             # the strategist MAY search the knowledge base as a tool before finalizing the quest
-            data = self._llm_with_search(prov, STRATEGIST_SYSTEM, state, final_key="steps", max_rounds=3)
+            data = self._llm_with_search(prov, STRATEGIST_SYSTEM, state, final_key="steps",
+                                         max_rounds=3, capture_layer="l1_strategize")
             plan_note = str(data.get("plan") or "quest").strip()
             quest: list[Directive] = []
             for step in data.get("steps", []):
@@ -547,7 +573,8 @@ class Planner:
                 "mission": context.get("mission"),
                 "milestone": context.get("milestone"),
             }
-            data = self._llm_with_search(prov, BRAINSTORM_SYSTEM, state, final_key="assessment")
+            data = self._llm_with_search(prov, BRAINSTORM_SYSTEM, state, final_key="assessment",
+                                         capture_layer="l1_brainstorm")
             if not isinstance(data, dict):
                 return {"assessment": ""}
             return {"assessment": str(data.get("assessment") or "")}
@@ -850,7 +877,8 @@ class Planner:
                 "why_replan": why or "starting a new travel directive",
             }
             # the tier-1 planner MAY search the KB as a tool before choosing the reroute target
-            data = self._llm_with_search(self.provider, PLANNER_SYSTEM, state, final_key="target_map")
+            data = self._llm_with_search(self.provider, PLANNER_SYSTEM, state, final_key="target_map",
+                                         capture_layer="l2_travel_reroute")
             tm = int(data.get("target_map"))
             reason = str(data.get("reason") or "").strip() or default_reason
             # validate: must be reachable and not the current map

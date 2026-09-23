@@ -309,3 +309,16 @@ def test_blocked_route_wedges_with_the_blockers_named():
     step = loop._plan_steps[0]
     assert step.status == "wedged" and "Fossil" in step.wedge_reason and loop._l1_event
     emu.close()
+
+
+def test_tms_and_hms_have_names():
+    from pokemon_agent.games.pokemon_red.constants import ITEMS
+    assert ITEMS[234] == "TM34 Bide" and ITEMS[0xC4] == "HM01 Cut" and ITEMS[0xC6] == "HM03 Surf"
+
+
+def test_route_blockers_reports_only_what_closes_the_route():
+    from pokemon_agent.agent.routing import route_blockers
+    # a 2-wide corridor (x=2..3 at y=1) filled by two fossils; a nerd stands on the open floor nearby
+    walk = {(x, y) for x in range(7) for y in range(4)} - {(2, 0), (3, 0), (2, 2), (3, 2), (2, 3), (3, 3)}
+    occ = {(2, 1): "Fossil", (3, 1): "Fossil", (5, 1): "Super Nerd"}   # nerd on open floor: walk around him
+    assert route_blockers(walk, (0, 1), (6, 1), occ) == [("Fossil", (2, 1)), ("Fossil", (3, 1))]

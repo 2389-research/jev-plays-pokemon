@@ -176,4 +176,20 @@ def route_blockers(walkable: set, start: tuple[int, int], goal: tuple[int, int],
             if n in occupied and n not in seen:
                 seen.add(n)
                 frontier.append(n)
-    return sorted(((occupied[c], c) for c in seen), key=lambda t: (t[1][1], t[1][0]))
+    # narrow to what actually closes the route: the smallest adjacent group of these objects whose
+    # removal (all other objects kept) opens it — e.g. both fossils, not the Super Nerd you can walk around
+    groups, left = [], set(seen)
+    while left:
+        g, stack = set(), [left.pop()]
+        while stack:
+            c = stack.pop()
+            g.add(c)
+            for dx, dy in _STEP:
+                n = (c[0] + dx, c[1] + dy)
+                if n in left:
+                    left.discard(n)
+                    stack.append(n)
+        groups.append(g)
+    opening = [g for g in groups if bfs(set(occupied) - g - {goal}) is not None]
+    chosen = min(opening, key=len) if opening else seen
+    return sorted(((occupied[c], c) for c in chosen), key=lambda t: (t[1][1], t[1][0]))

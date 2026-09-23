@@ -761,3 +761,13 @@ SPRITES = {
     71: "Unused Gambler Asleep 2",
     72: "Gambler Asleep",
 }
+
+
+# TMs / HMs (pokered constants/item_constants.asm): HM01-05 = $C4-$C8, TM01-50 = $C9-$FA. Without these a
+# TM in the bag reads as "#234" and L1 guessed it was a fossil (verify-mtmoon7).
+_HM_MOVES = ["Cut", "Fly", "Surf", "Strength", "Flash"]
+_TM_MOVES = ['Mega Punch', 'Razor Wind', 'Swords Dance', 'Whirlwind', 'Mega Kick', 'Toxic', 'Horn Drill', 'Body Slam', 'Take Down', 'Double Edge', 'Bubblebeam', 'Water Gun', 'Ice Beam', 'Blizzard', 'Hyper Beam', 'Pay Day', 'Submission', 'Counter', 'Seismic Toss', 'Rage', 'Mega Drain', 'Solarbeam', 'Dragon Rage', 'Thunderbolt', 'Thunder', 'Earthquake', 'Fissure', 'Dig', 'Psychic', 'Teleport', 'Mimic', 'Double Team', 'Reflect', 'Bide', 'Metronome', 'Selfdestruct', 'Egg Bomb', 'Fire Blast', 'Swift', 'Skull Bash', 'Softboiled', 'Dream Eater', 'Sky Attack', 'Rest', 'Thunder Wave', 'Psywave', 'Explosion', 'Rock Slide', 'Tri Attack', 'Substitute']
+for _i, _m in enumerate(_HM_MOVES):
+    ITEMS[0xC4 + _i] = f"HM{_i + 1:02d} {_m}"
+for _i, _m in enumerate(_TM_MOVES):
+    ITEMS[0xC9 + _i] = f"TM{_i + 1:02d} {_m}"

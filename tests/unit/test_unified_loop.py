@@ -287,6 +287,7 @@ def test_navigate_leg_configured_failure_ungrounded_stalls_and_flags():
 
 def test_navigate_leg_configured_failure_grounded_proceeds_and_flags():
     loop, _ = _nav_loop(42)
+    loop.portals = None   # the Kanto portal graph covers map 42 now; this test is about the PROPOSER path
     loop.planner.provider = FailProvider()
     loop.memory.graph.next_hop = lambda a, b: (1, (3, 7))
     player = SimpleNamespace(x=3, y=7, map_id=42, facing="east")

@@ -67,6 +67,7 @@ def test_behavioral_replay_from_anchor(tmp_path):
         lp = ReasoningLoop(builder=ObservationBuilder(emu2), controller=ActionController(emu2),
                            reasoner=_StubReasoner(), session=Session(GoalState(primary="p", current="p")),
                            vision=False, reflect_every=100, recorder=r2, goal_map=2, capture_mode="distill")
+        lp.portals = None   # the Kanto portal graph would route deterministically; exercise the swapped L2
         return lp, r2
 
     # 3) reload the anchor at step 5 and run forward with the swap

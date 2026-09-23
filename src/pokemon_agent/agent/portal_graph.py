@@ -33,9 +33,11 @@ def _friendly(name: str) -> str:
 class PortalGraph:
     """Read-only view over the ripped portal graph. Load once (cache) and share."""
 
-    def __init__(self, maps: dict, portals: dict):
+    def __init__(self, maps: dict, portals: dict, version: str | None = None):
         self.maps = {int(k): v for k, v in maps.items()}
         self.portals = portals  # id -> portal dict
+        self.version = version
+        self._grids: dict[int, dict[tuple[int, int], int]] = {}
         self._by_map: dict[int, list[dict]] = {}
         for p in portals.values():
             self._by_map.setdefault(p["map"], []).append(p)
@@ -43,7 +45,7 @@ class PortalGraph:
     @classmethod
     def load(cls, path: str | Path | None = None) -> "PortalGraph":
         d = json.loads(Path(path or _DEFAULT).read_text())
-        return cls(d["maps"], d["portals"])
+        return cls(d["maps"], d["portals"], d.get("version"))
 
     # --- names -----------------------------------------------------------
     def map_name(self, mid) -> str:
@@ -53,10 +55,12 @@ class PortalGraph:
     def portals_on(self, map_id: int) -> list[dict]:
         return self._by_map.get(int(map_id), [])
 
-    def exits_from(self, map_id: int, comp: int) -> list[dict]:
-        """Portals in this component that lead somewhere (a walk-reachable exit set)."""
+    def exits_from(self, map_id: int, comp: int, *, allow_gated: bool = False) -> list[dict]:
+        """Portals in this component that lead somewhere (a walk-reachable exit set). Story-gated
+        portals and elevators (dynamic destinations) are not routed unless ``allow_gated``."""
         return [p for p in self.portals_on(map_id)
-                if p["component"] == comp and p["dest_map"] is not None]
+                if p["component"] == comp and p["dest_map"] is not None and p["kind"] != "elevator"
+                and (allow_gated or not p.get("gated"))]
 
     # --- static routing over (map, component) nodes ----------------------
     def _comps_of(self, mid: int) -> set[int]:
@@ -67,6 +71,8 @@ class PortalGraph:
         dm = portal["dest_map"]
         if dm is None:
             return []
+        if portal.get("dest_component") is not None:   # edges / ledges land in a known component
+            return [(dm, portal["dest_component"])]
         if dp is not None:
             return [(dm, dp["component"])]
         return [(dm, c) for c in self._comps_of(dm)]  # unknown landing component -> any
@@ -125,12 +131,21 @@ class PortalGraph:
     def component_at(self, map_id: int, x: int, y: int, walkable: set[tuple[int, int]]) -> int | None:
         """Which static component the player stands in, found by flood-filling the LIVE walkable set
         from (x, y) until it reaches a known portal tile (or a portal's approach tile). Uses live
-        collision so it stays correct even if map state changed (e.g. a cut tree)."""
+        collision so it stays correct even if map state changed (e.g. a cut tree). The shipped static
+        grid is consulted first: it encodes tile-pair (elevation) cuts a live flood fill can't see."""
+        grid = self._grid(map_id)
+        if (int(x), int(y)) in grid:
+            return grid[(int(x), int(y))]
         portal_comp = {}
         for p in self.portals_on(map_id):
+            if p["kind"] == "ledge":
+                continue
             portal_comp[tuple(p["coord"])] = p["component"]
-            for dx, dy in _DELTA:                       # doors sit on non-walkable tiles: index approaches
-                portal_comp.setdefault((p["coord"][0] + dx, p["coord"][1] + dy), p["component"])
+            if p.get("approach"):
+                portal_comp[tuple(p["approach"])] = p["component"]
+            else:
+                for dx, dy in _DELTA:                   # doors sit on non-walkable tiles: index approaches
+                    portal_comp.setdefault((p["coord"][0] + dx, p["coord"][1] + dy), p["component"])
         start = (int(x), int(y))
         if start not in walkable:
             return portal_comp.get(start)
@@ -147,6 +162,24 @@ class PortalGraph:
                     seen.add(nb); q.append(nb)
         return None
 
+    def _grid(self, map_id: int) -> dict[tuple[int, int], int]:
+        """Decode (once) the map's run-length static component grid ('.' = not walkable)."""
+        mid = int(map_id)
+        if mid not in self._grids:
+            cells: dict[tuple[int, int], int] = {}
+            enc = (self.maps.get(mid) or {}).get("grid") or ""
+            for y, row in enumerate(enc.split("|") if enc else []):
+                x = 0
+                for run in row.split(","):
+                    v, n = run.split("*")
+                    n = int(n)
+                    if v != ".":
+                        for i in range(n):
+                            cells[(x + i, y)] = int(v)
+                    x += n
+            self._grids[mid] = cells
+        return self._grids[mid]
+
     # --- the scoped natural-language view L2's model reads ---------------
     def render_view(self, map_id: int, comp: int, goal_map: int) -> str:
         """Directed connectivity as names + compass direction (no coordinates). This is the exact
@@ -155,6 +188,8 @@ class PortalGraph:
         lines.append("\nEXITS FROM HERE (the compass direction you travel to take each):")
         seen_exit = {}
         for p in self.exits_from(map_id, comp):
+            if p["kind"] == "ledge":
+                continue
             seen_exit.setdefault((p.get("direction"), p["dest_map"]), p)
         for (d, dm), p in seen_exit.items():
             way = f"go {_CARDINAL[d]}" if d in _CARDINAL else "go inside"
@@ -169,6 +204,8 @@ class PortalGraph:
                     continue
                 links = {}
                 for p in self.portals_on(m):
+                    if p["kind"] == "ledge" or p.get("gated"):
+                        continue
                     if p["dest_map"] is not None and p.get("direction") in _CARDINAL:
                         links[(p["direction"], p["dest_map"])] = None
                 if links:

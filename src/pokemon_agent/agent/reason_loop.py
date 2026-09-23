@@ -822,6 +822,8 @@ class ReasoningLoop:
         xy = (int(target["x"]), int(target["y"]))
         if (obs.player.x, obs.player.y) != xy:
             return False
+        if target.get("hop"):
+            return False   # a ledge take-off cell: arriving is not the end, the hop is (K8)
         dims = getattr(obs, "map_dims", None)
         if dims:
             w, h = dims
@@ -871,8 +873,11 @@ class ReasoningLoop:
             self.on_event("portal_hop", {"step": self.session.step, "from_map": obs.player.map_id,
                                          "to_map": portal["dest_map"], "coord": [cx, cy],
                                          "goal_map": int(tmap0)})
-            return {"kind": "tile", "x": cx, "y": cy, "portal": True,
-                    "note": f"portal toward {map_name(portal['dest_map'])}"}
+            tgt = {"kind": "tile", "x": cx, "y": cy, "portal": True,
+                   "note": f"portal toward {map_name(portal['dest_map'])}"}
+            if portal.get("kind") == "ledge":
+                tgt["hop"] = portal.get("hop")   # reach the take-off cell, then hop (K8)
+            return tgt
         prov = getattr(self.planner, "provider", None) if self.planner else None
         if prov is None:
             return default
@@ -1340,6 +1345,12 @@ class ReasoningLoop:
         if kind == "tile":
             xy = (int(target["x"]), int(target["y"]))
             door = next((e for e in (obs.exits or []) if (int(e["x"]), int(e["y"])) == xy), None)
+            if (player.x, player.y) == xy and target.get("hop"):
+                # ledge take-off (K8): hop in the ledge direction (bypasses the routing ledge veto for
+                # this one move) and drop the held target — the hop lands in another component of the
+                # SAME map, so _current_target would otherwise walk us back up to the take-off cell
+                self._target = None
+                return MoveAction(direction=Direction(target["hop"]))
             if (player.x, player.y) == xy:
                 # a model-named tile that IS an exit door: step THROUGH the warp (the model said "leave
                 # via (4,11)" — honor it), don't just stop on the doormat.
@@ -1458,7 +1469,8 @@ class ReasoningLoop:
         # whose tile IS walkable (e.g. the south gate has (4,0) unwalkable + (5,0) walkable -> forest).
         if portal is not None and walk and tuple(portal["coord"]) not in walk:
             sibs = [p for p in pg.portals_on(player.map_id)
-                    if p["dest_map"] == portal["dest_map"] and tuple(p["coord"]) in walk]
+                    if p["dest_map"] == portal["dest_map"] and tuple(p["coord"]) in walk
+                    and p["component"] == portal["component"] and p["kind"] == portal["kind"]]
             if sibs:
                 portal = sibs[0]
         return portal

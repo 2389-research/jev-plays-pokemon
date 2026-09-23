@@ -183,10 +183,16 @@ def parse_warps(map_name: str) -> list[dict]:
     return warps
 
 
+LOAD_NOTES: dict[str, str] = {}
+
+
 def load_blk(map_name: str, w: int, h: int) -> list[int]:
-    data = (POKERED / "maps" / f"{map_name}.blk").read_bytes()
+    data = list((POKERED / "maps" / f"{map_name}.blk").read_bytes())
+    if len(data) < w * h:      # K4: e.g. UndergroundPathNorthSouth ships 92 of 96 bytes
+        LOAD_NOTES[map_name] = f"blk short by {w * h - len(data)} bytes (padded)"
+        data += [data[-1] if data else 0] * (w * h - len(data))
     assert len(data) == w * h, f"{map_name}.blk is {len(data)} bytes, expected {w*h}"
-    return list(data)
+    return data
 
 
 def load_bst(bst_file: str) -> list[list[int]]:
@@ -199,6 +205,20 @@ def load_bst(bst_file: str) -> list[list[int]]:
 # --------------------------------------------------------------------------- #
 # 2. Collision decode  (mirrors map_reader.read_collision_map exactly)
 # --------------------------------------------------------------------------- #
+def decode_tiles(blk: list[int], blockset: list[list[int]], w_blocks: int, h_blocks: int
+                 ) -> dict[tuple[int, int], int]:
+    """The collision-relevant tile id of EVERY cell (the tile the game tests: bottom-left of the
+    cell's 2x2 quarter) — needed for ledges and tile-pair (elevation) collisions."""
+    tiles: dict[tuple[int, int], int] = {}
+    for by in range(h_blocks):
+        for bx in range(w_blocks):
+            t16 = blockset[blk[by * w_blocks + bx]]
+            for cr in (0, 1):
+                for cc in (0, 1):
+                    tiles[(bx * 2 + cc, by * 2 + cr)] = t16[(cr * 2 + 1) * 4 + (cc * 2)]
+    return tiles
+
+
 def decode_walkable(blk: list[int], blockset: list[list[int]], collset: set[int],
                     w_blocks: int, h_blocks: int) -> set[tuple[int, int]]:
     """Static equivalent of ``read_collision_map(emu)["walkable"]``.
@@ -224,9 +244,10 @@ def decode_walkable(blk: list[int], blockset: list[list[int]], collset: set[int]
 # --------------------------------------------------------------------------- #
 # 3. Connected components (4-connectivity over the walkable set)  [pure]
 # --------------------------------------------------------------------------- #
-def connected_components(walkable: set[tuple[int, int]]) -> dict[tuple[int, int], int]:
+def connected_components(walkable: set[tuple[int, int]], blocked=None) -> dict[tuple[int, int], int]:
     """Label each walkable cell with a component id. Deterministic: components are
-    numbered in ascending (y, x) order of their first-seen cell."""
+    numbered in ascending (y, x) order of their first-seen cell. ``blocked(a, b)`` (optional) forbids
+    a step between two walkable cells (tile-pair / elevation collisions, K7)."""
     comp: dict[tuple[int, int], int] = {}
     next_id = 0
     for start in sorted(walkable, key=lambda c: (c[1], c[0])):
@@ -240,9 +261,35 @@ def connected_components(walkable: set[tuple[int, int]]) -> dict[tuple[int, int]
             x, y = stack.pop()
             for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
                 if (nx, ny) in walkable and (nx, ny) not in comp:
+                    if blocked is not None and blocked((x, y), (nx, ny)):
+                        continue
                     comp[(nx, ny)] = cid
                     stack.append((nx, ny))
     return comp
+
+
+def parse_pair_collisions() -> dict[str, set[frozenset]]:
+    """``data/tilesets/pair_collision_tile_ids.asm`` (land table) -> {TILESET: {frozenset(t1, t2)}}:
+    the player may not step between those two tiles (either direction) — cave/forest elevation."""
+    out: dict[str, set[frozenset]] = {}
+    text = (POKERED / "data" / "tilesets" / "pair_collision_tile_ids.asm").read_text()
+    land = text.split("TilePairCollisionsWater")[0]
+    for m in re.finditer(r"db\s+(\w+)\s*,\s*\$([0-9A-Fa-f]+)\s*,\s*\$([0-9A-Fa-f]+)", land):
+        out.setdefault(m.group(1), set()).add(frozenset((int(m.group(2), 16), int(m.group(3), 16))))
+    return out
+
+
+_LEDGE_DIR = {"SPRITE_FACING_DOWN": "south", "SPRITE_FACING_LEFT": "west", "SPRITE_FACING_RIGHT": "east",
+              "SPRITE_FACING_UP": "north"}
+
+
+def parse_ledges() -> list[tuple[str, int, int]]:
+    """``data/tilesets/ledge_tiles.asm`` -> [(direction, standing tile, ledge tile)] (OVERWORLD only)."""
+    out = []
+    text = (POKERED / "data" / "tilesets" / "ledge_tiles.asm").read_text()
+    for m in re.finditer(r"db\s+(SPRITE_FACING_\w+)\s*,\s*\$([0-9A-Fa-f]+)\s*,\s*\$([0-9A-Fa-f]+)", text):
+        out.append((_LEDGE_DIR[m.group(1)], int(m.group(2), 16), int(m.group(3), 16)))
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -251,7 +298,7 @@ def connected_components(walkable: set[tuple[int, int]]) -> dict[tuple[int, int]
 class MapData:
     def __init__(self, name: str, const: str, map_id: int, w_blocks: int, h_blocks: int,
                  tileset: str, connections: list[dict], warps: list[dict],
-                 walkable: set, comp: dict):
+                 walkable: set, comp: dict, tiles: dict | None = None):
         self.name = name
         self.const = const
         self.id = map_id
@@ -264,6 +311,7 @@ class MapData:
         self.warps = warps
         self.walkable = walkable
         self.comp = comp
+        self.tiles = tiles or {}
 
     def cell_component(self, x: int, y: int) -> int | None:
         """Component of (x,y); if the exact cell is non-walkable (e.g. a doorway on
@@ -290,10 +338,13 @@ def load_map(map_name: str, consts: dict, tilesets: dict) -> MapData:
     ts = tilesets[tileset_const]
     blockset = load_bst(ts["bst"])
     walkable = decode_walkable(blk, blockset, ts["coll"], w_blocks, h_blocks)
-    comp = connected_components(walkable)
+    tiles = decode_tiles(blk, blockset, w_blocks, h_blocks)
+    pairs = parse_pair_collisions().get(tileset_const, set())
+    blocked = (lambda a, b: frozenset((tiles[a], tiles[b])) in pairs) if pairs else None
+    comp = connected_components(walkable, blocked)
     warps = parse_warps(map_name)
     return MapData(map_name, const, map_id, w_blocks, h_blocks, tileset_const,
-                   header["connections"], warps, walkable, comp)
+                   header["connections"], warps, walkable, comp, tiles)
 
 
 # Name<->const<->id helpers built once from the header set.
@@ -302,7 +353,9 @@ def build_name_index() -> tuple[dict[str, str], dict[str, str]]:
     const_to_name: dict[str, str] = {}
     name_to_const: dict[str, str] = {}
     hdr_dir = POKERED / "data" / "maps" / "headers"
-    for f in hdr_dir.glob("*.asm"):
+    for f in sorted(hdr_dir.glob("*.asm")):
+        if f.stem.endswith("Copy"):          # K4: duplicate headers re-declare a real map's const
+            continue
         mh = re.search(r"map_header\s+(\w+)\s*,\s*(\w+)\s*,", f.read_text())
         if mh:
             const_to_name[mh.group(2)] = mh.group(1)
@@ -366,7 +419,8 @@ def build_portal_graph(map_names: list[str]) -> dict:
     for md in maps.values():
         for wp in md.warps:
             x, y, slot = wp["x"], wp["y"], wp["slot"]
-            comp_id = md.cell_component(x, y)
+            appr = approach_cell(md, x, y)
+            comp_id = md.comp.get(appr) if appr is not None else None
             dest_const = wp["dest_const"]
             note = None
             if dest_const == "LAST_MAP":
@@ -385,7 +439,8 @@ def build_portal_graph(map_names: list[str]) -> dict:
                 "id": pid_warp(md, slot),
                 "map": md.id,
                 "coord": [x, y],
-                "kind": "warp",
+                "approach": list(appr) if appr is not None else None,
+                "kind": "elevator" if "Elevator" in md.name else "warp",
                 "dest_map": dest_id,
                 "dest_warp": dest_slot,
                 "dest_portal": dest_portal,
@@ -395,50 +450,211 @@ def build_portal_graph(map_names: list[str]) -> dict:
                 "note": note,
             }
 
-    # ---- edge portals (one per walkable component on the border) -----------
+    # ---- edge portals: OFFSET-AWARE cell-level pairing (K0) -----------------
+    # pokered's `connection` macro shifts the crossing coordinate by -2*offset on the seam axis;
+    # a crossing exists only where the shifted target cell is walkable. One portal per
+    # (source component, target component), represented by a cell that really crosses.
     for md in maps.values():
         for conn in md.connections:
             direction = conn["dir"]
-            border_cells = border_walkable(md, direction)
-            by_comp: dict[int, list[tuple[int, int]]] = {}
-            for c in border_cells:
-                by_comp.setdefault(md.comp[c], []).append(c)
             dest_id = consts[conn["target_const"]][0]
-            for comp_id, cells in sorted(by_comp.items()):
-                rep = representative(cells, direction)
-                pid = pid_edge(md, direction, comp_id)
+            dst = maps.get(dest_id)
+            groups: dict[tuple[int, int | None], list[tuple[int, int]]] = {}
+            for c in border_walkable(md, direction):
+                sc = md.comp[c]
+                if dst is None:
+                    groups.setdefault((sc, None), []).append(c)
+                    continue
+                t = cross_cell(md, direction, conn["offset"], dst, c)
+                if t in dst.comp:
+                    groups.setdefault((sc, dst.comp[t]), []).append(c)
+            per_src: dict[int, int] = {}
+            for sc, _tc in groups:
+                per_src[sc] = per_src.get(sc, 0) + 1
+            for (sc, tc), cells in sorted(groups.items(), key=lambda kv: (kv[0][0], -1 if kv[0][1] is None else kv[0][1])):
+                pid = pid_edge(md, direction, sc) + ("" if per_src[sc] == 1 else f"_to{tc}")
+                rep_cell = representative(cells, direction)
                 portals[pid] = {
                     "id": pid,
                     "map": md.id,
-                    "coord": [rep[0], rep[1]],
+                    "coord": [rep_cell[0], rep_cell[1]],
                     "kind": "edge",
                     "dest_map": dest_id,
                     "dest_warp": None,
                     "dest_portal": None,   # paired below
-                    "component": comp_id,
+                    "dest_component": tc,
+                    "component": sc,
                     "label": f"{md.name} {direction} edge -> {conn['target_name']}",
                     "direction": direction,
                 }
 
-    # ---- pair edge portals to their reverse edge on the neighbour ----------
+    # ---- pair each edge to the neighbour's reverse edge landing in the same component ----
     for p in list(portals.values()):
         if p["kind"] != "edge":
             continue
-        a_id, b_id = p["map"], p["dest_map"]
         opp = _OPPOSITE[p["direction"]]
         cands = [q for q in portals.values()
-                 if q["kind"] == "edge" and q["map"] == b_id
-                 and q["dest_map"] == a_id and q.get("direction") == opp]
-        if len(cands) == 1:
+                 if q["kind"] == "edge" and q["map"] == p["dest_map"] and q["dest_map"] == p["map"]
+                 and q.get("direction") == opp and q["component"] == p.get("dest_component")]
+        if cands:
             p["dest_portal"] = cands[0]["id"]
-        elif len(cands) > 1:
-            # multi-component border: pick the reverse edge nearest along the seam
-            axis = 0 if p["direction"] in ("north", "south") else 1
-            p["dest_portal"] = min(
-                cands, key=lambda q: abs(q["coord"][axis] - p["coord"][axis])
-            )["id"]
+
+    # ---- directed LEDGE portals (K2', OVERWORLD tileset only) ----------------
+    ledges = parse_ledges()
+    step = {"south": (0, 1), "north": (0, -1), "west": (-1, 0), "east": (1, 0)}
+    for md in maps.values():
+        if md.tileset != "OVERWORLD":
+            continue
+        groups: dict[tuple, list[tuple[int, int]]] = {}
+        for a in md.walkable:
+            ta = md.tiles.get(a)
+            for d, stand, ledge in ledges:
+                if ta != stand:
+                    continue
+                dx, dy = step[d]
+                if md.tiles.get((a[0] + dx, a[1] + dy)) != ledge:
+                    continue
+                b = (a[0] + 2 * dx, a[1] + 2 * dy)
+                if 0 <= b[0] < md.width and 0 <= b[1] < md.height:
+                    if b not in md.comp:
+                        continue
+                    key = (md.comp[a], md.id, md.comp[b], d)
+                else:   # the landing is across a map edge (e.g. Route 4 -> Route 3)
+                    conn = next((c for c in md.connections if c["dir"] == d), None)
+                    dst = maps.get(consts[conn["target_const"]][0]) if conn else None
+                    if dst is None:
+                        continue
+                    t = beyond_cell(md, d, conn["offset"], dst, b)
+                    if t not in dst.comp:
+                        continue
+                    key = (md.comp[a], dst.id, dst.comp[t], d)
+                if key[1] == md.id and key[0] == key[2]:
+                    continue          # a hop inside one component adds nothing
+                groups.setdefault(key, []).append(a)
+        for (ca, dm, cb, d), cells in sorted(groups.items()):
+            rep_cell = representative(cells, d)
+            pid = f"{md.name.lower()}:ledge_{d}_c{ca}_to{dm}c{cb}"
+            portals[pid] = {
+                "id": pid, "map": md.id, "coord": [rep_cell[0], rep_cell[1]], "kind": "ledge",
+                "hop": d, "dest_map": dm, "dest_warp": None, "dest_portal": None, "dest_component": cb,
+                "component": ca, "direction": d,
+                "label": f"{md.name} ledge hop {d} -> {maps[dm].name if dm in maps else dm}",
+            }
+
+    # ---- LAST_MAP like the game (K6): wLastMap is only set when leaving an OUTSIDE map ----
+    fix_last_map(maps, portals, consts, const_to_name, id_to_const)
+
+    # ---- gated portals (K5): story gates the static geometry can't see ----
+    for p in portals.values():
+        src = maps[p["map"]].name
+        dst = maps[p["dest_map"]].name if p.get("dest_map") in maps else None
+        why = GATED.get(src) or (GATED.get(dst) if p["kind"] in ("warp", "elevator") else None)
+        if why:
+            p["gated"] = why
 
     return {"maps": maps, "portals": portals}
+
+
+OUTSIDE_TILESETS = {"OVERWORLD", "PLATEAU"}
+
+# K5 — story gates the static geometry can't see (extend per incident). Warps on/into these maps are
+# marked `gated` and skipped by routing by default.
+GATED = {
+    "Route5Gate": "Saffron guard wants a drink",
+    "Route6Gate": "Saffron guard wants a drink",
+    "Route7Gate": "Saffron guard wants a drink",
+    "Route8Gate": "Saffron guard wants a drink",
+    "CeruleanTrashedHouse": "a police officer blocks the back door early on",
+    "Route22Gate": "badge check (Boulder Badge) for Route 23",
+    "Route16Gate1F": "Cycling Road: bicycle required",
+    "Route18Gate1F": "Cycling Road: bicycle required",
+}
+
+
+def cross_cell(md: MapData, direction: str, offset: int, dst: MapData, cell: tuple[int, int]) -> tuple[int, int]:
+    """The destination cell reached by stepping off ``md``'s ``direction`` border at ``cell`` (pokered
+    connection macro: the seam coordinate shifts by -2*offset)."""
+    x, y = cell
+    if direction == "north":
+        return (x - 2 * offset, dst.height - 1)
+    if direction == "south":
+        return (x - 2 * offset, 0)
+    if direction == "west":
+        return (dst.width - 1, y - 2 * offset)
+    return (0, y - 2 * offset)
+
+
+def beyond_cell(md: MapData, direction: str, offset: int, dst: MapData, b: tuple[int, int]) -> tuple[int, int]:
+    """A cell ``b`` lying just beyond ``md``'s border, expressed in the neighbour's coordinates."""
+    x, y = b
+    if direction == "south":
+        return (x - 2 * offset, y - md.height)
+    if direction == "north":
+        return (x - 2 * offset, dst.height + y)
+    if direction == "east":
+        return (x - md.width, y - 2 * offset)
+    return (dst.width + x, y - 2 * offset)
+
+
+def approach_cell(md: MapData, x: int, y: int) -> tuple[int, int] | None:
+    """The walkable cell you step from to use a warp (K3'): the warp cell itself when walkable, else the
+    inward neighbour (doors on the bottom rows are entered from above, others from below), then sides."""
+    if (x, y) in md.comp:
+        return (x, y)
+    order = ((0, -1), (0, 1), (-1, 0), (1, 0)) if y >= md.height - 2 else ((0, 1), (0, -1), (-1, 0), (1, 0))
+    for dx, dy in order:
+        c = (x + dx, y + dy)
+        if c in md.comp:
+            return c
+    return None
+
+
+def fix_last_map(maps: dict, portals: dict, consts: dict, const_to_name: dict, id_to_const: dict) -> None:
+    """Re-resolve LAST_MAP warps the way the game does: wLastMap is only updated when warping out of an
+    OUTSIDE map, so an indoor LAST_MAP warp returns to the outside map that reaches it through a chain of
+    explicit warps. Applied where the slot-matching heuristic left the warp unresolved, dangling, or
+    pointing at a non-outside map (e.g. Victory Road 2F, Rock Tunnel 1F)."""
+    preds: dict[int, list[tuple[int, int]]] = {}
+    for md in maps.values():
+        for wp in md.warps:
+            if wp["dest_const"] in ("LAST_MAP",) or wp["dest_const"] not in consts:
+                continue
+            preds.setdefault(consts[wp["dest_const"]][0], []).append((md.id, wp["slot"]))
+
+    def outside_entries(target: int) -> set[tuple[int, int]]:
+        found: set[tuple[int, int]] = set()
+        seen = {target}
+        q = deque([target])
+        while q:
+            t = q.popleft()
+            for src, slot in preds.get(t, []):
+                if src not in maps:
+                    continue
+                if maps[src].tileset in OUTSIDE_TILESETS:
+                    found.add((src, slot))
+                elif src not in seen:
+                    seen.add(src)
+                    q.append(src)
+        return found
+
+    for p in portals.values():
+        if p["kind"] != "warp" or "LAST_MAP" not in p["label"]:
+            continue
+        dm = p["dest_map"]
+        ok = (dm in maps and maps[dm].tileset in OUTSIDE_TILESETS
+              and (p["dest_portal"] is None or p["dest_portal"] in portals))
+        if ok:
+            continue
+        entries = outside_entries(p["map"])
+        omaps = {m for m, _ in entries}
+        if len(omaps) == 1:
+            om, oslot = sorted(entries)[0]
+            p["dest_map"] = om
+            p["dest_warp"] = oslot
+            p["dest_portal"] = f"{maps[om].name.lower()}:warp{oslot}"
+            p["note"] = f"LAST_MAP -> outside map {om} (game rule: last OUTSIDE map)"
+        elif omaps:
+            p["note"] = (p.get("note") or "") + f"; outside candidates {sorted(omaps)}"
 
 
 def border_walkable(md: MapData, direction: str) -> list[tuple[int, int]]:
@@ -519,6 +735,8 @@ def route(portals: dict, from_map: int, from_component: int, to_map: int) -> lis
     other map. Success = arriving on ``to_map``. Returns the ordered list of portal
     ids traversed, or None."""
     # start frontier: portals on from_map reachable on foot from from_component
+    usable = {k: v for k, v in portals.items() if not v.get("gated") and v["kind"] != "elevator"}
+    portals = usable
     start = [p["id"] for p in portals.values()
              if p["map"] == from_map and p["component"] == from_component]
     if from_map == to_map:
@@ -535,12 +753,15 @@ def route(portals: dict, from_map: int, from_component: int, to_map: int) -> lis
         dest = p.get("dest_portal")
         if p["dest_map"] == to_map:
             return path  # stepping through this portal lands on the target map
-        if dest is None or dest not in portals:
+        if p.get("dest_component") is not None:
+            land_map, land_comp = p["dest_map"], p["dest_component"]
+        elif dest is not None and dest in portals:
+            land_map, land_comp = portals[dest]["map"], portals[dest]["component"]
+        else:
             continue
-        dp = portals[dest]
-        # arrived on dest map, in dp's component -> can walk to same-component portals
+        # arrived on dest map, in the landing component -> can walk to same-component portals
         arrivals = [q2["id"] for q2 in portals.values()
-                    if q2["map"] == dp["map"] and q2["component"] == dp["component"]]
+                    if q2["map"] == land_map and q2["component"] == land_comp]
         for a in arrivals:
             if a not in seen:
                 seen.add(a)
@@ -551,18 +772,16 @@ def route(portals: dict, from_map: int, from_component: int, to_map: int) -> lis
 # --------------------------------------------------------------------------- #
 # 6. Validation checks
 # --------------------------------------------------------------------------- #
-def find_states() -> dict[int, Path]:
-    """Newest ``runs/*/states/map<ID>_*.state`` per map id."""
-    states: dict[int, tuple[float, Path]] = {}
+def find_states(per_map: int = 6) -> dict[int, list[Path]]:
+    """Newest ``runs/*/states/map<ID>_*.state`` files per map id (a few candidates each: the recorder
+    names a state by the map at step START, so a map-crossing step's file holds the NEXT map)."""
+    cands: dict[int, list[tuple[float, Path]]] = {}
     for p in (REPO / "runs").glob("*/states/map*_*.state"):
         m = re.match(r"map(\d+)_", p.name)
         if not m:
             continue
-        mid = int(m.group(1))
-        mt = p.stat().st_mtime
-        if mid not in states or mt > states[mid][0]:
-            states[mid] = (mt, p)
-    return {k: v[1] for k, v in states.items()}
+        cands.setdefault(int(m.group(1)), []).append((p.stat().st_mtime, p))
+    return {k: [p for _, p in sorted(v, reverse=True)[:per_map]] for k, v in cands.items()}
 
 
 def validate_collision(graph: dict) -> dict[int, dict]:
@@ -575,17 +794,22 @@ def validate_collision(graph: dict) -> dict[int, dict]:
     states = find_states()
     maps = graph["maps"]
     results: dict[int, dict] = {}
-    for mid in VALIDATE_IDS:
+    for mid in sorted(m for m in states if m in maps):
         if mid not in states:
             results[mid] = {"status": "NO_STATE"}
             continue
-        emu = PyBoyEmulator(str(ROM), window="null")
-        emu.load_state(states[mid])
-        emu.tick(4)
-        ram = read_collision_map(emu)
-        emu.stop() if hasattr(emu, "stop") else None
+        ram = None
+        for path in states[mid]:
+            emu = PyBoyEmulator(str(ROM), window="null")
+            emu.load_state(path)
+            emu.tick(4)
+            r = read_collision_map(emu)
+            emu.close() if hasattr(emu, "close") else None
+            if r is not None and r["map_id"] == mid:
+                ram = r
+                break
         if ram is None:
-            results[mid] = {"status": "RAM_NONE"}
+            results[mid] = {"status": "NO_MATCHING_STATE"}
             continue
         ram_walk = ram["walkable"]
         static_walk = maps[mid].walkable if mid in maps else set()
@@ -610,128 +834,158 @@ CORRIDOR_NAMES = [
     "PalletTown", "ViridianCity", "PewterCity", "Route1", "Route2",
     "ViridianForestNorthGate", "ViridianForestSouthGate", "ViridianForest",
 ]
+SHIPPED = REPO / "src" / "pokemon_agent" / "games" / "pokemon_red" / "portal_graph.json"
 
 
-def main() -> int:
-    print("=" * 70)
-    print("STATIC PORTAL-GRAPH RIP — Pallet -> Pewter (Brock) corridor")
-    print("source:", POKERED)
-    print("=" * 70)
+def all_map_names() -> list[str]:
+    """Every map header except the duplicate ``*Copy`` headers (K4)."""
+    return [f.stem for f in sorted((POKERED / "data" / "maps" / "headers").glob("*.asm"))
+            if not f.stem.endswith("Copy")]
 
-    graph = build_portal_graph(CORRIDOR_NAMES)
-    portals = graph["portals"]
+
+def encode_grid(md: MapData) -> str:
+    """Per-map static component grid, run-length encoded per row ('.' = not walkable):
+    rows joined by '|', each row 'c*n,c*n'. Lets the runtime locate the player's component exactly
+    (K7: tile-pair cuts that the live flood fill can't see)."""
+    rows = []
+    for y in range(md.height):
+        runs, cur, n = [], None, 0
+        for x in range(md.width):
+            c = md.comp.get((x, y))
+            v = "." if c is None else str(c)
+            if v == cur:
+                n += 1
+            else:
+                if cur is not None:
+                    runs.append(f"{cur}*{n}")
+                cur, n = v, 1
+        runs.append(f"{cur}*{n}")
+        rows.append(",".join(runs))
+    return "|".join(rows)
+
+
+def graph_json(graph: dict, version: str) -> dict:
     maps = graph["maps"]
-
-    print(f"\nRipped {len(maps)} maps, {len(portals)} portals.")
-    for mid in sorted(maps):
-        md = maps[mid]
-        ncomp = len(set(md.comp.values())) if md.comp else 0
-        print(f"  map {mid:2d} {md.name:26s} {md.width}x{md.height} cells, "
-              f"{len(md.walkable):4d} walkable, {ncomp} component(s), tileset {md.tileset}")
-
-    # ---- emit corridor JSON ----
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    out = {
+    return {
+        "version": version,
         "maps": {
             str(mid): {
                 "id": mid, "name": md.name, "const": md.const,
                 "width": md.width, "height": md.height, "tileset": md.tileset,
                 "n_components": len(set(md.comp.values())) if md.comp else 0,
                 "walkable_count": len(md.walkable),
+                "grid": encode_grid(md),
             } for mid, md in maps.items()
         },
-        "portals": {pid: {k: v for k, v in p.items()} for pid, p in portals.items()},
+        "portals": {pid: {k: v for k, v in p.items()} for pid, p in graph["portals"].items()},
     }
-    (OUT_DIR / "portals_corridor.json").write_text(json.dumps(out, indent=2))
-    print(f"\nWrote {OUT_DIR / 'portals_corridor.json'}")
 
-    # ============================ CHECK 1 ============================ #
-    print("\n" + "=" * 70)
-    print("CHECK 1 — COLLISION VALIDATION (static decode == RAM read_collision_map)")
-    print("=" * 70)
-    all_pass = True
+
+def version_string() -> str:
+    import hashlib
+    import subprocess
     try:
-        vres = validate_collision(graph)
-    except Exception as e:  # noqa: BLE001
-        print(f"  ERROR running validation: {e!r}")
-        vres = {}
-        all_pass = False
-    for mid in VALIDATE_IDS:
-        r = vres.get(mid, {"status": "MISSING"})
-        name = maps[mid].name if mid in maps else "?"
-        if r["status"] == "MATCH":
-            print(f"  map {mid:2d} {name:26s} PASS  "
-                  f"({r['static_cells']} cells, exact match)")
-        elif r["status"] == "DIFF":
-            all_pass = False
-            print(f"  map {mid:2d} {name:26s} FAIL  "
-                  f"static={r['static_cells']} ram={r['ram_cells']} "
-                  f"diff={r['diff_count']}")
-            print(f"        only_ram(≤20)={r['only_ram']}")
-            print(f"        only_static(≤20)={r['only_static']}")
-        else:
-            all_pass = False
-            print(f"  map {mid:2d} {name:26s} {r['status']}")
-    print(f"\n  CHECK 1: {'PASS' if all_pass else 'FAIL'}")
+        commit = subprocess.check_output(["git", "-C", str(POKERED), "rev-parse", "--short", "HEAD"],
+                                         text=True).strip()
+    except Exception:  # noqa: BLE001
+        commit = "unknown"
+    rip = hashlib.sha1(Path(__file__).read_bytes()).hexdigest()[:10]
+    return f"pokered@{commit}+rip@{rip}"
 
-    # ============================ CHECK 2 ============================ #
-    print("\n" + "=" * 70)
-    print("CHECK 2 — ROUTING PROOF (Forest -> Pewter via NORTH gate; Route2-south detours)")
+
+def main() -> int:
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--maps", default="all", help="'all' (default) or 'corridor'")
+    ap.add_argument("--out", default=str(SHIPPED), help="where to write the shipped graph JSON")
+    ap.add_argument("--no-validate", action="store_true", help="skip the RAM collision check")
+    a = ap.parse_args()
+
+    names = CORRIDOR_NAMES if a.maps == "corridor" else all_map_names()
     print("=" * 70)
-    check2 = True
+    print(f"STATIC PORTAL-GRAPH RIP — {a.maps} ({len(names)} headers) from {POKERED}")
+    print("=" * 70)
+    graph = build_portal_graph(names)
+    portals, maps = graph["portals"], graph["maps"]
+    kinds: dict[str, int] = {}
+    for p in portals.values():
+        kinds[p["kind"]] = kinds.get(p["kind"], 0) + 1
+    print(f"\nRipped {len(maps)} maps, {len(portals)} portals {kinds}; "
+          f"gated {sum(1 for p in portals.values() if p.get('gated'))}")
+    for nm, note in LOAD_NOTES.items():
+        print(f"  load note: {nm}: {note}")
 
-    # Forest is a single component; find it.
-    forest = maps[51]
-    forest_comp = next(iter(set(forest.comp.values())))
-    fp = route(portals, 51, forest_comp, 2)
-    print("\n  route(VIRIDIAN_FOREST 51 -> PEWTER_CITY 2):")
-    if fp is None:
-        print("    None  <-- FAIL")
-        check2 = False
-    else:
-        for pid in fp:
-            p = portals[pid]
-            print(f"    {pid:42s} map {p['map']:2d} {p['kind']:4s} "
-                  f"-> map {p['dest_map']}")
-        uses_north = any("northgate" in pid for pid in fp)
-        uses_south = any("southgate" in pid for pid in fp)
-        print(f"    uses NORTH gate: {uses_north} ; uses SOUTH gate: {uses_south}")
-        if not (uses_north and not uses_south):
-            print("    <-- FAIL: expected via NORTH gate only")
-            check2 = False
+    ok = True
+    dangling = [p["id"] for p in portals.values() if p.get("dest_portal") and p["dest_portal"] not in portals]
+    print(f"\nCHECK 0 — no dangling dest_portal: {'PASS' if not dangling else 'FAIL ' + str(dangling)}")
+    ok &= not dangling
 
-    # Route2 split: south component (contains south-gate warp (3,43)) vs north.
-    route2 = maps[13]
-    comp_at = lambda x, y: route2.cell_component(x, y)  # noqa: E731
-    south_comp = comp_at(3, 43)
-    north_comp = comp_at(3, 11)
-    print(f"\n  Route2 components: warp(3,11)->NorthGate in comp {north_comp}; "
-          f"warp(3,43)->SouthGate in comp {south_comp}")
-    if south_comp == north_comp:
-        print("    <-- FAIL: Route2 did not split into two components")
-        check2 = False
+    out = graph_json(graph, version_string())
+    Path(a.out).write_text(json.dumps(out, separators=(",", ":")))
+    print(f"Wrote {a.out} ({Path(a.out).stat().st_size // 1024} KB, version {out['version']})")
 
-    rp = route(portals, 13, south_comp, 2)
-    print("\n  route(ROUTE_2 13 south-component -> PEWTER_CITY 2):")
-    if rp is None:
-        print("    None  <-- FAIL")
-        check2 = False
-    else:
-        for pid in rp:
-            print(f"    {pid}")
-        via_forest = any(pid.startswith("viridianforest:") for pid in rp)
-        print(f"    detours through the forest: {via_forest}")
-        if not via_forest:
-            print("    <-- FAIL: south Route2 reached Pewter without the forest detour")
-            check2 = False
+    if not a.no_validate:
+        print("\nCHECK 1 — collision: static decode == RAM read_collision_map (every map with a save state)")
+        print("         (cannot detect edge offsets, ledges or tile-pair cuts — the goldens cover those)")
+        try:
+            vres = validate_collision(graph)
+        except Exception as e:  # noqa: BLE001
+            print(f"  ERROR running validation: {e!r}")
+            vres, ok = {}, False
+        for mid, r in sorted(vres.items()):
+            name = maps[mid].name
+            if r["status"] == "MATCH":
+                print(f"  map {mid:3d} {name:28s} PASS ({r['static_cells']} cells)")
+            else:
+                ok = False
+                print(f"  map {mid:3d} {name:28s} {r['status']} {r.get('diff_count', '')}")
 
-    print(f"\n  CHECK 2: {'PASS' if check2 else 'FAIL'}")
+    print("\nCHECK 2 — golden routes")
+    ids = {md.name: mid for mid, md in maps.items()}
+
+    def comp_of_warp(map_name: str, label_part: str) -> int:
+        return next(p["component"] for p in portals.values()
+                    if p["map"] == ids[map_name] and label_part in p["label"])
+
+    def first_route(a_name: str, b_name: str, comp: int | None = None):
+        a_id, b_id = ids[a_name], ids[b_name]
+        comps = [comp] if comp is not None else sorted({p["component"] for p in portals.values()
+                                                        if p["map"] == a_id and p["component"] is not None})
+        for c in comps:
+            r = route(portals, a_id, c, b_id)
+            if r:
+                return r
+        return None
+
+    goldens = [
+        ("Forest -> Pewter via the north gate", first_route("ViridianForest", "PewterCity"),
+         lambda r: r and any("northgate" in x for x in r) and not any("southgate" in x for x in r)),
+        ("Pewter -> Mt. Moon 1F", first_route("PewterCity", "MtMoon1F"), lambda r: bool(r)),
+        ("Pewter -> Cerulean via Mt. Moon + the Route 4 ledge", first_route("PewterCity", "CeruleanCity"),
+         lambda r: r and any(x.startswith("mtmoonb2f:") for x in r) and any(":ledge_" in x for x in r)),
+        ("Cerulean (main) -> Pewter is unreachable",
+         first_route("CeruleanCity", "PewterCity", comp_of_warp("CeruleanCity", "POKECENTER")),
+         lambda r: r is None),
+        # from Cerulean's SOUTH side (its main area reaches the south only through the trashed house,
+        # which is gated early on — so main -> Vermilion is correctly unreachable at first)
+        ("Cerulean (south side) -> Vermilion via the Underground Path, not Saffron",
+         first_route("CeruleanCity", "VermilionCity", comp_of_warp("CeruleanCity", "south edge")),
+         lambda r: r and any("undergroundpath" in x for x in r) and not any("saffron" in x for x in r)),
+    ]
+    for label, r, test in goldens:
+        passed = bool(test(r))
+        ok &= passed
+        print(f"  {'PASS' if passed else 'FAIL'}  {label}")
+        if r:
+            print("        " + " | ".join(portals[x]["label"] for x in r))
+    north = [p["id"] for p in portals.values() if p["kind"] == "ledge" and p["hop"] == "north"]
+    print(f"  {'PASS' if not north else 'FAIL'}  no ledge hops north {north or ''}")
+    ok &= not north
 
     print("\n" + "=" * 70)
-    print(f"OVERALL: CHECK1={'PASS' if all_pass else 'FAIL'}  "
-          f"CHECK2={'PASS' if check2 else 'FAIL'}")
+    print(f"OVERALL: {'PASS' if ok else 'FAIL'}")
     print("=" * 70)
-    return 0 if (all_pass and check2) else 1
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

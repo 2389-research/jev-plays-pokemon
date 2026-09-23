@@ -30,6 +30,8 @@ PRESS_SETTLE_FRAMES = 24
 DIRECTION_BUTTONS = frozenset(DIRECTION_BUTTON.values())
 # A warp commits its destination coords + sprites ~35 frames after the map id flips; cap the wait.
 WARP_SETTLE_MAX = 120
+WMOVEMENTFLAGS = 0xD736      # wMovementFlags; bit 6 = jumping down a ledge (or fishing)
+LEDGE_SETTLE_MAX = 60
 # Some warps land on the SAME (x, y) on the new map (e.g. Red's House 1F/2F stairs at (7,1)), so the
 # coords never change; past the observed commit window (34-36 frames) treat the warp as settled.
 WARP_SAMEXY_SETTLE = 60
@@ -79,6 +81,7 @@ class ActionController:
             self.emu.release(button)
             self.emu.tick(1)  # settle
             total_frames += elapsed + 1
+            total_frames += self._settle_ledge(events)
             if changed:
                 moved_tiles += 1
                 events.append("player_moved")
@@ -103,6 +106,21 @@ class ActionController:
             player_moved=True, frames_elapsed=total_frames, events=events,
             detail=f"moved {moved_tiles}/{action.tiles} tiles {action.direction.value}",
         )
+
+    def _settle_ledge(self, events: list[str]) -> int:
+        """A ledge hop moves the player two cells with the joypad ignored while wMovementFlags bit 6
+        (BIT_LEDGE_OR_FISHING) is set: wait it out so the next observation isn't mid-hop."""
+        frames = 0
+        try:
+            if not (self.emu.read_memory(WMOVEMENTFLAGS) & 0x40):
+                return 0
+            events.append("ledge_hop")
+            while self.emu.read_memory(WMOVEMENTFLAGS) & 0x40 and frames < LEDGE_SETTLE_MAX:
+                self.emu.tick(2)
+                frames += 2
+        except Exception:
+            pass
+        return frames
 
     def _settle_map_change(self, before, flip, events: list[str]) -> int:
         """After the map id flips, wait out a WARP until its coords + sprites commit; return the

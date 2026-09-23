@@ -67,6 +67,8 @@ target (same map, so `_current_target` wouldn't); never record a blocked hop in 
 **K9 — render_view** skips ledge portals and only lists reachable nodes (not used at runtime today).
 
 
+### Original fixes (superseded by review round 1 — kept for history)
+
 **K1 — rip all maps.** `rip_portals.py --maps all` (new default) enumerates every `data/maps/headers/*.asm`; per-map load failures are reported and skipped, never fatal. The existing corridor checks stay. Write the shipped JSON directly (`--out src/.../portal_graph.json`), plus a `version` field (pokered commit + ripper hash).
 
 **K2 — one-way ledges.** Ledge tiles (from `data/tilesets/ledge_tiles.asm`: player direction, standing tile, ledge tile) must not join components in both directions. Remove ledge cells from the undirected walkable set; for each ledge (standing cell A, ledge cell L, landing cell B = L + dir) add a **directed** `kind: "ledge"` portal on the same map: `coord = A`, `hop = dir`, `dest_map = same map`, `dest_component = comp(B)`. `PortalGraph.route` follows it one way. Executor: a portal target of kind `ledge` is reached at A, then **steps in `hop`** (bypassing the ledge veto in `_blocked_dirs` for that one move).

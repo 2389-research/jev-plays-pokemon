@@ -57,3 +57,49 @@ def build_targets(game_state: dict | None, exits: list[dict] | None) -> list[dic
             "x": x, "y": y, "interact": False, "dest_map": e.get("dest_map"),
         })
     return targets
+
+
+def _name_hit(npc: dict, name: str) -> bool:
+    nm = str(npc.get("sprite") or "").lower()
+    s = str(name).lower()
+    return bool(nm) and (nm in s or s in nm)
+
+
+def name_matches(npcs: list[dict], name: str | None) -> list[dict]:
+    """NPCs whose sprite name matches `name` (case-insensitive substring either way)."""
+    return [n for n in npcs if name and _name_hit(n, name)] if name else []
+
+
+def select_npc(npcs: list[dict], *, sprite: str | None, picked, player, want_kind: str = "person",
+               chooser=None) -> dict | None:
+    """Choose which sprite an ``approach_npc`` target means. Pure, so it's testable without a loop.
+
+    1. **Candidate pool**: the sprites matching the requested name if any do; otherwise the sprites
+       of the wanted kind (``"item"`` for a GRAB_ITEM errand, ``"person"`` otherwise — a sprite with
+       no ``kind`` counts as a person); all sprites only if that set is empty. Everything below
+       works WITHIN the pool, so a person request can never land on an item ball.
+    2. **Track the leg's pick** by locality (robust to moving / duplicate-named NPCs) — but only a
+       pick made on THIS map (``picked = [x, y, map_id]``); a pick from another map (e.g. cached on
+       a torn warp frame) or a legacy ``[x, y]`` pick is ignored.
+    3. ``chooser(pool)`` (the calibrated Jev pick) when there are several candidates.
+    4. Nearest not-yet-talked candidate.
+    """
+    if not npcs:
+        return None
+    pool = name_matches(npcs, sprite)
+    if not pool:
+        if want_kind == "item":
+            pool = [n for n in npcs if n.get("kind") == "item"]
+        else:
+            pool = [n for n in npcs if n.get("kind") != "item"]
+        pool = pool or list(npcs)
+    pmap = getattr(player, "map_id", None)
+    if isinstance(picked, (list, tuple)) and len(picked) >= 3 and picked[2] == pmap:
+        px, py = int(picked[0]), int(picked[1])
+        return min(pool, key=lambda n: abs(int(n["x"]) - px) + abs(int(n["y"]) - py))
+    if chooser is not None and len(pool) > 1:
+        npc = chooser(pool)
+        if npc is not None:
+            return npc
+    fresh = [n for n in pool if not n.get("talked_to")] or pool
+    return min(fresh, key=lambda n: abs(int(n["x"]) - player.x) + abs(int(n["y"]) - player.y))

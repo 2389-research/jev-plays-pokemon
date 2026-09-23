@@ -48,7 +48,7 @@ from .quest_reconciler import QuestStep, compile_steps_to_directives, reconcile_
 from .reasoner import Reasoner, ReasonStep
 from .session import Session
 from .signals import game_signals, needs_emergency_heal
-from .targets import build_targets
+from .targets import build_targets, name_matches, select_npc
 from .world_map import DELTA, WALL
 
 MAX_GOTO_STEPS = 18  # safety bound on one navigation macro
@@ -1090,45 +1090,41 @@ class ReasoningLoop:
 
     def _approach_npc(self, target, directive, obs, blocked_dirs, occupied):
         """Resolve an ``approach_npc`` target: choose the person, reach them, interact when adjacent +
-        facing. Choice order (cheap+deterministic first): track the leg's already-chosen npc BY LOCALITY
-        (robust to moving / duplicate-labelled / anonymous NPCs); a named sprite (exact/substring);
-        Jev's calibrated pick among MULTIPLE candidates against the objective (only when confident);
-        else the nearest not-yet-talked. The pick is cached by POSITION on the target so Jev fires ~once
-        per leg and we keep following the same person as they move."""
+        facing. WHICH sprite is decided by `targets.select_npc` (pure): a candidate pool (name matches,
+        else the wanted kind — items for GRAB_ITEM, people otherwise), then the leg's cached pick tracked
+        BY LOCALITY (only if made on this map), Jev's calibrated pick among several candidates (only for
+        an unnamed/unmatched request, only when confident), else the nearest not-yet-talked. The pick is
+        cached as [x, y, map_id] so Jev fires ~once per leg and we keep following a moving person —
+        and a pick cached on another map (e.g. a torn warp frame) can never drag us onto the wrong sprite."""
         player = obs.player
         npcs = [n for n in ((obs.game_state or {}).get("npcs") or []) if "x" in n and "y" in n]
         if not npcs:
             return self._leave_via_nearest_exit(player, obs, blocked_dirs, occupied)
         sprite = target.get("sprite") if isinstance(target, dict) else target
-        picked_xy = target.get("picked") if isinstance(target, dict) else None
+        picked = target.get("picked") if isinstance(target, dict) else None
+        want_kind = "item" if (directive is not None and directive.intent == Intent.GRAB_ITEM) else "person"
+        named = bool(name_matches(npcs, sprite))
+        if sprite and not named:
+            self.on_event("approach_npc_miss", {"step": self.session.step, "sprite": sprite,
+                                                "seen": [n.get("sprite") for n in npcs]})
 
-        def by_name(name):
-            s = str(name).lower()
-            hits = [n for n in npcs if (nm := str(n.get("sprite") or "").lower()) and (nm in s or s in nm)]
-            return hits[0] if hits else None
-
-        npc = None
-        if picked_xy is not None:               # track the leg's chosen npc by locality (moves/dupes/anon ok)
-            npc = min(npcs, key=lambda n: abs(int(n["x"]) - picked_xy[0]) + abs(int(n["y"]) - picked_xy[1]))
-        if npc is None and sprite:              # a named who -> exact/substring match
-            npc = by_name(sprite)
-            if npc is None:
-                self.on_event("approach_npc_miss", {"step": self.session.step, "sprite": sprite,
-                                                    "seen": [n.get("sprite") for n in npcs]})
-        if npc is None and len(npcs) > 1 and getattr(self.reasoner, "choose_npc", None) is not None:
+        def jev_pick(pool):
+            if getattr(self.reasoner, "choose_npc", None) is None:
+                return None
             cands = [{"sprite": n.get("sprite"), "x": int(n["x"]), "y": int(n["y"]),
-                      "talked_to": bool(n.get("talked_to"))} for n in npcs]
+                      "talked_to": bool(n.get("talked_to"))} for n in pool]
             idx, conf = self.reasoner.choose_npc(
                 objective=(directive.reason if directive else ""), candidates=cands)
-            if idx is not None and conf >= JEV_NPC_CONF:   # trust the calibrated pick only when confident
-                npc = npcs[idx]
-                self.on_event("npc_pick", {"step": self.session.step, "sprite": npc.get("sprite"),
-                                           "conf": round(float(conf), 2), "n": len(npcs)})
-        if npc is None:                         # fallback: nearest not-yet-talked
-            fresh = [n for n in npcs if not n.get("talked_to")] or npcs
-            npc = min(fresh, key=lambda n: abs(int(n["x"]) - player.x) + abs(int(n["y"]) - player.y))
-        if isinstance(target, dict):
-            target["picked"] = [int(npc["x"]), int(npc["y"])]   # cache BY POSITION (works for spriteless too)
+            if idx is None or conf < JEV_NPC_CONF:   # trust the calibrated pick only when confident
+                return None
+            self.on_event("npc_pick", {"step": self.session.step, "sprite": pool[idx].get("sprite"),
+                                       "conf": round(float(conf), 2), "n": len(pool)})
+            return pool[idx]
+
+        npc = select_npc(npcs, sprite=sprite, picked=picked, player=player, want_kind=want_kind,
+                         chooser=None if named else jev_pick)
+        if isinstance(target, dict):   # cache BY POSITION + MAP (works for spriteless/moving npcs)
+            target["picked"] = [int(npc["x"]), int(npc["y"]), getattr(player, "map_id", None)]
 
         nx, ny = int(npc["x"]), int(npc["y"])
         adj = {Direction.NORTH: (nx, ny + 1), Direction.SOUTH: (nx, ny - 1),

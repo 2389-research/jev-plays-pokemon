@@ -14,6 +14,7 @@ class QuestStep:
     why: str = ""
     status: str = "pending"          # pending | active | done | wedged
     provisional: bool = False        # a synthesized bootstrap default; superseded once L1 adds real steps
+    wedge_reason: str = ""           # why the executive wedged it (shown to L1 as why_wedged)
     kind: str = "action"             # "travel" = reach a map (on_map completion ok);
                                       # "action" = done by a state change (needs a real criterion)
 

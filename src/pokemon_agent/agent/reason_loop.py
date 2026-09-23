@@ -204,6 +204,11 @@ class ReasoningLoop:
         self._farm_age = 0
         self._farm_weave = 1   # farm-exp weave sign (+1/-1): alternates lateral lanes into a zig-zag
         self._prev_map: int | None = None  # last DISTINCT map (resolves 0xFF "return" warps)
+        # on resume the saved history already ends with the current map, so the "came FROM" map is
+        # the entry before it — seed it, or a building's 0xFF door never resolves (stuck inside)
+        hist = self.memory.map_history
+        if len(hist) >= 2 and hist[-2] != hist[-1]:
+            self._prev_map = hist[-2]
         self._recent: deque[str] = deque(maxlen=recent_max)
         self._prev: ReasonStep | None = None
         self._plan = self.memory.plan  # strategic AgentPlan (reflection), separate from the directive
@@ -495,7 +500,9 @@ class ReasoningLoop:
                 "items": signals["items"],
                 "badges": signals["badges"],
                 "plan": [{"id": s.id, "map": s.map, "kind": s.kind, "talk": s.talk,
-                          "done_when": s.done_when, "status": s.status} for s in self._plan_steps],
+                          "done_when": s.done_when, "status": s.status,
+                          **({"why_wedged": s.wedge_reason} if s.status == "wedged" and s.wedge_reason else {})}
+                         for s in self._plan_steps],
                 "signals": signals,
             }
             # tiered goals (spec §3.1): drop a paused focus whose own criterion is met, then show L1
@@ -616,6 +623,7 @@ class ReasoningLoop:
                     self.on_event("step_done", {"step": self.session.step, "id": s.id,
                                                 "done_when": s.done_when, "step_kind": s.kind})
                 elif status == "wedged":
+                    s.wedge_reason = (reason or "no route / blocked")[:200]
                     self.on_event("step_wedged", {"step": self.session.step, "id": s.id,
                                                   "done_when": s.done_when,
                                                   "reason": reason or "no route / blocked"})
@@ -1652,16 +1660,30 @@ class ReasoningLoop:
         clerk with ``done_when has_item:<item>`` (compiled to a routed TALK_TO / SHOP) — this fires the
         buy once that talk opens the counter. Guarded by the unambiguous RAM shop-menu signal + a
         resolvable item, so it never fires on a non-shopping menu."""
-        d = self._directive
-        if d is None:
-            return None
         from ..games.pokemon_red import shop as shop_macro
+        from ..core.models import WaitAction
         emu = self.controller.emu
         if not shop_macro.at_shop_menu(emu):
             return None
-        item, qty = self._shop_item_qty(d)
-        if item is None:
-            return None
+        d = self._directive
+        item, qty = self._shop_item_qty(d) if d is not None else (None, 1)
+        step = self._step_by_qid(d.quest_id) if d is not None else None
+        if item is None or (step is not None and step.status in ("done", "wedged")):
+            # The counter is open but there is nothing (left) to buy — e.g. the clerk's "anything
+            # else?" reopened it after a failed buy. Back out deterministically so the step can
+            # advance and L1 can re-plan, instead of re-entering the same buy forever.
+            mode_before = detect_mode(emu)
+            shop_macro.close_shop(emu)
+            self.on_event("shop_closed", {"step": self.session.step, "item": item,
+                                          "step_status": step.status if step else None})
+            rstep = ReasonStep(location="mart", objective="leave the counter",
+                               reasoning="SHOP: nothing to buy here; closing the counter",
+                               action=WaitAction(frames=1))
+            self._prev = rstep
+            self._emit_reason(rstep, 0)
+            return self._finish(obs, rstep, ActionResult(success=True, result="completed", mode_before=mode_before,
+                                                         mode_after=detect_mode(emu), detail="shop closed"),
+                                0, {}, shot)
         mode_before = detect_mode(emu)
         res = shop_macro.shop_buy(emu, item, qty)
         ok = bool(res.get("ok"))
@@ -1671,9 +1693,10 @@ class ReasoningLoop:
             # has_item goal can never be met here, so re-firing the macro every step would thrash the
             # counter. Wedge the step so L1 drops/replaces it (e.g. picks a Mart that stocks the item),
             # and force a re-plan.
-            self._mark_step(d.quest_id, "wedged", reason=f"can't buy {item} here: {res.get('reason')}")
-            self._force_reflect = True
-        from ..core.models import WaitAction
+            shelf = res.get("shop")
+            why = f"can't buy {item} here: {res.get('reason')}" + (f" (shelf: {', '.join(shelf)})" if shelf else "")
+            self._mark_step(d.quest_id, "wedged", reason=why)
+            self._l1_event = True     # the L1 gate (not the legacy reflect flag) replaces the step
         rstep = ReasonStep(location="mart", objective=f"buy {qty}x {item}",
                            reasoning=f"SHOP macro: {res.get('reason', 'purchased')}",
                            action=WaitAction(frames=1))

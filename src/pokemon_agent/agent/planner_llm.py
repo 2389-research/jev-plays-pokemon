@@ -319,7 +319,9 @@ WORKED EXAMPLES (one per objective class — copy the SHAPE, adapt the specifics
                        "done_when":"has_item:Potion","why":"buy Potions before the gym"}
                       Talking to a Mart clerk opens the shop and the buy runs automatically. Add this
                       when you have money and want consumables (e.g. Potions before a gym). Only items
-                      on that Mart's shelf are bought; anything else is a harmless no-op.
+                      on that Mart's shelf are bought — each Mart stocks different items (search the KB).
+                      A wedged step's "why_wedged" says why it failed (e.g. the shelf it saw): don't
+                      re-add the same step where it already failed.
   deliver an item -> {"kind":"action","map":0,"talk":true,"who":"Oak",
                        "done_when":"no_item:Oak's Parcel","why":"hand the parcel to Oak"}
                       CANONICAL: deliver -> no_item:<item>. The item LEAVING the bag proves

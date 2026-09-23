@@ -317,7 +317,8 @@ WORKED EXAMPLES (one per objective class — copy the SHAPE, adapt the specifics
   RAM-trackable        "done_when":"verify:did the guard let us pass?","why":"..."}
 
 PLACEMENT — "after" says where a new step goes. Leave it null (the default) for something to do
-NEXT, before the rest of the plan — heals and replacements for a wedged step are always NEXT. Set
+NEXT, before the rest of the plan — emergency heals and replacements for a wedged step are always
+NEXT. Set
 "after": "<id>" only when the step must come AFTER an existing step that hasn't happened yet; the id
 must be from PLAN with status active or pending. "after" is NOT inherited from the step listed before
 it — put it on EVERY step that must wait. Several steps with the same "after" run in the order you list

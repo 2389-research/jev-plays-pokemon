@@ -94,7 +94,7 @@ def reconcile_quests(current, proposal, *, next_id, on_event=None):
         elif status_of[after] == "done":
             reason = "done"
         else:
-            reason = "removed"
+            reason = "removed" if after in remove else "not_live"
         if on_event is not None:
             on_event("l1_anchor_fallback", {"after": after, "reason": reason})
         return None
@@ -125,10 +125,11 @@ def reconcile_quests(current, proposal, *, next_id, on_event=None):
         elif anchor == "end":
             out.append(step)
         else:
+            # resolve among LIVE steps only (never the done region, even if a done step shares the id)
             ref = last_on.get(anchor, anchor)
-            idx = next(i for i, s in enumerate(out) if s.id == ref)
+            idx = next(i for i in range(len(done), len(out)) if out[i].id == ref)
             out.insert(idx + 1, step)
             last_on[anchor] = step.id
-            if idx < default_slot:
+            if idx < default_slot:   # defensive: anchors are pending steps, at/after the default slot
                 default_slot += 1
     return out

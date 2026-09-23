@@ -53,7 +53,8 @@ Each object in DECIDE's `add` list MAY carry `"after"`:
 - Add `"after": null` (the **default literal**, not a union string — a visible null leans toward omission) to both step-shape lines in the schema.
 - One rule, stated as a field contract:
   *PLACEMENT — `after` says where a new step goes. Leave it null (the default) for something to do NEXT, before the rest of the plan — heals and replacements for a wedged step are always NEXT. Set `"after": "<id>"` only when the step must come AFTER an existing step that hasn't happened yet; the id must be from PLAN with status active or pending. Several steps with the same `after` run in the order you list them. `"end"` appends after everything.*
-- One single-line worked example, in a **different domain from the incident** (so the held-out replay measures generalization, not copying): plan `[q4 travel→Viridian City (active), q5 buy Potions @ Viridian Mart (pending)]`; adding grinding on Route 2 that should happen after shopping → `{"kind":"action","map":13,…,"done_when":"level>=10","after":"q5"}`.
+- *As shipped (after the first live eval):* the rule also says `after` **is not inherited** from the previous listed step (one run anchored only the first of three later steps, expecting chaining), the example shows **two** anchored steps, and it says **emergency** heals are NEXT (a planned, non-urgent heal can legitimately be anchored later — seen live at step 140 of the e2e run).
+- One worked example, in a **different domain from the incident** (so the held-out replay measures generalization, not copying): plan `[q4 travel→Viridian City (active), q5 buy Potions @ Viridian Mart (pending)]`; adding grinding on Route 2 that should happen after shopping → `{"kind":"action","map":13,…,"done_when":"level>=10","after":"q5"}`.
 - The return-JSON skeleton shows `after` inside the step objects. DECIDE uses `response_format: json_object` (no JSON schema), so there is no schema to update.
 - Nothing else in the prompt changes — the "CHANGING NOTHING IS THE COMMON, PREFERRED OUTCOME" block is untouched (it fixed the L1 thrash).
 
@@ -95,3 +96,19 @@ Replay mapping for captured inputs: the record's `input` is the DECIDE `state` d
 - Letting L1 reorder or move *existing* steps (only new steps are placed). **Known limitation:** an already-misordered plan, or a wrong anchor, can only be corrected by remove + re-add — L1 does not audit order (step 93 of the incident). Acceptable for now (YAGNI).
 - Anchoring one new step to another new step (use a shared anchor instead).
 - The starter-selection gap: runs start from the post-Squirtle save (`states/pallet_ready.state`, `--state pallet_ready`); the agent is not expected to pick a starter.
+
+
+## 6. Results (2026-09-22, glm-5.3)
+
+**Held-out incident replay** (captured step-25 input). Outcomes: MISORDERED = any off-delivery-path step before the pending delivery (the incident); ANCHORED = later steps added, all after the delivery; DEFERRED = no later steps added yet; failed calls (empty fallback) excluded — 0 occurred in these runs.
+
+| Prompt | Misordered | Anchored | Deferred |
+|---|---|---|---|
+| old (`7e95e24`, no `after`; new reconciler reproduces old placement exactly), 2×N=10 | **4/20 (20%)** | 0 | 16 |
+| new (as shipped), 3×N=10 | **0/30** | **7/30** (every later step `after: q2`) | 23 |
+
+**Negative controls (new prompt, N=10):** emergency heal default-placed 10/10; steady state zero edits 10/10; wedge replacement re-added at the front on every successful call (A/B vs the previous prompt revision: failures were empty-fallback failed calls, not decisions). **Regression:** `eval_criteria` 5/5 (= baseline); `eval_l1_decide` 32/32 well-formed on glm-5.3 and deepseek-4.1-flash (= baseline).
+
+**End-to-end** (`runs/placement-e2e-20260922-2324`, clean resume copy): parcel delivered at step 238; the delivery-before-Pewter invariant held on every step; one live anchor (`after: "q3"`, a planned Viridian heal) placed correctly; run ended inside Oak's Pokédex cutscene at the 300-step budget (97 Route-1 battle steps), so "heads north" was not reached. Placement on the delivery anchor itself: not exercised live (L1 emitted delivery + Pewter in one DECIDE, where emitted order suffices).
+
+**Criterion amendment — PENDING SIGN-OFF.** §4.1 as written ("≥4/5 reconcile after q2") is not met: with the new prompt L1 usually *defers* adding post-delivery steps rather than anchoring them. Proposed: pass = **0 misordered** across N≥20, with ANCHORED and DEFERRED both acceptable (the safety property is ordering; deferral is a legitimate minimal-edit choice under the "changing nothing is preferred" framing).

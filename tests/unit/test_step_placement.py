@@ -116,3 +116,47 @@ def test_anchored_steps_compile_behind_the_delivery():
     first_talk = next(i for i, d in enumerate(directives) if d.intent == Intent.TALK_TO)
     assert qids.index("q2") < qids.index("q11") < qids.index("q12")
     assert directives[first_talk].quest_id == "q2"
+
+
+# ---- implementation-review follow-ups ---------------------------------------------------------
+def test_anchored_add_emitted_before_a_default_add():
+    cur = [_mk("q1", 0, "active"), _mk("q2", 1), _mk("q3", 2)]
+    prop = {"add": [_add(6, after="q2"), _add(5)], "remove": []}
+    out = reconcile_quests(cur, prop, next_id=_ids())
+    assert [s.id for s in out] == ["q1", "q12", "q2", "q11", "q3"]
+
+
+def test_interleaved_anchors_keep_per_anchor_order():
+    cur = [_mk("q1", 0, "active"), _mk("q2", 1), _mk("q3", 2)]
+    prop = {"add": [_add(5, after="q2"), _add(6, after="q3"), _add(7, after="q2")], "remove": []}
+    out = reconcile_quests(cur, prop, next_id=_ids())
+    assert [s.id for s in out] == ["q1", "q2", "q11", "q13", "q3", "q12"]
+
+
+def test_end_emitted_before_an_add_anchored_on_the_last_step():
+    cur = [_mk("q1", 0, "active"), _mk("q2", 1), _mk("q3", 2)]
+    prop = {"add": [_add(7, after="end"), _add(6, after="q3")], "remove": []}
+    out = reconcile_quests(cur, prop, next_id=_ids())
+    assert [s.id for s in out] == ["q1", "q2", "q3", "q12", "q11"]
+
+
+def test_invalid_anchor_without_an_event_sink_still_falls_back():
+    cur = _incident_plan()
+    out = reconcile_quests(cur, {"add": [_add(2, after="q99")], "remove": []}, next_id=_ids())
+    assert [s.id for s in out] == ["q1", "q11", "q2"]
+
+
+def test_duplicate_id_anchor_never_lands_among_done_steps():
+    """A done step and a pending step sharing an id: the anchor must resolve to the LIVE one."""
+    cur = [_mk("q2", 9, "done"), _mk("q1", 0, "active"), _mk("q2", 40, dw="no_item:X", kind="action")]
+    out = reconcile_quests(cur, {"add": [_add(2, after="q2")], "remove": []}, next_id=_ids())
+    assert [(s.id, s.status) for s in out] == [("q2", "done"), ("q1", "active"), ("q2", "pending"),
+                                               ("q11", "pending")]
+
+
+def test_fallback_reason_for_a_non_live_status_is_not_called_removed():
+    cur = [_mk("q1", 0, "active"), _mk("q7", 3, "blocked")]   # an unexpected status
+    events = []
+    reconcile_quests(cur, {"add": [_add(2, after="q7")], "remove": []}, next_id=_ids(),
+                     on_event=lambda k, p: events.append(p["reason"]))
+    assert events == ["not_live"]

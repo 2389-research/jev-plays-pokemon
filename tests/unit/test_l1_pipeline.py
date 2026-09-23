@@ -172,3 +172,20 @@ def test_decide_trace_records_the_anchors():
     run_l1_pipeline(None, {}, planner, hard_event=True, on_trace=trace.append)
     decide = next(t for t in trace if t.get("stage") == "decide")
     assert decide["anchors"] == ["q2", None]
+
+
+def test_repair_cannot_invent_an_anchor_the_original_did_not_have():
+    bad = {"kind": "action", "map": 2, "done_when": "on_map"}                     # no after
+    planner = StubPlanner(decide={"add": [bad], "remove": []},
+                          repair={"kind": "travel", "map": 2, "done_when": "on_map", "after": "end"})
+    result = run_l1_pipeline(None, {}, planner, hard_event=True)
+    assert "after" not in result["add"][0]
+
+
+def test_decide_trace_anchors_skip_non_dict_adds():
+    trace = []
+    planner = StubPlanner(brainstorm={"assessment": ""},
+                          decide={"add": ["garbage", {"kind": "travel", "map": 1, "done_when": "on_map",
+                                                      "after": "q2"}], "remove": []})
+    run_l1_pipeline(None, {}, planner, hard_event=True, on_trace=trace.append)
+    assert next(t for t in trace if t.get("stage") == "decide")["anchors"] == ["q2"]

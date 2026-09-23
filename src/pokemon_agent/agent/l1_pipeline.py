@@ -54,6 +54,8 @@ def run_l1_pipeline(emu, context: dict, planner, *, hard_event: bool, on_trace=N
 
     validated_add = []
     for step in d.get("add", []):
+        if not isinstance(step, dict):   # defensive (l1_decide already filters non-dicts)
+            continue
         ok, err = validate_step(step)
         if ok:
             validated_add.append(step)

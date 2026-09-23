@@ -22,6 +22,7 @@ ENEMY_SPECIES = 0xCFE5
 ENEMY_HP = 0xCFE6          # big-endian, 2 bytes
 ACTIVE_MOVES = 0xD01C      # 4 move ids of the active battle mon
 CC26 = 0xCC26              # move-menu cursor: slot + 1
+ACTIVE_PP = 0xD02D         # wBattleMonPP: 4 bytes, low 6 bits = current PP (top 2 = PP Ups)
 
 
 def _u16(emu: Emulator, addr: int) -> int:
@@ -58,6 +59,41 @@ def move_count(emu: Emulator) -> int:
     return sum(1 for m in active_move_ids(emu) if m)
 
 
+def active_pp(emu: Emulator) -> list[int]:
+    """Current PP of each of the active mon's moves (same order as active_moves)."""
+    return [emu.read_memory(ACTIVE_PP + i) & 0x3F for i in range(move_count(emu))]
+
+
+def usable_slot(pp: list[int], slot: int) -> int:
+    """``slot`` if it still has PP; otherwise the move with the most PP left. With every move at 0
+    PP the choice doesn't matter — the game uses Struggle."""
+    if not pp or not (0 <= slot < len(pp)) or pp[slot] > 0 or not any(pp):
+        return slot
+    return max(range(len(pp)), key=lambda i: pp[i])
+
+
+def move_list_showing(emu: Emulator) -> bool:
+    """True when the MOVE LIST (not the root FIGHT/PKMN/ITEM/RUN menu) is on screen — e.g. after the
+    game refused a move with "No PP left for this move!"."""
+    if fight_menu_showing(emu):
+        return False
+    names = [m.upper() for m in active_moves(emu)]
+    for r in range(8, 18):
+        row = "".join(_decode_byte(emu.read_memory(WTILEMAP + r * 20 + c)) for c in range(20))
+        if "No PP left" in row or any(n and n in row for n in names):
+            return True
+    return False
+
+
+def back_to_fight_menu(emu: Emulator, tries: int = 6) -> bool:
+    """Back out of the move list (B) until the root FIGHT menu is up again."""
+    for _ in range(tries):
+        if fight_menu_showing(emu):
+            return True
+        _press(emu, GameButton.B, 30)
+    return fight_menu_showing(emu)
+
+
 def fight_menu_showing(emu: Emulator) -> bool:
     """True if the FIGHT/PKMN/ITEM/RUN menu is on screen (turn ready for input)."""
     for r in range(14, 18):
@@ -83,6 +119,7 @@ def use_move(emu: Emulator, slot: int = 0, *, max_advance: int = 28) -> dict:
     if n == 0:
         return {"ok": False, "reason": "no moves"}
     slot = max(0, min(slot, n - 1))
+    slot = usable_slot(active_pp(emu), slot)   # never select a move the game will refuse (0 PP)
     before = enemy_hp(emu)
     move_name = active_moves(emu)[slot]
 

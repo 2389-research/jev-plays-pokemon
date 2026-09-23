@@ -130,7 +130,12 @@ def choose_move(client, emu: Emulator, *, type_knowledge: list[str] | None = Non
     moves = battle.active_moves(emu)
     if not moves:
         return 0, 0.0
-    criteria = {str(i): f"Use {m}." for i, m in enumerate(moves)}
+    pp = battle.active_pp(emu)
+    usable = [i for i in range(len(moves)) if i >= len(pp) or pp[i] > 0]
+    if not usable:
+        return 0, 0.0          # every move is out of PP: the game uses Struggle
+    # only moves with PP left can be chosen (the game refuses a 0-PP move and the menu loops)
+    criteria = {str(i): f"Use {moves[i]} ({pp[i] if i < len(pp) else '?'} PP left)." for i in usable}
     state = battle_state_summary(emu)
     if type_knowledge:
         state["type_knowledge"] = type_knowledge
@@ -143,6 +148,8 @@ def choose_move(client, emu: Emulator, *, type_knowledge: list[str] | None = Non
     except (TypeError, ValueError):
         slot = 0
     slot = max(0, min(slot, len(moves) - 1))
+    if slot not in usable:
+        slot = battle.usable_slot(pp, slot)
     confidence = float(getattr(ans, "confidence", 0.0) or 0.0)
     if capture is not None:
         capture.record("battle_move", model=getattr(client, "model", "typesafe"),

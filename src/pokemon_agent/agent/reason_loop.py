@@ -2143,7 +2143,7 @@ class ReasoningLoop:
         (§2.1). Then, once the FIGHT menu is up, Jev picks a typed action toward the cached
         objective and the matching macro executes it. GRIND-EXP is exactly today's fight
         path (choose_move -> use_move), so the working fight is preserved."""
-        from ..core.models import AdvanceDialogAction, MenuSelectAction
+        from ..core.models import AdvanceDialogAction, MenuSelectAction, WaitAction
         from ..games.pokemon_red import battle, battle_actions, battle_agent, battle_l2
         emu = self.controller.emu
         mode_before = detect_mode(emu)
@@ -2160,6 +2160,17 @@ class ReasoningLoop:
                 "enemy": (state.get("enemy") or {}).get("species"),
                 "trainer": state.get("is_trainer")})
         self._last_in_battle = battle.in_battle(emu)
+
+        # the MOVE LIST is open without the root menu (e.g. the game refused a 0-PP move): back out
+        # with B — pressing A here would just re-select the same move forever
+        if not battle.fight_menu_showing(emu) and battle.move_list_showing(emu):
+            ok = battle.back_to_fight_menu(emu)
+            rstep = ReasonStep(location="battle", objective="back out of the move list",
+                               reasoning="move list open without the FIGHT menu; pressing B",
+                               action=WaitAction(frames=1))
+            return rstep, 0, {}, ActionResult(success=ok, result="completed" if ok else "blocked",
+                                              mode_before=mode_before, mode_after=detect_mode(emu),
+                                              detail="battle: backed out of the move list")
 
         # intro / result text: advance until the FIGHT/PKMN/ITEM/RUN menu is interactive.
         if not battle.fight_menu_showing(emu):

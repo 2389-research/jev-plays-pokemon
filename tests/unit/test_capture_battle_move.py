@@ -15,6 +15,7 @@ class _Client:
 def test_choose_move_records_and_returns_unchanged(tmp_path, monkeypatch):
     # stub the emu-reading helpers so a trivial emu suffices
     monkeypatch.setattr(battle_agent.battle, "active_moves", lambda emu: ["Tackle", "Ember"])
+    monkeypatch.setattr(battle_agent.battle, "active_pp", lambda emu: [35, 25])
     monkeypatch.setattr(battle_agent, "read_battle", lambda emu: {"active": {}, "enemy": {}})
 
     cap = Capture(tmp_path, mode="distill"); cap.begin_step(2, None)

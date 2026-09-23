@@ -85,6 +85,57 @@ def move_list_showing(emu: Emulator) -> bool:
     return False
 
 
+ACTIVE_HP = 0xD015         # wBattleMonHP (big-endian)
+
+
+def _screen(emu: Emulator) -> str:
+    return "\n".join("".join(_decode_byte(emu.read_memory(WTILEMAP + r * 20 + c)) for c in range(20))
+                     for r in range(18))
+
+
+def switch_screen_showing(emu: Emulator) -> bool:
+    """The party-switch flow is on screen: 'Will ... change POKEMON?' (YES/NO), 'Use next POKEMON?',
+    'Bring out which POKEMON?' or '<mon> is already out!'."""
+    if not in_battle(emu) or fight_menu_showing(emu):
+        return False
+    s = _screen(emu)
+    return any(k in s for k in ("Bring out which", "already out", "change", "Use next"))
+
+
+def replacement_slot(party: list[dict]) -> int | None:
+    """First party member that can still fight (the forced pick after the active mon faints)."""
+    return next((i for i, p in enumerate(party) if int(p.get("hp") or 0) > 0), None)
+
+
+def resolve_switch_screen(emu: Emulator, tries: int = 10) -> bool:
+    """Leave the switch flow the way a player would: decline a voluntary 'change POKEMON?' (NO), accept
+    'Use next POKEMON?' (YES, after a faint), back out of 'Bring out which POKEMON?' with B unless the
+    active mon has fainted (then send out the first healthy one). True once the FIGHT menu is back (or
+    the battle ended)."""
+    from . import menus
+    from .game_state import read_party
+    for _ in range(tries):
+        if not in_battle(emu) or fight_menu_showing(emu):
+            return True
+        s = _screen(emu)
+        fainted = _u16(emu, ACTIVE_HP) == 0
+        if "Use next" in s and menus.menu_open(emu):
+            menus.answer_yesno(emu, True)
+        elif "change" in s and menus.menu_open(emu):
+            menus.answer_yesno(emu, False)
+        elif "Bring out which" in s and fainted and menus.menu_open(emu):
+            slot = replacement_slot(read_party(emu))
+            if slot is None:
+                _press(emu, GameButton.A, 30)
+            else:
+                menus.select_option(emu, slot, max_options=6)
+                _press(emu, GameButton.A, 30)     # the party submenu: SWITCH (top) -> send it out
+        else:
+            _press(emu, GameButton.B, 30)
+        emu.tick(10)
+    return not in_battle(emu) or fight_menu_showing(emu)
+
+
 def back_to_fight_menu(emu: Emulator, tries: int = 6) -> bool:
     """Back out of the move list (B) until the root FIGHT menu is up again."""
     for _ in range(tries):

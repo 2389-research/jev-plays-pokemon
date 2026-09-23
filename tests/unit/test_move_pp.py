@@ -62,3 +62,24 @@ def test_recovers_from_the_stuck_move_list_and_uses_a_move_with_pp():
     r = battle.use_move(emu, 3)                                  # asks for Water Gun (0 PP)
     assert r["ok"] and r["move"] != "Water Gun" and emu.read_memory(0xCCDC) != 55
     emu.close()
+
+
+SWITCH = Path("runs/verify-mtmoon5-20260923/states/map59_step123.state")
+
+
+@pytest.mark.skipif(not (ROM.exists() and SWITCH.exists()), reason="ROM / switch-loop state not present")
+def test_backs_out_of_a_voluntary_switch_menu():
+    """verify-mtmoon5 steps 121-499: the battle sat in 'Bring out which POKEMON?' / 'WARTORTLE is already
+    out!' while the default A kept re-picking the active mon."""
+    from pokemon_agent.emulator.pyboy_adapter import PyBoyEmulator
+    emu = PyBoyEmulator(str(ROM), window="null")
+    emu.load_state(SWITCH)
+    emu.tick(2)
+    assert battle.switch_screen_showing(emu)
+    assert battle.resolve_switch_screen(emu) and battle.fight_menu_showing(emu)
+    emu.close()
+
+
+def test_switch_screen_picks_a_healthy_mon_when_the_active_one_fainted():
+    assert battle.replacement_slot([{"hp": 0}, {"hp": 12}, {"hp": 5}]) == 1
+    assert battle.replacement_slot([{"hp": 0}, {"hp": 0}]) is None

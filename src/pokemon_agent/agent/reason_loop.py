@@ -2208,6 +2208,17 @@ class ReasoningLoop:
                 "trainer": state.get("is_trainer")})
         self._last_in_battle = battle.in_battle(emu)
 
+        # the party-SWITCH flow ('change POKEMON?' / 'Bring out which?' / 'already out!'): the default A
+        # re-picks the active mon forever — decline / back out, or send a healthy mon after a faint
+        if battle.switch_screen_showing(emu):
+            ok = battle.resolve_switch_screen(emu)
+            rstep = ReasonStep(location="battle", objective="resolve the switch screen",
+                               reasoning="party-switch prompt: decline / back out (or replace a fainted mon)",
+                               action=WaitAction(frames=1))
+            return rstep, 0, {}, ActionResult(success=ok, result="completed" if ok else "blocked",
+                                              mode_before=mode_before, mode_after=detect_mode(emu),
+                                              detail="battle: resolved the switch screen")
+
         # the MOVE LIST is open without the root menu (e.g. the game refused a 0-PP move): back out
         # with B — pressing A here would just re-select the same move forever
         if not battle.fight_menu_showing(emu) and battle.move_list_showing(emu):

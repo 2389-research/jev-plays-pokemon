@@ -40,6 +40,7 @@ from ..games.pokemon_red.routes import next_direction
 from ..games.pokemon_red.state import detect_mode, read_player
 from .portal_graph import PortalGraph
 from ..observations.builder import ObservationBuilder
+from . import goals as goals_mod
 from .l1_pipeline import run_l1_pipeline
 from .memory import AgentMemory
 from .navigator import Navigator
@@ -216,6 +217,11 @@ class ReasoningLoop:
         self._l1_event = False                   # a one-shot event asked for an L1 review next gate
         self._l1_last = None                     # last L1 review's {change, assessment, trace} (for the recorder)
         self._l1_trace: list[dict] = []          # current/last review's pipeline stage events
+        # tiered goals (spec §3.2): last-seen status per tier (absent = not yet observed -> a resume
+        # or a freshly written goal never pings) and the goals that already pinged (one ping each)
+        self._goal_prev_status: dict[str, str] = {}
+        self._goal_pinged: set[tuple] = set()
+        self._notepad_changed = False            # the recorder logs the full notepad only when it changed
         # conversation/script gate (F5): last step routed to dialogue, consecutive forced waits, and
         # whether forced waiting is armed (a timeout disarms it until the script flag clears)
         self._last_dialog_step = -(10**9)
@@ -465,7 +471,7 @@ class ReasoningLoop:
         """L1 strategic review: run the L1 pipeline (triage/brainstorm/decide/validate) to see
         whether the standing plan needs to change; if so, deterministically reconcile the proposal
         into the canonical plan (preserving progress) and recompile the quest queue. Durable
-        strategy (mission/milestone/tried_failed) lives on the AgentPlan in memory. ``emergency``
+        strategy (tiered goals + notepad, mirrored to mission/milestone) lives on the AgentPlan. ``emergency``
         (near-faint) is surfaced in the context so L1 inserts a routed heal quest. ``hard_event``
         tells the pipeline this review was forced by an event (wedge/emergency/plan-exhausted)
         rather than the periodic cadence, so it skips the cheap triage gate. Never raises: any
@@ -491,34 +497,28 @@ class ReasoningLoop:
                 "plan": [{"id": s.id, "map": s.map, "kind": s.kind, "talk": s.talk,
                           "done_when": s.done_when, "status": s.status} for s in self._plan_steps],
                 "signals": signals,
-                "mission": self._plan.mission,
-                "milestone": self._plan.milestone,
             }
+            # tiered goals (spec §3.1): drop a paused focus whose own criterion is met, then show L1
+            # its goals, their RAM status, the paused focus and its notepad
+            if goals_mod.refresh_interrupted(self._plan, emu, self.memory):
+                self.on_event("goals_changed", {"step": self.session.step, "interrupted": None,
+                                                "why": "interrupted focus met"})
+            context.update(goals_mod.goals_view(self._plan, emu, self.memory))
+            pre_status = context["goal_status"]
             prop = run_l1_pipeline(emu, context, self.planner, hard_event=(hard_event or emergency),
                                    on_trace=self._record_l1_trace)
-            if prop is not None:
-                removed_ids = set(prop.get("remove") or [])
-                removed = [s for s in self._plan_steps if s.id in removed_ids]
+            step_edit = prop is not None and bool(prop.get("add") or prop.get("remove"))
+            change = (goals_mod.detect_change(self._plan, prop, step_edit=step_edit)
+                      if prop is not None else None)
+            if change is not None:
+                self._apply_goals_change(change, pre_status)
+            if step_edit:
                 self._plan_steps = reconcile_quests(
                     self._plan_steps,
                     {"add": prop.get("add", []), "remove": prop.get("remove", [])},
                     next_id=self._next_qid,
                     on_event=lambda kind, payload: self.on_event(
                         kind, {"step": self.session.step, **payload}))
-                if prop.get("mission"):
-                    self._plan.mission = prop["mission"]
-                if prop.get("milestone"):
-                    self._plan.milestone = prop["milestone"]
-                # standing battle goal (§7.1): a catch list steers battle_L2 toward CAPTURE.
-                # Only a non-null list edits it (None = "unchanged"); [] explicitly clears it.
-                if prop.get("catch") is not None:
-                    self._plan.battle_goals = {**self._plan.battle_goals,
-                                               "catch": list(prop["catch"] or [])}
-                # record the approaches L1 discarded so they aren't retried
-                for s in removed:
-                    note = s.why or s.done_when or f"map {s.map}"
-                    if note not in self._plan.tried_failed:
-                        self._plan.tried_failed.append(note)
                 # a provisional bootstrap default (generic goal-travel) is SUPERSEDED the moment L1
                 # supplies a real step — otherwise reconcile keeps it first (adds go after the active
                 # step) and the real plan sits behind a possibly story-gated default forever.
@@ -540,6 +540,13 @@ class ReasoningLoop:
                                             "remove": prop.get("remove", [])})
                 self.on_event("quest", {"step": self.session.step, "len": len(self._quest),
                                         "plan": [d.reason for d in self._quest]})
+            elif change is not None:
+                # goals / notepad / catch only: the step queue is untouched (no reconcile, no
+                # recompile, no quest event) and the review is tagged so thrash metrics stay honest
+                self._l1_last = {"change": "goals", "assessment": prop.get("assessment"),
+                                 "trace": self._l1_trace}
+                self.on_event("l1_review", {"step": self.session.step, "change": "goals",
+                                            "assessment": prop.get("assessment")})
             else:
                 self._l1_last = {"change": False, "assessment": "", "trace": self._l1_trace}
                 self.on_event("l1_review", {"step": self.session.step, "change": False,
@@ -553,6 +560,42 @@ class ReasoningLoop:
             # and on commit; resetting it here would suppress wedge detection.)
             self._legs_since_l1 = 0
             self._l1_event = False
+
+    def _apply_goals_change(self, change, pre_status: dict) -> None:
+        """Apply a detected goals/notepad/interrupted/catch change (goals.apply_change) and emit it.
+        A tier L1 just rewrote is forgotten by the goal-met ping, so a goal written already-met
+        never pings."""
+        before = {"goals": self._plan.goals.model_dump(), "interrupted": self._plan.interrupted.model_dump()}
+        goals_mod.apply_change(self._plan, change, pre_status=pre_status)
+        for tier in change.goals:
+            self._goal_prev_status.pop(tier, None)
+        if change.goals or change.drop_interrupted or before["interrupted"] != self._plan.interrupted.model_dump():
+            self.on_event("goals_changed", {"step": self.session.step, "before": before,
+                                            "after": {"goals": self._plan.goals.model_dump(),
+                                                      "interrupted": self._plan.interrupted.model_dump()}})
+        if change.notepad is not None:
+            self._notepad_changed = True
+            self.on_event("notepad_changed", {"step": self.session.step, "len": len(self._plan.notepad),
+                                              "truncated": self._plan.notepad_truncated})
+
+    def _check_goal_ping(self) -> None:
+        """Goal-met ping (spec §3.2), every step: when a tier's criterion goes unmet -> met, arm an L1
+        review once for that goal (hp_frac flips in battle, so each goal pings at most once). The
+        first observation of a tier only records it (resume / fresh goal -> no spurious ping)."""
+        if self._plan is None:
+            return
+        emu = self.controller.emu
+        for tier in goals_mod.GOAL_TIERS:
+            g = getattr(self._plan.goals, tier)
+            st = goals_mod.goal_status(g, emu, self.memory)
+            prev = self._goal_prev_status.get(tier)
+            self._goal_prev_status[tier] = st
+            key = (tier, g.text, g.done_when)
+            if prev == "unmet" and st == "met" and key not in self._goal_pinged:
+                self._goal_pinged.add(key)
+                self._l1_event = True
+                self.on_event("goal_met", {"step": self.session.step, "tier": tier, "text": g.text,
+                                           "done_when": g.done_when})
 
     # --------------------------------------------------- directive lifecycle
     def _mark_step(self, quest_id: str | None, status: str, reason: str | None = None) -> None:
@@ -588,6 +631,7 @@ class ReasoningLoop:
         next gate (the plan is never cleared). There is no arbiter intent / priority stack /
         escalation-score path."""
         emu = self.controller.emu
+        self._check_goal_ping()                # a goal just became met -> L1 review at the gate below
         party = game_signals(emu)["party"]     # L1 builds its own full signals in _run_l1
         emergency = needs_emergency_heal(party)  # near-faint -> force an L1 heal ping (not a directive)
         if self._directive is not None:
@@ -821,6 +865,7 @@ class ReasoningLoop:
             "player": {"x": player.x, "y": player.y, "map_id": player.map_id},
             "objective": directive.reason,
             "milestone": (self._plan.milestone if self._plan else None),
+            "focus": (self._plan.goals.tertiary.text or None) if self._plan else None,
             "destination": (f"{map_name(tmap)} (map {tmap})" if tmap is not None else "the goal"),
             "goal_dir": goal_dir,
             "exit_tile": exit_tile,
@@ -1862,6 +1907,10 @@ class ReasoningLoop:
                               if d else None),
                 "mission": (self._plan.mission if self._plan else None),
                 "milestone": (self._plan.milestone if self._plan else None),
+                "goals": (self._plan.goals.model_dump() if self._plan else None),
+                "interrupted": (self._plan.interrupted.model_dump()
+                                if self._plan and self._plan.interrupted.text else None),
+                "notepad_len": (len(self._plan.notepad) if self._plan else 0),
                 "plan_steps": [{"id": s.id, "map": s.map, "status": s.status,
                                "done_when": s.done_when, "kind": s.kind, "why": s.why,
                                "talk": s.talk, "who": s.who}
@@ -1873,6 +1922,9 @@ class ReasoningLoop:
                 "goal_map": self.goal_map,
                 "routing_policy": (self._policy if self.pather == "policy" else self.pather),
             }
+            if self._notepad_changed and self._plan is not None:
+                extra["notepad"] = self._plan.notepad   # full text only on the step it changed
+                self._notepad_changed = False
             self.recorder.record(step=self.session.step, obs=obs, action=rstep.action,
                                  result=result, extra=extra)
             self.capture.flush()   # persist this step's captured decisions beside the record

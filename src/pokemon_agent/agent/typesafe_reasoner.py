@@ -197,7 +197,7 @@ class TypeSafeReasoner:
         blocked_dirs = blocked_dirs or set()
         state = {
             "primary_goal": primary_goal,
-            "current_plan": plan.model_dump() if plan else None,
+            "current_plan": plan.prompt_view() if plan else None,   # goals yes, notepad no
             "player": player_desc,
             "game_state": game_state,
             "social_memory": social_memory,

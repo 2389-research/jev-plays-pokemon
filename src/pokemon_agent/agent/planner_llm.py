@@ -214,14 +214,15 @@ steps that should go. Every added step MUST have a done_when from the list above
 
 TRIAGE_SYSTEM = """You are the L1 TRIAGE gate for an agent playing Pokémon Red. This is a CHEAP,
 FAST check that runs every periodic review, before any expensive reasoning: look at the standing
-PLAN (steps + statuses), the current MISSION/MILESTONE, and the SIGNALS (blocked duration, low
-HP, emergency_heal, etc.) and decide ONLY whether the plan needs to change at all. Do NOT propose
+PLAN (steps + statuses), the GOALS (primary / secondary / tertiary, with GOAL_STATUS and any
+INTERRUPTED focus), and the SIGNALS (blocked duration, low HP, emergency_heal, etc.) and decide ONLY whether the plan needs to change at all. Do NOT propose
 what to change — that is a separate, more expensive step. You have NO knowledge-base access here;
 answer from what's given, do not search.
 
 Usually the plan is fine — say so. Say change=true only when something is clearly wrong: a step
 that can't complete, a stuck/blocked signal, an emergency (e.g. low HP with no heal step in the
-plan), or the mission/milestone is stale.
+plan). A goal that already shows met is not by itself a reason to change; say change=true for goals
+only if a goal is clearly wrong or impossible.
 
 Return ONLY JSON: {"change": <true|false>, "why": "<one short sentence>"}"""
 
@@ -229,10 +230,13 @@ Return ONLY JSON: {"change": <true|false>, "why": "<one short sentence>"}"""
 BRAINSTORM_SYSTEM = """You are the L1 BRAINSTORM step for an agent playing Pokémon Red, working
 toward the first gym (Brock, Pewter City, north). TRIAGE has flagged that the plan may need to
 change. Your job here is OPEN-ENDED assessment, not a final plan: think through the situation —
-current MAP, PARTY, ITEMS, BADGES, SIGNALS, MISSION, MILESTONE — and what the game actually
+current MAP, PARTY, ITEMS, BADGES, SIGNALS, GOALS, NOTEPAD — and what the game actually
 requires next (a story gate, an errand, healing, grinding, the next town). A later DECIDE step
 will turn your assessment into concrete quest steps, so be concrete and specific (name the map /
 item / NPC where you can), but do NOT emit step objects or JSON steps yourself here.
+GOALS are the agent's own horizons (primary = the long-term why, secondary = the current chapter,
+tertiary = the immediate focus, possibly a diversion; GOAL_STATUS says whether a criterion holds now;
+INTERRUPTED is a paused focus); NOTEPAD is the agent's own notes. Say if a goal should change.
 
 TOOL — knowledge base: you SHOULD look things up in a Pokémon Red guide before concluding —
 especially WHERE things are (which map has the item / NPC / Poké Center) and what a story gate
@@ -257,12 +261,29 @@ its goal not yet met), return EMPTY "add" and EMPTY "remove" — that means "kee
 active step". Do NOT re-add or restate a step that already exists in the PLAN and is in progress
 (e.g. do not add another heal step when one is already active, nor another "go to X" when that is
 already the active step) — repeating a step never helps and just thrashes the plan. ONLY add a step
-that is genuinely MISSING, and ONLY remove one that is truly impossible or already obsolete. Leave
-MISSION/MILESTONE unchanged unless the concrete sub-goal has actually moved on.
+that is genuinely MISSING, and ONLY remove one that is truly impossible or already obsolete.
 
-You are given: CURRENT_MAP, PARTY, ITEMS, BADGES, PLAN (existing steps), SIGNALS, MISSION,
-MILESTONE, BRAINSTORM (the prior assessment), and MAPS (an id->name table — you MUST use these
-exact ids for any "map" field).
+GOALS — your own horizons, all held at once: PRIMARY = the long-term why (e.g. earn the Boulder
+Badge); SECONDARY = the current chapter (e.g. get to Pewter Gym with a team that can win); TERTIARY =
+the immediate focus, which may be a diversion (heal, shop, grind, a story errand). GOALS and NOTEPAD
+follow the same rule as steps: omit "goals", "notepad" and "catch" unless something actually changed
+— a goal was achieved, you are diverting, or you learned something worth keeping. Rewording is not a
+change. When you do edit, include only the tier(s) that changed. GOAL_STATUS "met" means that
+criterion holds right now; you decide when to move on. A brief diversion can be just a step (e.g. a
+heal step) — you don't have to rewrite a goal for it.
+  - Diverting / returning: rewrite the tertiary (or the secondary if the chapter itself changed).
+    INTERRUPTED shows the focus you paused — return to it, or send "interrupted": "" to drop it (a
+    paused focus without a checkable criterion is only dropped when you say so).
+  - Plan concrete steps for your current focus and chapter; keep later chapters as goals / notepad
+    rather than queued steps.
+  - NOTEPAD is your own short notepad — intentions for later, lessons, things not to retry. Send the
+    full rewritten text only when it changes; keep it short (NOTEPAD_TRUNCATED = it was cut).
+  - A goal's optional done_when uses ONLY has_item:/no_item:/level>=/badges>=/hp_frac>=/verify:
+    (never on_map or talked — goals have no map).
+
+You are given: CURRENT_MAP, PARTY, ITEMS, BADGES, PLAN (existing steps), SIGNALS, GOALS,
+GOAL_STATUS, INTERRUPTED, NOTEPAD, BRAINSTORM (the prior assessment), and MAPS (an id->name table —
+you MUST use these exact ids for any "map" field).
 
 EVERY step you add MUST include an explicit "kind" — this is a HARD requirement; a step with no
 kind silently breaks execution downstream:
@@ -337,16 +358,17 @@ RULES:
     "verify:" whenever one applies.
 
 You MAY also set a standing CATCH goal when you want a new team member: add "catch": ["<species>"]
-(or ["any"]) so the battle layer catches that wild Pokémon when it appears; omit it (or [] to clear)
-otherwise — the default is to catch nothing.
+(or ["any"]) so the battle layer catches that wild Pokémon when it appears. Omit "catch" unless
+changing it; "catch": "clear" removes the standing goal. The default is to catch nothing.
 
 Return ONLY JSON:
 {"assessment": "<one line: what changed and why>",
  "add": [ <new step objects as above, each with its "after" (null unless it must follow a PLAN step)> ],
  "remove": [ <ids of existing plan steps to drop> ],
- "mission": "<the overall mission>",
- "milestone": "<the current concrete sub-goal>",
- "catch": [ <species to catch, or "any"; omit for none> ]}"""
+ "goals": {"<primary|secondary|tertiary>": {"text": "<short>", "done_when": "<criterion or null>"}}  (OMIT unless a goal changed),
+ "notepad": "<full rewritten notepad>"  (OMIT unless it changed),
+ "interrupted": ""  (ONLY to drop the paused focus),
+ "catch": [ <species or "any"> ]  (OMIT unless changing; "clear" to remove)}"""
 
 
 REPAIR_SYSTEM = """You are the L1 REPAIR step for an agent playing Pokémon Red. ONE quest step
@@ -540,6 +562,24 @@ class Planner:
         except Exception:
             return {"change": False, "add": [], "remove": []}
 
+    @staticmethod
+    def _goal_fields(context: dict, *, notepad: bool = True) -> dict:
+        """The goal view for an L1 state dict. A legacy context (captured inputs, old evals) has
+        only mission/milestone -> derive primary/secondary from them so the new prompts still see
+        sensible goals."""
+        goals = context.get("goals")
+        if not isinstance(goals, dict):
+            goals = {"primary": {"text": str(context.get("mission") or ""), "done_when": None},
+                     "secondary": {"text": str(context.get("milestone") or ""), "done_when": None},
+                     "tertiary": {"text": "", "done_when": None}}
+        out = {"goals": goals,
+               "goal_status": context.get("goal_status") or {t: "none" for t in goals},
+               "interrupted": context.get("interrupted")}
+        if notepad:
+            out["notepad"] = context.get("notepad") or ""
+            out["notepad_truncated"] = bool(context.get("notepad_truncated"))
+        return out
+
     def l1_triage(self, context: dict) -> dict:
         """L1 pipeline step 1 (TRIAGE): a cheap, fast, NO-search check of whether the standing
         plan needs to change at all, given the plan + signals. Gates the expensive
@@ -553,8 +593,7 @@ class Planner:
             state = {
                 "plan": context.get("plan"),
                 "signals": context.get("signals"),
-                "mission": context.get("mission"),
-                "milestone": context.get("milestone"),
+                **self._goal_fields(context, notepad=False),
                 "current_map": context.get("current_map"),
             }
             content, _lat, _usage = self.provider.chat_json(TRIAGE_SYSTEM, state)
@@ -582,8 +621,7 @@ class Planner:
                 "items": context.get("items"),
                 "badges": context.get("badges"),
                 "signals": context.get("signals"),
-                "mission": context.get("mission"),
-                "milestone": context.get("milestone"),
+                **self._goal_fields(context),
             }
             data = self._llm_with_search(prov, BRAINSTORM_SYSTEM, state, final_key="assessment",
                                          capture_layer="l1_brainstorm")
@@ -612,8 +650,7 @@ class Planner:
                 "badges": context.get("badges"),
                 "plan": context.get("plan"),
                 "signals": context.get("signals"),
-                "mission": context.get("mission"),
-                "milestone": context.get("milestone"),
+                **self._goal_fields(context),
                 "brainstorm": brainstorm.get("assessment", ""),
                 "maps": {str(mid): name for mid, name in MAP_NAMES_RAW.items()},
             }
@@ -624,17 +661,28 @@ class Planner:
                 return {"add": [], "remove": []}
             add = [s for s in (data.get("add") or []) if isinstance(s, dict)]
             remove = [str(x) for x in (data.get("remove") or [])]
-            # optional standing catch goal (§7.1): a list of species (or "any"); None = unchanged.
+            # optional standing catch goal (§7.1): a species list (or ["any"]) sets it, "clear" clears
+            # it; anything else (absent / [] — an echo) = unchanged (tiered-goals spec §3.3).
             raw_catch = data.get("catch")
-            catch = [str(x) for x in raw_catch] if isinstance(raw_catch, list) else None
-            return {
-                "assessment": str(data.get("assessment") or ""),
-                "add": add,
-                "remove": remove,
-                "mission": str(data.get("mission") or context.get("mission") or ""),
-                "milestone": str(data.get("milestone") or context.get("milestone") or ""),
-                "catch": catch,
-            }
+            if isinstance(raw_catch, list):
+                catch = [str(x) for x in raw_catch]
+            elif isinstance(raw_catch, str) and raw_catch.strip().lower() == "clear":
+                catch = "clear"
+            else:
+                catch = None
+            out = {"assessment": str(data.get("assessment") or ""), "add": add, "remove": remove,
+                   "catch": catch,
+                   # tiered goals (§3.3): passed through raw; goals.detect_change validates +
+                   # decides whether anything really changed. No back-fill from the context.
+                   "goals": data.get("goals") if isinstance(data.get("goals"), dict) else None,
+                   "notepad": data.get("notepad") if isinstance(data.get("notepad"), str) else None}
+            if "interrupted" in data:
+                out["interrupted"] = data["interrupted"]
+            # legacy keys only if the model still emits them (honored alongside a step edit only)
+            for k in ("mission", "milestone"):
+                if isinstance(data.get(k), str) and data[k].strip():
+                    out[k] = data[k]
+            return out
         except Exception:
             return {"add": [], "remove": []}
 

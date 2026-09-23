@@ -202,7 +202,7 @@ class Reasoner:
     ) -> tuple[ReasonStep, int, dict]:
         user = {
             "primary_goal": primary_goal,
-            "current_plan": plan.model_dump() if plan else None,
+            "current_plan": plan.prompt_view() if plan else None,   # goals yes, notepad no
             "player": player_desc,
             "available_targets": targets,
             "route_hint": route_hint,

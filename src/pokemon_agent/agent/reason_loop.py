@@ -510,8 +510,6 @@ class ReasoningLoop:
             step_edit = prop is not None and bool(prop.get("add") or prop.get("remove"))
             change = (goals_mod.detect_change(self._plan, prop, step_edit=step_edit)
                       if prop is not None else None)
-            if change is not None:
-                self._apply_goals_change(change, pre_status)
             if step_edit:
                 self._plan_steps = reconcile_quests(
                     self._plan_steps,
@@ -530,6 +528,8 @@ class ReasoningLoop:
                         self._directive = None   # the committed default is gone -> advance to L1's first real step
                     self._plan_steps = [s for s in self._plan_steps if not s.provisional]
                 self._recompile_quest()
+                if change is not None:   # after the step edit succeeded: a failed review changes nothing
+                    self._apply_goals_change(change, pre_status)
                 self._l1_last = {"change": True, "assessment": prop.get("assessment"),
                                  "trace": self._l1_trace}
                 self.on_event("l1_review", {"step": self.session.step, "change": True,
@@ -543,6 +543,7 @@ class ReasoningLoop:
             elif change is not None:
                 # goals / notepad / catch only: the step queue is untouched (no reconcile, no
                 # recompile, no quest event) and the review is tagged so thrash metrics stay honest
+                self._apply_goals_change(change, pre_status)
                 self._l1_last = {"change": "goals", "assessment": prop.get("assessment"),
                                  "trace": self._l1_trace}
                 self.on_event("l1_review", {"step": self.session.step, "change": "goals",
@@ -567,8 +568,9 @@ class ReasoningLoop:
         never pings."""
         before = {"goals": self._plan.goals.model_dump(), "interrupted": self._plan.interrupted.model_dump()}
         goals_mod.apply_change(self._plan, change, pre_status=pre_status)
-        for tier in change.goals:
+        for tier in change.goals:          # a rewritten tier is a new goal instance: fresh status + latch
             self._goal_prev_status.pop(tier, None)
+        self._goal_pinged = {k for k in self._goal_pinged if k[0] not in change.goals}
         if change.goals or change.drop_interrupted or before["interrupted"] != self._plan.interrupted.model_dump():
             self.on_event("goals_changed", {"step": self.session.step, "before": before,
                                             "after": {"goals": self._plan.goals.model_dump(),

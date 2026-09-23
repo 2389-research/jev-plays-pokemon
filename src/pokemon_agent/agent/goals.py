@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 
 from ..games.pokemon_red import predicates
-from .plan import GOAL_TEXT_MAX, GOAL_TIERS, NOTEPAD_MAX_CHARS, AgentPlan, Goal
+from .plan import GOAL_TEXT_MAX, GOAL_TIERS, NOTEPAD_MAX_CHARS, AgentPlan, Goal, goal_text
 
 __all__ = ["GOAL_TEXT_MAX", "NOTEPAD_MAX_CHARS", "GOAL_TIERS", "GoalsChange", "norm", "clean_criterion",
            "clean_goal", "goal_status", "statuses", "truncate_notepad", "detect_change", "apply_change",
@@ -52,7 +52,7 @@ def clean_goal(raw) -> Goal | None:
         raw = {"text": raw}
     if not isinstance(raw, dict):
         return None
-    text = re.sub(r"\s+", " ", str(raw.get("text") or "")).strip()[:GOAL_TEXT_MAX]
+    text = goal_text(raw.get("text"))
     return Goal(text=text, done_when=clean_criterion(raw.get("done_when")) if text else None)
 
 
@@ -111,8 +111,13 @@ class GoalsChange:
     catch: list[str] | str | None = None                   # list = set it; "clear"; None = unchanged
 
 
+def _crit(dw: str | None) -> dict | None:
+    """Criterion identity = the parsed predicate, so `hp_frac>=1` echoes `hp_frac>=1.0`."""
+    return _parse(dw.strip()) if dw else None
+
+
 def _same(a: Goal, b: Goal) -> bool:
-    return norm(a.text) == norm(b.text) and (a.done_when or None) == (b.done_when or None)
+    return norm(a.text) == norm(b.text) and _crit(a.done_when) == _crit(b.done_when)
 
 
 def detect_change(plan: AgentPlan, prop: dict, *, step_edit: bool) -> GoalsChange | None:
@@ -120,7 +125,7 @@ def detect_change(plan: AgentPlan, prop: dict, *, step_edit: bool) -> GoalsChang
 
     Legacy ``mission``/``milestone`` keys count only alongside a step edit and never override a
     ``goals`` tier. ``catch``: absent / [] = unchanged; "clear" clears; a list sets (compared as a set).
-    ``interrupted``: only "" / null (drop) is meaningful."""
+    ``interrupted``: only "" (drop) is meaningful."""
     ch = GoalsChange()
     raw = prop.get("goals") if isinstance(prop.get("goals"), dict) else {}
     proposed: dict[str, Goal] = {}
@@ -132,7 +137,9 @@ def detect_change(plan: AgentPlan, prop: dict, *, step_edit: bool) -> GoalsChang
     if step_edit:
         for key, tier in (("mission", "primary"), ("milestone", "secondary")):
             if tier not in raw and isinstance(prop.get(key), str) and prop[key].strip():
-                proposed[tier] = clean_goal(prop[key])
+                # legacy text never carries a criterion: keep the tier's own (same text -> no change)
+                cur, g = getattr(plan.goals, tier), clean_goal(prop[key])
+                proposed[tier] = Goal(text=g.text, done_when=cur.done_when if g.text else None)
     for tier, g in proposed.items():
         if not _same(g, getattr(plan.goals, tier)):
             ch.goals[tier] = g
@@ -144,7 +151,8 @@ def detect_change(plan: AgentPlan, prop: dict, *, step_edit: bool) -> GoalsChang
 
     # an explicit drop is always honoured (it may cancel a pause recorded by this same DECIDE), but on
     # its own it is only a change when something is actually paused
-    ch.drop_interrupted = "interrupted" in prop and prop["interrupted"] in ("", None)
+    # (only "" — models write null for "field not used", so null is NOT a drop)
+    ch.drop_interrupted = prop.get("interrupted") == ""
 
     cur = _catch_set((plan.battle_goals or {}).get("catch"))
     c = prop.get("catch")

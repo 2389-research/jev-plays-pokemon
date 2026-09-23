@@ -15,7 +15,7 @@ Spec review round 1 findings are marked "R1-#n", round 2 "R2-#n" (both 2026-09-2
 
 ## 1. Current state (verified at 33ab266)
 
-- `AgentPlan.mission` (≈ primary) / `milestone` (≈ secondary) strings: DECIDE returns them; triage/brainstorm/DECIDE state dicts carry them; the L2 proposer reads `milestone` (reason_loop ~823); the recorder `extra` logs both (~1863). `l1_decide` **back-fills** `mission`/`milestone` from the context when the model omits them (planner_llm ~634), and `_run_l1` assigns them directly on every step edit (reason_loop ~508).
+- `AgentPlan.mission` (≈ primary) / `milestone` (≈ secondary) strings: DECIDE returns them; triage/brainstorm/DECIDE state dicts carry them; the loop puts `milestone` into the L2 proposer context (reason_loop ~823) but `propose_target`'s state whitelist drops it; the recorder `extra` logs both (~1863). `l1_decide` **back-fills** `mission`/`milestone` from the context when the model omits them (planner_llm ~634), and `_run_l1` assigns them directly on every step edit (reason_loop ~508).
 - **No-op short-circuit** (l1_pipeline ~83): `if not validated_add and not remove: return None` — any mission/milestone/catch change in a DECIDE with no step edit is discarded. Captured data (all runs): **20 of 79 no-op DECIDEs reword the milestone**, and **77 of 79 send `"catch": []`** (the other two set a real catch: brock-run-1839 steps 277 `['any']`, 434 `['Pidgey']`). Today `[]` with a step edit **clears** the catch goal (reason_loop ~513) — so an echoed `[]` silently erases a real catch (latent bug, R2-#1).
 - `TRIAGE_SYSTEM` says change=true when "the mission/milestone is stale" (planner_llm ~223).
 - The concrete plan is `_plan_steps`, compiled into directives the executive runs.
@@ -72,14 +72,14 @@ class AgentPlan(BaseModel):
 DECIDE's JSON: **`mission`/`milestone` are removed** from the schema and the "You are given" list and replaced by (R1-#1):
 - `"goals"` *(optional)*: only the tier(s) that changed, e.g. `{"tertiary": {"text": "Heal at the Viridian Pokémon Center", "done_when": "hp_frac>=1.0"}}`; an absent tier is unchanged; empty `text` clears that tier; a non-dict tier value (e.g. `"tertiary": "Heal…"`) is coerced to `{"text": <str>}`; other types ignored;
 - `"notepad"` *(optional)*: the full rewritten notepad; absent = unchanged;
-- `"interrupted": ""` *(optional)*: explicit "drop the paused focus". **Only `""` or `null` is meaningful**; any other value (e.g. the echoed `{text, status}` dict) is ignored and is never a change (R2-#5).
+- `"interrupted": ""` *(optional)*: explicit "drop the paused focus". **Only `""` is meaningful** (`null` reads as "field not used" — models fill templates with null — so it is ignored, impl review #1); any other value (e.g. the echoed `{text, status}` dict) is ignored and is never a change (R2-#5). The return-schema template does not contain `interrupted`; it is described only in prose.
 - **`catch` (R2-#1):** schema line becomes *"omit unless changing"*. Absent and `[]` both mean **unchanged** (everywhere, including with step edits — fixes the latent erase); `"catch": "clear"` clears. Compared as sorted, case-folded sets.
 - **Legacy keys (R2-#2):** `l1_decide` **stops back-filling** `mission`/`milestone`. If a model still emits them, they map to `apply_goals({"primary"|"secondary": {"text": …}})` **only when a step edit is present and `goals` doesn't cover that tier** — a `goals` tier always wins. Existing tests asserting `mission`/`milestone` in the DECIDE output (test_l1_planner.py:20, test_planner_llm.py:233–234) are updated to the new contract.
 
 ### 3.4 Change detection + bookkeeping (`agent/goals.py`, pure; applied in `_run_l1`)
 - **Plumbing (R1-#5, R2-#4):** `l1_decide` passes `goals`/`notepad`/`interrupted` through. `run_l1_pipeline` no longer returns None for a no-step-edit DECIDE that **carries** any of `goals`/`notepad`/`interrupted`/a non-empty `catch`: it returns those raw keys with empty add/remove. `_run_l1` then calls pure `goals.detect_change(plan, prop) -> GoalsChange | None`:
   - goals compared per tier as `(normalized text, validated done_when)` **after** dropping invalid criteria — a criterion-only change counts; normalized = whitespace-collapsed, case-folded; the same normalization is used for goals, notepad and `interrupted` matching (R2-#14);
-  - notepad: normalized compare; `interrupted`: only `""`/`null` with a non-empty current value; `catch`: non-empty and different as a set.
+  - notepad: normalized compare; `interrupted`: only `""` with a non-empty current value; criteria compared as parsed predicates (`hp_frac>=1` == `hp_frac>=1.0`); legacy `mission`/`milestone` keep the tier's criterion; `catch`: non-empty and different as a set.
   - `None` → treated exactly like today's no-op (nothing applied, no event). Otherwise apply, skip `reconcile_quests`/`_recompile_quest`/the `quest` event, set `_l1_last`, and emit `l1_review` with `change: "goals"`.
 - A DECIDE whose step fails validation after repair is discarded **whole** (goals included), as today — the DECIDE is atomic (existing behavior, recorded in the pipeline trace).
 - **Validation:** criterion outside the grammar → dropped, text kept; `text` capped at 160 chars.
@@ -106,7 +106,7 @@ Brainstorm gets one line describing goals/notepad; triage the line in §3.1.
 - **Unchanged:** the step queue + reconciler (the `after` anchor stays as a backstop), the executive, battle/shop layers, `AgentMemory.tried_failed`/`notes`.
 - **Emergency heal (R1-#13):** the near-faint path is a hard event (triage skipped) guarded by `_has_heal_step`; a goals-only DECIDE during an emergency that adds no heal step re-fires next step exactly as today.
 - **Plan exhaustion (R1-#8):** with later chapters kept as goals, running out of queued steps becomes the normal way a chapter advances, firing the bootstrap hard-event review (and, if DECIDE adds no step, the provisional `goal_map` travel default). Accepted; tracked in the e2e.
-- **L2 proposer (R1-#12):** `milestone` now means "the chapter"; during a diversion L2 still gets the directive's own `objective`. Also pass the tertiary text as a `focus` field to the L2 context (one line).
+- **L2 proposer (R1-#12):** `milestone` now means "the chapter"; during a diversion L2 still gets the directive's own `objective`. Also pass the tertiary text as a `focus` field to the L2 context, added to `propose_target`'s state whitelist.
 - **No-planner reflect path:** not supported (goals/notepad are lost if it rebuilds the plan); unchanged otherwise (R2-#13).
 
 ## 4. Testing

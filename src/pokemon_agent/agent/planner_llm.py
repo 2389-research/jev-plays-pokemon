@@ -272,7 +272,7 @@ change. When you do edit, include only the tier(s) that changed. GOAL_STATUS "me
 criterion holds right now; you decide when to move on. A brief diversion can be just a step (e.g. a
 heal step) — you don't have to rewrite a goal for it.
   - Diverting / returning: rewrite the tertiary (or the secondary if the chapter itself changed).
-    INTERRUPTED shows the focus you paused — return to it, or send "interrupted": "" to drop it (a
+    INTERRUPTED shows the focus you paused — return to it, or add "interrupted": "" to drop it (a
     paused focus without a checkable criterion is only dropped when you say so).
   - Plan concrete steps for your current focus and chapter; keep later chapters as goals / notepad
     rather than queued steps.
@@ -365,10 +365,11 @@ Return ONLY JSON:
 {"assessment": "<one line: what changed and why>",
  "add": [ <new step objects as above, each with its "after" (null unless it must follow a PLAN step)> ],
  "remove": [ <ids of existing plan steps to drop> ],
- "goals": {"<primary|secondary|tertiary>": {"text": "<short>", "done_when": "<criterion or null>"}}  (OMIT unless a goal changed),
- "notepad": "<full rewritten notepad>"  (OMIT unless it changed),
- "interrupted": ""  (ONLY to drop the paused focus),
- "catch": [ <species or "any"> ]  (OMIT unless changing; "clear" to remove)}"""
+ "goals": { <ONLY the tier(s) that changed, e.g. "tertiary": {"text": "<short>", "done_when": "<criterion or null>"}> },
+ "notepad": "<full rewritten notepad>",
+ "catch": [ <species or "any"> ]}
+Omit "goals", "notepad" and "catch" entirely when they did not change (the common case). To drop the
+paused focus, add "interrupted": "" (see GOALS above); otherwise never include "interrupted"."""
 
 
 REPAIR_SYSTEM = """You are the L1 REPAIR step for an agent playing Pokémon Red. ONE quest step
@@ -842,6 +843,7 @@ class Planner:
         exit_tile = context.get("exit_tile")
         state = {
             "objective": context.get("objective"),
+            "focus": context.get("focus"),   # L1's tertiary goal (the immediate focus), if any
             "destination": context.get("destination"),
             "goal_dir": context.get("goal_dir"),
             "player": context.get("player"),

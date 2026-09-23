@@ -254,3 +254,91 @@ def test_jev_menu_prompt_plan_hides_the_notepad():
         pass   # only the prompt matters
     cp = prov.seen["current_plan"]
     assert "notepad" not in cp and cp["goals"]["primary"]["text"] == "Beat Brock"
+
+
+# ---- implementation-review follow-ups -----------------------------------------------------------
+def test_rewritten_tier_can_ping_again():
+    loop, emu = _loop(map_id=1, goal_map=2)
+    heal = {"text": "Heal at the Pokémon Center", "done_when": "level>=10"}
+    loop._plan = AgentPlan()
+    _with_prop(loop, {"add": [], "remove": [], "goals": {"tertiary": heal}})
+    _set_level(emu, 8); loop._check_goal_ping()
+    _set_level(emu, 10); loop._check_goal_ping()
+    assert loop._l1_event is True
+    loop._l1_event = False
+    _with_prop(loop, {"add": [], "remove": [], "goals": {"tertiary": {"text": "Walk north"}}})
+    _set_level(emu, 8)
+    _with_prop(loop, {"add": [], "remove": [], "goals": {"tertiary": heal}})   # same goal, new instance
+    loop._l1_event = False
+    loop._check_goal_ping()
+    _set_level(emu, 10); loop._check_goal_ping()
+    assert loop._l1_event is True
+
+
+def test_step_edit_and_goals_change_both_apply():
+    events = []
+    loop, _ = _loop(map_id=1, goal_map=2, events=events)
+    loop._plan = AgentPlan()
+    _with_prop(loop, {"add": [{"kind": "travel", "map": 13, "done_when": "on_map", "why": "north"}], "remove": [],
+                      "goals": {"secondary": {"text": "Reach Pewter City"}}, "notepad": "forest next"})
+    assert any(s.map == 13 for s in loop._plan_steps)
+    assert loop._plan.goals.secondary.text == "Reach Pewter City" and loop._plan.notepad == "forest next"
+    assert [p for k, p in events if k == "l1_review"][-1]["change"] is True
+
+
+def test_goals_not_applied_when_the_step_edit_fails():
+    loop, _ = _loop(map_id=1, goal_map=2)
+    loop._plan = AgentPlan()
+
+    def boom(*a, **k):
+        raise RuntimeError("reconcile broke")
+    orig = rl.reconcile_quests
+    rl.reconcile_quests = boom
+    try:
+        _with_prop(loop, {"add": [{"kind": "travel", "map": 13, "done_when": "on_map"}], "remove": [],
+                          "goals": {"secondary": {"text": "Reach Pewter City"}}})
+    finally:
+        rl.reconcile_quests = orig
+    assert loop._l1_last["assessment"] == "l1_failed" and loop._plan.goals.secondary.text == ""
+
+
+def test_run_l1_clears_a_met_interrupted_before_deciding():
+    loop, emu = _loop(map_id=1, goal_map=2)
+    _set_level(emu, 12)
+    loop._plan = AgentPlan(interrupted=Goal(text="Reach level 10", done_when="level>=10"))
+    seen = {}
+    orig = rl.run_l1_pipeline
+    rl.run_l1_pipeline = lambda emu, ctx, planner, *, hard_event, on_trace=None: seen.update(ctx)
+    try:
+        obs, _ = loop.builder.build(capture_screenshot=False)
+        loop._run_l1(obs)
+    finally:
+        rl.run_l1_pipeline = orig
+    assert seen["interrupted"] is None and loop._plan.interrupted == Goal()
+
+
+def test_focus_reaches_the_l2_proposer_prompt():
+    prov = Capture({"kind": "tile", "x": 1, "y": 1, "why": "x"})
+    try:
+        Planner(provider=prov).propose_target(None, {"objective": "o", "focus": "Heal at the Pokémon Center",
+                                               "player": {"x": 0, "y": 0, "map_id": 1}, "map_view": []})
+    except Exception:
+        pass
+    assert prov.seen is not None and prov.seen.get("focus") == "Heal at the Pokémon Center"
+
+
+def test_recorder_logs_goals_every_step_and_notepad_only_when_changed():
+    class Rec:
+        def __init__(self):
+            self.extras = []
+
+        def record(self, **kw):
+            self.extras.append(kw["extra"])
+    loop, _ = _loop(map_id=1, goal_map=2)
+    loop.recorder = Rec()
+    loop._plan = AgentPlan(goals=Goals(primary=Goal(text="Beat Brock")))
+    _with_prop(loop, {"add": [], "remove": [], "notepad": "forest next"})
+    loop.step_once(); loop.step_once()
+    first, second = loop.recorder.extras[-2:]
+    assert first["goals"]["primary"]["text"] == "Beat Brock" and first["notepad_len"] == len("forest next")
+    assert first.get("notepad") == "forest next" and "notepad" not in second

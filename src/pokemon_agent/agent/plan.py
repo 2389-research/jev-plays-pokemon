@@ -26,6 +26,11 @@ NOTEPAD_MAX_CHARS = 1200
 GOAL_TIERS = ("primary", "secondary", "tertiary")
 
 
+def goal_text(s) -> str:
+    """Canonical goal text: whitespace-collapsed, capped at GOAL_TEXT_MAX."""
+    return " ".join(str(s or "").split())[:GOAL_TEXT_MAX]
+
+
 class Intent(str, Enum):
     """The closed set of intents. Selects the executor's action repertoire."""
     TRAVEL = "travel"        # go to a map/tile
@@ -143,9 +148,9 @@ class AgentPlan(BaseModel):
         """Construction/load only (validate_assignment is off): seed empty tiers from an old
         checkpoint's mission/milestone, then mirror goals back onto them; drop the stale ledger."""
         if not self.goals.primary.text and self.mission:
-            self.goals.primary = Goal(text=self.mission[:GOAL_TEXT_MAX])
+            self.goals.primary = Goal(text=goal_text(self.mission))
         if not self.goals.secondary.text and self.milestone:
-            self.goals.secondary = Goal(text=self.milestone[:GOAL_TEXT_MAX])
+            self.goals.secondary = Goal(text=goal_text(self.milestone))
         self.mission = self.goals.primary.text
         self.milestone = self.goals.secondary.text
         self.tried_failed = []

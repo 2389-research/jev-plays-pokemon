@@ -132,7 +132,8 @@ def test_interrupted_output_only_empty_or_null_is_meaningful():
     assert G.detect_change(p, {"interrupted": {"text": "Cross Viridian Forest", "status": "none"}},
                            step_edit=False) is None
     assert G.detect_change(p, {"interrupted": ""}, step_edit=False).drop_interrupted
-    assert G.detect_change(p, {"interrupted": None}, step_edit=False).drop_interrupted
+    # null reads as "field not used" (models fill templates with null) -> NOT a drop (review #1)
+    assert G.detect_change(p, {"interrupted": None}, step_edit=False) is None
     assert G.detect_change(_plan(), {"interrupted": ""}, step_edit=False) is None   # nothing to drop
 
 
@@ -258,3 +259,27 @@ def test_prompt_view_hides_the_notepad_and_ledgers():
     view = p.prompt_view()
     assert "notepad" not in view and "tried_failed" not in view and "hypotheses" not in view
     assert view["goals"]["primary"]["text"] == "Earn the Boulder Badge"
+
+
+# ---- implementation-review follow-ups -----------------------------------------------------------
+def test_criterion_echo_with_different_formatting_is_no_change():
+    p = _plan(tertiary="Heal", t_dw="hp_frac>=1.0")
+    assert G.detect_change(p, {"goals": {"tertiary": {"text": "Heal", "done_when": "hp_frac>=1"}}},
+                           step_edit=False) is None
+    p2 = _plan(tertiary="Deliver", t_dw="no_item:Oak's Parcel")
+    assert G.detect_change(p2, {"goals": {"tertiary": {"text": "deliver", "done_when": "NO_ITEM:oaks parcel "}}},
+                           step_edit=False) is None
+
+
+def test_legacy_milestone_keeps_the_tier_criterion():
+    p = _plan()
+    p.apply_goals({"secondary": Goal(text="Beat Brock", done_when="badges>=1")})
+    assert G.detect_change(p, {"milestone": "beat brock"}, step_edit=True) is None
+    ch = G.detect_change(p, {"milestone": "Beat Brock at the Pewter Gym"}, step_edit=True)
+    assert ch.goals["secondary"] == Goal(text="Beat Brock at the Pewter Gym", done_when="badges>=1")
+
+
+def test_old_checkpoint_seed_matches_its_own_echo():
+    p = AgentPlan.model_validate({"mission": "Beat   Brock\n in Pewter", "milestone": ""})
+    assert p.goals.primary.text == "Beat Brock in Pewter"
+    assert G.detect_change(p, {"goals": {"primary": {"text": "Beat Brock in Pewter"}}}, step_edit=False) is None

@@ -81,7 +81,7 @@ def run_l1_pipeline(emu, context: dict, planner, *, hard_event: bool, on_trace=N
     extras = {k: d[k] for k in ("goals", "notepad", "interrupted", "mission", "milestone") if k in d}
     carries = (isinstance(d.get("goals"), dict) and bool(d.get("goals"))
                or isinstance(d.get("notepad"), str)
-               or ("interrupted" in d and d.get("interrupted") in ("", None))
+               or d.get("interrupted") == ""
                or d.get("catch") == "clear"
                or (isinstance(d.get("catch"), list) and bool(d.get("catch"))))
     # NO-OP DECIDE == NO CHANGE. If decide neither added nor removed a step and carries no goals/

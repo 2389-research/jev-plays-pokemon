@@ -152,6 +152,14 @@ Brainstorm gets one line describing goals/notepad; triage the line in §3.1.
 | 6 notepad | 24 + 10 notepads sent, 99–335 chars, 0 echoes |
 | regression | eval_criteria 5/5 ×2 (one 4/5 run: a stray `badges>=1,`), eval_l1_decide 32/32 + 31/31 well-formed, eval_l1_placement 0 misordered, controls 10/10, wedge 7/7 |
 
+**End-to-end** (`runs/goals-e2e-20260923`, 700 steps from `pallet_ready`, `--l1-every 5`, KB on): **PASS.**
+- Chapter completed on L1's own goals: Pallet → Route 1 → Viridian Mart (parcel in bag at step 193) → back south → Oak's Lab (**parcel left the bag at step 337**, measured from items) → Viridian Pokécenter (healed 11/23 → 23/23) → Route 2 at step 700.
+- Coherence invariant held: no northbound step before the delivery.
+- Goal-met pings fired exactly at the story beats: step 195 (tertiary "pick up Oak's Parcel"), step 341 (secondary + tertiary on delivery) — 3 pings, 3 reviews, each followed by a sensible re-focus (tertiary → deliver; secondary → "reach Pewter battle-ready (level>=12)", tertiary → "heal in Viridian, then north").
+- Notepad written 3× (175–300 chars), each a genuine update (parcel in hand; parcel delivered + Pokédex).
+- Reviews in steps 0–299: **42** vs **38** for the like-for-like baseline `brock-run-20260922-1839` (also from Pallet) = +10.5% (≤ +25%); only 3 of 42 changed anything (baseline 7/38). Whole run: 79 reviews — 74 no change, 3 step edits, 2 goals-only. (placement-e2e started in Viridian with the parcel, so it is not the same stretch.)
+- Minor: at step 1 L1 gave the secondary a `has_item:Potion` criterion, corrected by itself at step 21.
+
 Metric note: the churn bar counts goals/notepad edits only on DECIDEs with no step edit (each would be an extra review); edits riding on a step edit are reported separately.
 
 ## 5. Out of scope

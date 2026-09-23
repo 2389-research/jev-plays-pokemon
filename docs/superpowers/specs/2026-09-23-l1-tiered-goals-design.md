@@ -139,6 +139,21 @@ Brainstorm gets one line describing goals/notepad; triage the line in §3.1.
 
 **End-to-end (R1-#10, R2-#11):** from `states/pallet_ready.state` (`--state pallet_ready`), ≥ 600 steps, `--capture distill --headless`, `--l1-every 5` (same as the baseline). **Pass:** the coherence invariant holds (no off-path step executed before a pending delivery); over **steps 0–299 only**, `l1_review` count ≤ baseline + 25% (baseline: `runs/placement-e2e-20260922-2324`, 23 / 300 steps — same Pallet→delivery stretch). Report separately: reviews per 100 steps for 300–600 (plan exhaustion is expected there), goals-only edits per 100 steps, goal-met pings, diversions taken + returned, steps per secondary goal, notepad length over time, delivery measured from **items** (the parcel leaving the bag), not the labeler's weak `delivered` field.
 
+## 4b. Results (2026-09-23, glm-5.3 DECIDE / deepseek-4.1-flash triage, Orrery KB on; logs runs/evals-goals-20260923/)
+
+| eval | result |
+|---|---|
+| 1 diversion (heal) | 10/10 — heal placed NEXT, primary/secondary untouched |
+| 2 return | 10/10 (fixture is PRE-parcel, so the parcel errand counts as forward — first grader version was wrong) |
+| 3 story gate | 10/10 — 0 misordered (anchored after the delivery or deferred) |
+| 4 churn | goals/notepad edits on an otherwise no-op DECIDE: **1/156 = 0.6%** (≤ 10%). Step-edit rate 85.3% vs **85.2% for the old prompt on the same inputs** (inputs were selected for a no-op outcome — regression to the mean, not a regression). Notepad writes ride along with 39 step edits (no extra review). |
+| 4 triage | change rate with goals 24.2% vs 30.2% without (old prompt) |
+| 5 chapter complete | 10/10 — heal or forward travel first; L1 rewrote its own secondary/tertiary |
+| 6 notepad | 24 + 10 notepads sent, 99–335 chars, 0 echoes |
+| regression | eval_criteria 5/5 ×2 (one 4/5 run: a stray `badges>=1,`), eval_l1_decide 32/32 + 31/31 well-formed, eval_l1_placement 0 misordered, controls 10/10, wedge 7/7 |
+
+Metric note: the churn bar counts goals/notepad edits only on DECIDEs with no step edit (each would be an extra review); edits riding on a step edit are reported separately.
+
 ## 5. Out of scope
 - Harness-enforced goal completion / push-pop stacks; step ↔ goal tagging.
 - `AgentMemory.tried_failed`/`notes`, `hypotheses`; goals on the no-planner reflect path.

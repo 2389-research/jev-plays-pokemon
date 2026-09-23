@@ -154,8 +154,10 @@ def sc_return():
     def grade(out):
         adds = [a for a in out.get("add") or [] if validate_step(a)[0]]
         heal = [a for a in adds if str(a.get("done_when", "")).startswith("hp_frac")]
-        fwd = [a for a in adds if a.get("map") in (13, 51, 2)]
-        return (not heal and bool(fwd)), f"heal_adds={len(heal)} forward={[a.get('map') for a in fwd]}"
+        # the fixture is PRE-parcel (empty bag; the north exit is story-gated), so the parcel errand
+        # (Mart pickup / Oak delivery) is a correct forward move too, not only Route 2 / forest / Pewter
+        fwd = [a for a in adds if a.get("map") in (13, 51, 2) or "parcel" in str(a.get("done_when", "")).lower()]
+        return (not heal and bool(fwd)), f"heal_adds={len(heal)} forward={[(a.get('map'), a.get('done_when')) for a in fwd][:3]}"
     return ctx, grade
 
 
@@ -256,21 +258,50 @@ def run_churn(planner, n: int) -> bool:
                 total["step_edit"] += 1
             if ch and (ch.goals or ch.notepad is not None):
                 filled = ch.goals and all(not getattr(plan.goals, t).text for t in ch.goals) and ch.notepad is None
-                key = "filled_empty" if filled else "goal_edit"
+                # the churn the spec guards: goals/notepad edits on an otherwise no-op DECIDE (each one is
+                # a review that would not have happened); edits riding on a step edit add no review
+                key = "filled_empty" if filled else ("goal_edit_alone" if not step_edit else "goal_edit_with_steps")
                 c[key] += 1
                 total[key] += 1
                 if ch.notepad is not None:
                     notes_sizes.append(len(ch.notepad))
                 print(f"   {run} s{step}: {key} {fmt(out)}")
     calls = max(1, total["calls"])
-    rate = total["goal_edit"] / calls
+    rate = total["goal_edit_alone"] / calls
     for run, c in per_run.items():
-        print(f"   {run}: calls={c['calls']} goal_edit={c['goal_edit']} filled_empty={c['filled_empty']} "
+        print(f"   {run}: calls={c['calls']} goal_edit_alone={c['goal_edit_alone']} "
+              f"with_steps={c['goal_edit_with_steps']} filled_empty={c['filled_empty']} "
               f"step_edit={c['step_edit']} failed={c['failed']}")
-    print(f"   -> goals/notepad edit rate {total['goal_edit']}/{total['calls']} = {rate:.1%} "
-          f"(filled-empty {total['filled_empty']}, step edits {total['step_edit']}, failed {total['failed']}) "
+    print(f"   -> goals/notepad-ONLY edit rate {total['goal_edit_alone']}/{total['calls']} = {rate:.1%} "
+          f"(with step edits {total['goal_edit_with_steps']}, filled-empty {total['filled_empty']}, "
+          f"step-edit rate {total['step_edit']}/{total['calls']} = {total['step_edit'] / calls:.1%}, failed {total['failed']}) "
           f"notepad sizes={notes_sizes} {'OK' if rate <= 0.10 else 'ABOVE 10%'}")
     return rate <= 0.10
+
+
+def run_churn_baseline(planner, n: int, rev: str) -> None:
+    """Old prompt on the same captured no-op inputs (each `input` IS the exact old DECIDE state): the
+    step-edit rate a re-run produces anyway (these inputs were selected for a no-op outcome, so some
+    regression to the mean is expected)."""
+    import ast
+    import subprocess
+    from pokemon_agent.providers.parsing import strip_fences
+    src = subprocess.check_output(["git", "show", f"{rev}:src/pokemon_agent/agent/planner_llm.py"], text=True)
+    old = next(ast.literal_eval(nd.value) for nd in ast.parse(src).body if isinstance(nd, ast.Assign)
+               and any(getattr(t, "id", None) == "DECIDE_SYSTEM" for t in nd.targets))
+    calls = edits = failed = 0
+    for _run, _step, inp in noop_inputs():
+        for _ in range(n):
+            try:
+                content, _l, _u = planner.strategist.chat_json(old, inp)
+                d = json.loads(strip_fences(content))
+            except Exception:
+                failed += 1
+                continue
+            calls += 1
+            edits += bool(d.get("add") or d.get("remove"))
+    print(f"== churn baseline (DECIDE_SYSTEM @{rev}): step-edit rate {edits}/{calls} = {edits / max(1, calls):.1%} "
+          f"(failed {failed})")
 
 
 def run_triage(planner, old_rev: str) -> bool:
@@ -313,6 +344,7 @@ def main() -> int:
     ap.add_argument("--churn-n", type=int, default=2)
     ap.add_argument("--triage", action="store_true")
     ap.add_argument("--triage-baseline-rev", default="33ab266")
+    ap.add_argument("--churn-baseline", action="store_true", help="also run the old DECIDE prompt on the churn inputs")
     ap.add_argument("--kb", action="store_true", help="let brainstorm search the Orrery KB (ORRERY_WORKSPACE_ID)")
     a = ap.parse_args()
 
@@ -348,6 +380,8 @@ def main() -> int:
         print(f"   -> {passes}/{done} ({failed} failed calls excluded) {'OK' if verdict else 'BELOW THRESHOLD'}")
     if "churn" in only:
         all_ok &= run_churn(planner, a.churn_n)
+    if a.churn_baseline:
+        run_churn_baseline(planner, a.churn_n, a.triage_baseline_rev)
     if a.triage:
         all_ok &= run_triage(planner, a.triage_baseline_rev)
     if notepads:

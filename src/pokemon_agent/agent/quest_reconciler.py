@@ -60,7 +60,7 @@ def compile_steps_to_directives(steps: list[QuestStep]) -> list[Directive]:
 def reconcile_quests(current, proposal, *, next_id, on_event=None):
     """Deterministically merge L1's proposal into the canonical plan, preserving progress.
     Keeps done + active steps; removes only named pending steps; ALWAYS drops wedged steps (they are
-    replaced by adds); dedups adds by (map, done_when).
+    replaced by adds); dedups adds by (map, done_when) against LIVE (active/pending) steps only.
 
     PLACEMENT: an add may carry ``"after"``: the id of a step that survives into the result as active
     or pending (place it after that step, and after adds already placed there), or ``"end"`` (append at
@@ -73,7 +73,9 @@ def reconcile_quests(current, proposal, *, next_id, on_event=None):
     done = [s for s in current if s.status == "done"]
     active = [s for s in current if s.status == "active"]
     pending = [s for s in current if s.status == "pending" and s.id not in remove]
-    have = {(s.map, s.done_when or "on_map") for s in done + active + pending}
+    # dedup only against LIVE steps: a done step never blocks a repeat errand (heal again, return to
+    # a map, shop again) — brock-goals4: ~60 emergency heals were dropped against an old done heal
+    have = {(s.map, s.done_when or "on_map"): s.id for s in active + pending}
     status_of = {s.id: s.status for s in current}
     live = {s.id for s in active + pending}
     active_ids = {s.id for s in active}
@@ -109,8 +111,10 @@ def reconcile_quests(current, proposal, *, next_id, on_event=None):
         dw = a.get("done_when")
         key = (mp, dw or "on_map")
         if key in have:
+            if on_event is not None:
+                on_event("l1_add_deduped", {"map": mp, "done_when": dw, "against": have[key]})
             continue
-        have.add(key)
+        have[key] = "(new)"
         step = QuestStep(id=next_id(), map=mp, talk=bool(a.get("talk")),
                          who=(a.get("who") or None), done_when=dw, why=str(a.get("why") or "")[:80],
                          kind=str(a.get("kind") or "action"))

@@ -100,7 +100,7 @@ def test_anchored_add_that_dedups_is_dropped_quietly():
     events = []
     out = reconcile_quests(cur, {"add": [_add(0, after="q2")], "remove": []}, next_id=_ids(),
                            on_event=lambda k, p: events.append(k))
-    assert [s.id for s in out] == ["q1", "q2"] and events == []
+    assert [s.id for s in out] == ["q1", "q2"] and events == ["l1_add_deduped"]   # no anchor fallback
 
 
 def test_anchored_steps_compile_behind_the_delivery():
@@ -160,3 +160,20 @@ def test_fallback_reason_for_a_non_live_status_is_not_called_removed():
     reconcile_quests(cur, {"add": [_add(2, after="q7")], "remove": []}, next_id=_ids(),
                      on_event=lambda k, p: events.append(p["reason"]))
     assert events == ["not_live"]
+
+
+def test_a_repeat_errand_is_not_deduped_against_a_done_step():
+    """runs/brock-goals4-20260923 steps 1308-1419: at 4/31 HP L1 added 'heal at Pewter Pokecenter
+    (58, hp_frac>=1.0)' ~60 times; every add was silently dropped because the earlier heal q5 with the
+    same key was DONE. Heals / shopping / returning to a map are repeatable."""
+    cur = [_mk("q5", 58, "done", dw="hp_frac>=1.0", kind="action"), _mk("q14", 13, "active", dw="level>=13", kind="action")]
+    out = reconcile_quests(cur, {"add": [_add(58, dw="hp_frac>=1.0", kind="action")], "remove": []}, next_id=_ids())
+    assert [(s.id, s.status) for s in out] == [("q5", "done"), ("q14", "active"), ("q11", "pending")]
+
+
+def test_a_dropped_duplicate_add_emits_an_event():
+    cur = [_mk("q1", 0, "active"), _mk("q2", 40, dw="no_item:Oaks Parcel", kind="action")]
+    events = []
+    reconcile_quests(cur, {"add": [_add(40, dw="no_item:Oaks Parcel", kind="action")], "remove": []},
+                     next_id=_ids(), on_event=lambda k, p: events.append((k, p)))
+    assert [k for k, _ in events] == ["l1_add_deduped"] and events[0][1]["against"] == "q2"

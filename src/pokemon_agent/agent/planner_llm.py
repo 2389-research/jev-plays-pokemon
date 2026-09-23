@@ -288,7 +288,7 @@ heal step) — you don't have to rewrite a goal for it.
     rather than queued steps.
   - NOTEPAD is your own short notepad — intentions for later, lessons, things not to retry. Send the
     full rewritten text only when it changes; keep it short (NOTEPAD_TRUNCATED = it was cut).
-  - A goal's optional done_when uses ONLY has_item:/no_item:/level>=/badges>=/hp_frac>=/verify:
+  - A goal's optional done_when uses ONLY has_item: (incl. has_item:<name>>=N)/no_item:/level>=/badges>=/hp_frac>=/verify:
     (never on_map or talked — goals have no map).
   - ITEMS and SIGNALS.money are GROUND TRUTH. If your NOTEPAD disagrees with ITEMS (e.g. it says you
     have Poké Balls and ITEMS has none), trust ITEMS and correct the notepad. Catching needs Poké
@@ -315,6 +315,7 @@ The kind rule:
 done_when MUST be exactly one of (this is the full grammar — nothing else parses):
   "on_map"                    — arrived on the map (travel steps only).
   "has_item:<name>"           — that item is now in the bag.
+  "has_item:<name>>=<N>"      — at least N of that item (buying several: has_item:Poke Ball>=5).
   "no_item:<name>"            — that item is gone (used/delivered).
   "level>=<N>"                — party reached level N.
   "badges>=<N>"               — earned N badges.
@@ -382,7 +383,7 @@ and why not — e.g. no Poké Balls).
 To set or change the CATCH goal add "catch": ["<species>", ...] (or ["any"]); the battle layer then
 catches a matching wild Pokémon when it can (weakened into the catch band, then a ball). A goal that
 SIGNALS.catch says isn't ready does nothing until you fix the reason (e.g. add a step to buy Poké Balls:
-{"kind":"action","map":<mart>,"talk":true,"who":"the Mart clerk","done_when":"has_item:Poke Ball"}).
+{"kind":"action","map":<mart>,"talk":true,"who":"the Mart clerk","done_when":"has_item:Poke Ball>=5"}).
 Omit "catch" when it isn't changing; send "catch": "clear" ONLY to remove a goal that SIGNALS.catch
 shows is set.
 
@@ -404,7 +405,7 @@ corrected "done_when" and/or "kind" so it validates. Do not change anything else
 (map/who/why) unless it is the cause of the error.
 
 done_when MUST be exactly one of:
-  "on_map" | "has_item:<name>" | "no_item:<name>" | "level>=<N>" | "badges>=<N>" |
+  "on_map" | "has_item:<name>" | "has_item:<name>>=<N>" | "no_item:<name>" | "level>=<N>" | "badges>=<N>" |
   "hp_frac>=<F>" | "talked" | "verify:<yes/no question>"
 
 kind is "travel" (done_when must be "on_map", and it must never talk) or "action" (done_when must
@@ -786,6 +787,11 @@ class Planner:
             return {"on_map": map_id}
         if low == "talked":
             return {"talked_on_map": map_id}
+        if low.startswith("has_item:") and ">=" in s:     # a COUNT: has_item:Poke Ball>=5
+            name, _, num = s[len("has_item:"):].rpartition(">=")
+            iid = resolve_item_id(name.strip())
+            num = num.strip()
+            return {"item_count": [iid, int(num)]} if iid is not None and num.isdigit() and int(num) > 0 else None
         for pre, key in (("has_item:", "has_item"), ("no_item:", "no_item")):
             if low.startswith(pre):
                 iid = resolve_item_id(s[len(pre):])

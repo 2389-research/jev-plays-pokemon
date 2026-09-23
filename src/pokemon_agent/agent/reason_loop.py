@@ -1728,6 +1728,9 @@ class ReasoningLoop:
         from ..games.pokemon_red.constants import ITEMS
         tgt = directive.target or {}
         raw = tgt.get("item")
+        count = (directive.success or {}).get("item_count")
+        if raw is None and isinstance(count, (list, tuple)) and len(count) == 2:
+            raw = count[0]                      # has_item:<name>>=N — the qty is resolved against the bag
         if raw is None:
             raw = (directive.success or {}).get("has_item")
         if isinstance(raw, int):
@@ -1766,6 +1769,12 @@ class ReasoningLoop:
         item, qty = self._shop_item_qty(d) if d is not None else (None, 1)
         step = self._step_by_qid(d.quest_id) if d is not None else None
         satisfied = d is not None and self._directive_satisfied(d)
+        if (item is None and d is not None and d.intent == Intent.TALK_TO and not satisfied
+                and step is not None and step.status == "active"):
+            # talking to a clerk for a step that never names WHAT to buy (e.g. verify:"at least 4
+            # Potions?") would reopen the counter forever — hand it back to L1 with the fix
+            self._wedge_active("at the Mart counter but the step names no item to buy — use "
+                               "has_item:<item> or has_item:<item>>=N")
         if item is None or satisfied or (step is not None and step.status in ("done", "wedged")):
             # The counter is open but there is nothing (left) to buy — e.g. the clerk's "anything
             # else?" reopened it after a failed buy. Back out deterministically so the step can
@@ -1785,6 +1794,9 @@ class ReasoningLoop:
         from ..games.pokemon_red.game_state import read_items, read_money
         mode_before = detect_mode(emu)
         held_before = self._bag_qty(read_items(emu), item)
+        count = (d.success or {}).get("item_count")
+        if isinstance(count, (list, tuple)) and len(count) == 2:
+            qty = max(1, int(count[1]) - held_before)   # buy only what's missing
         res = shop_macro.shop_buy(emu, item, qty)
         ok = bool(res.get("ok"))
         verified = None

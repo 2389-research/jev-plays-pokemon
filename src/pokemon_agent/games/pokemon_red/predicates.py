@@ -49,6 +49,23 @@ def _bag_item_ids(emu) -> set[int]:
         pass
     return ids
 
+def _bag_item_qty(emu, item_id: int) -> int:
+    total = 0
+    try:
+        n = emu.read_memory(WNUMBAGITEMS)
+        if n > 20:
+            return 0
+        for i in range(n):
+            iid = emu.read_memory(WBAGITEMS + i * 2)
+            if iid == 0xFF:
+                break
+            if iid == item_id:
+                total += emu.read_memory(WBAGITEMS + i * 2 + 1)
+    except Exception:
+        pass
+    return total
+
+
 _OPS = {">=": operator.ge, "<=": operator.le, ">": operator.gt,
         "<": operator.lt, "==": operator.eq, "!=": operator.ne}
 
@@ -97,6 +114,13 @@ def _clause(key: str, spec, emu: Emulator, memory=None) -> bool:
             return int(spec) not in _bag_item_ids(emu)
         except (TypeError, ValueError):
             return False
+    if key == "item_count":
+        # spec = [item id, N]: at least N of that item in the bag (e.g. 5 Poke Balls bought)
+        try:
+            iid, n = int(spec[0]), int(spec[1])
+        except (TypeError, ValueError, IndexError):
+            return False
+        return _bag_item_qty(emu, iid) >= n
     if key == "talked_on_map":
         # spec = map id: true once we've had a real dialog with an NPC on that map (from
         # interaction memory) — the machine-checkable "did the talk_to step happen" signal.

@@ -128,7 +128,7 @@ objective and helps debugging — always include it)."""
 
 
 STRATEGIST_SYSTEM = """You are the STRATEGIC planner (tier 2) for an agent playing Pokémon Red,
-working toward the first gym (Brock, in Pewter City, north). You are called when the agent is
+working through the game's gyms and story. You are called when the agent is
 BLOCKED or UNSURE and needs a plan: a STORY GATE (an NPC who won't move, a locked path, a required
 item/errand), OR a NEED it doesn't know how to satisfy — most commonly it must HEAL (party HP is
 low) but doesn't know WHERE the nearest Poké Center is or how to get there. Work out the SEQUENCE
@@ -173,8 +173,8 @@ Return ONLY JSON:
             "done_when": "<criterion>", "why": "<short>"}]}"""
 
 
-L1_SYSTEM = """You are the L1 STRATEGIST for an agent playing Pokémon Red, working toward the
-first gym (Brock, Pewter City, north). This is a PERIODIC strategic REVIEW, not a rescue: look
+L1_SYSTEM = """You are the L1 STRATEGIST for an agent playing Pokémon Red, working through the
+game's gyms and story. This is a PERIODIC strategic REVIEW, not a rescue: look
 at the whole situation — the current MISSION/MILESTONE, the standing PLAN (its steps with their
 status), where the agent is, and the SIGNALS (e.g. how long it's been blocked) — and decide
 whether the plan still makes sense. Usually it does; say so and change nothing.
@@ -222,13 +222,14 @@ answer from what's given, do not search.
 Usually the plan is fine — say so. Say change=true only when something is clearly wrong: a step
 that can't complete, a stuck/blocked signal, an emergency (e.g. low HP with no heal step in the
 plan). A goal that already shows met is not by itself a reason to change; say change=true for goals
-only if a goal is clearly wrong or impossible.
+only if a goal is clearly wrong or impossible. A standing catch goal that SIGNALS.catch says is not ready
+(e.g. no Poké Balls) IS a reason to change — the plan needs a step to fix it or the goal dropped.
 
 Return ONLY JSON: {"change": <true|false>, "why": "<one short sentence>"}"""
 
 
 BRAINSTORM_SYSTEM = """You are the L1 BRAINSTORM step for an agent playing Pokémon Red, working
-toward the first gym (Brock, Pewter City, north). TRIAGE has flagged that the plan may need to
+toward its own GOALS (primary = the long-term aim, e.g. the next badge). TRIAGE has flagged that the plan may need to
 change. Your job here is OPEN-ENDED assessment, not a final plan: think through the situation —
 current MAP, PARTY, ITEMS, BADGES, SIGNALS, GOALS, NOTEPAD — and what the game actually
 requires next (a story gate, an errand, healing, grinding, the next town). A later DECIDE step
@@ -238,6 +239,14 @@ GOALS are the agent's own horizons (primary = the long-term why, secondary = the
 tertiary = the immediate focus, possibly a diversion; GOAL_STATUS says whether a criterion holds now;
 INTERRUPTED is a paused focus); NOTEPAD is the agent's own notes. Say if a goal should change.
 ITEMS and SIGNALS.money are ground truth — where the NOTEPAD disagrees, trust ITEMS.
+
+TEAM — the agent owns a TEAM, not just its starter. A single Pokémon is fragile: when the lead
+faints the run is over for that fight, and later gyms punish a one-type team (e.g. Misty's Water types,
+Lt. Surge's Electric). Growing and balancing the team is part of the long-term plan, and YOU decide when
+it's worth it: catching wild Pokémon is how the team grows. Catching needs Poké Balls in ITEMS (bought
+at a Poké Mart) and a free party slot; set a standing CATCH goal to have the battle layer catch the
+species you want. SIGNALS.catch shows your current catch goal and whether it can fire right now (ready,
+and why not — e.g. no Poké Balls).
 
 TOOL — knowledge base: you SHOULD look things up in a Pokémon Red guide before concluding —
 especially WHERE things are (which map has the item / NPC / Poké Center) and what a story gate
@@ -249,8 +258,8 @@ Return ONLY JSON (when ready): {"assessment": "<a few sentences: what's going on
 next, and why>"}"""
 
 
-DECIDE_SYSTEM = """You are the L1 DECIDE step for an agent playing Pokémon Red, working toward the
-first gym (Brock, Pewter City, north). BRAINSTORM has already assessed the situation (see
+DECIDE_SYSTEM = """You are the L1 DECIDE step for an agent playing Pokémon Red, working toward its
+own GOALS (primary = the long-term aim, e.g. the next badge). BRAINSTORM has already assessed the situation (see
 BRAINSTORM below); your job now is to turn that into a MINIMAL, concrete set of quest-step edits
 anchored to the EXISTING plan — do NOT redesign the whole plan from scratch, only add what's
 missing and remove what's broken.
@@ -363,9 +372,19 @@ RULES:
   - Prefer a RAM-checkable done_when (has_item/no_item/level/badges/hp_frac/on_map) over
     "verify:" whenever one applies.
 
-You MAY also set a standing CATCH goal when you want a new team member: add "catch": ["<species>"]
-(or ["any"]) so the battle layer catches that wild Pokémon when it appears. Omit "catch" unless
-changing it; "catch": "clear" removes the standing goal. The default is to catch nothing.
+TEAM — the agent owns a TEAM, not just its starter. A single Pokémon is fragile: when the lead
+faints the run is over for that fight, and later gyms punish a one-type team (e.g. Misty's Water types,
+Lt. Surge's Electric). Growing and balancing the team is part of the long-term plan, and YOU decide when
+it's worth it: catching wild Pokémon is how the team grows. Catching needs Poké Balls in ITEMS (bought
+at a Poké Mart) and a free party slot; set a standing CATCH goal to have the battle layer catch the
+species you want. SIGNALS.catch shows your current catch goal and whether it can fire right now (ready,
+and why not — e.g. no Poké Balls).
+To set or change the CATCH goal add "catch": ["<species>", ...] (or ["any"]); the battle layer then
+catches a matching wild Pokémon when it can (weakened into the catch band, then a ball). A goal that
+SIGNALS.catch says isn't ready does nothing until you fix the reason (e.g. add a step to buy Poké Balls:
+{"kind":"action","map":<mart>,"talk":true,"who":"the Mart clerk","done_when":"has_item:Poke Ball"}).
+Omit "catch" when it isn't changing; send "catch": "clear" ONLY to remove a goal that SIGNALS.catch
+shows is set.
 
 Return ONLY JSON:
 {"assessment": "<one line: what changed and why>",

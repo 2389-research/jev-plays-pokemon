@@ -503,6 +503,9 @@ class ReasoningLoop:
             signals = game_signals(emu)
             signals["blocked_for_n"] = self._blocked_for_n
             signals["emergency_heal"] = emergency
+            from ..games.pokemon_red.game_state import read_items
+            from .signals import catch_status
+            signals["catch"] = catch_status(self._plan.battle_goals, read_items(emu), signals["party"])
             cur_mid = obs.player.map_id if obs.player else None
             context = {
                 "current_map": {"id": cur_mid,

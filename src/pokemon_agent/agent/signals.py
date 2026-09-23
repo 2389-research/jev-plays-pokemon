@@ -36,3 +36,23 @@ def game_signals(emu) -> dict:
             "badges": (read_badges(emu) or {}).get("count", 0),
             "items": [f"{it.get('item')} x{it.get('qty')}" if (it.get("qty") or 1) > 1 else it.get("item")
                       for it in (read_items(emu) or [])]}
+
+
+def catch_status(battle_goals: dict | None, items: list[dict], party: list[dict]) -> dict:
+    """Whether L1's standing catch goal can actually fire in the next wild battle (the battle layer
+    only switches to CAPTURE with a ball in the bag and a free party slot). Shown to L1 as
+    SIGNALS.catch so an inert goal is visible instead of silently grinding."""
+    from ..games.pokemon_red.battle_l2 import PARTY_MAX, is_ball
+    goal = [str(x) for x in ((battle_goals or {}).get("catch") or [])]
+    balls = sum(int(it.get("qty") or 0) for it in (items or []) if is_ball(it.get("item")))
+    size = len(party or [])
+    if not goal:
+        why = "no catch goal set"
+    elif balls == 0:
+        why = "no Poké Balls in the bag"
+    elif size >= PARTY_MAX:
+        why = f"party is full ({size}/{PARTY_MAX})"
+    else:
+        why = ""
+    return {"goal": goal, "ready": bool(goal) and why == "", "why": why,
+            "balls": balls, "party_size": size, "party_max": PARTY_MAX}

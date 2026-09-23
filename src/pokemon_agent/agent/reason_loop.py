@@ -221,6 +221,12 @@ class ReasoningLoop:
         self._last_dialog_step = -(10**9)
         self._forced_waits = 0
         self._forced_wait_armed = True
+        # per-step flags, set in step_once: conversation-ness is decided at STEP START (so a step
+        # whose own action triggers a script still counts), and whether this step was routed to
+        # dialogue / was a forced wait (for the block budget + forced-wait counter in _finish)
+        self._step_convo = False
+        self._step_dialogue = False
+        self._step_forced_wait = False
         # attach the loop's Capture onto planner/reasoner so their layer methods can reach it
         self._mount_capture()
 
@@ -251,6 +257,9 @@ class ReasoningLoop:
         want_shot = self.vision or bool(self.logger and getattr(self.logger, "wants_screenshot", False))
         obs, shot = self.builder.build(capture_screenshot=want_shot)
         self.session.record_position(obs.player)
+        self._step_convo = self._in_conversation()   # decided BEFORE this step's action (F5)
+        self._step_dialogue = False
+        self._step_forced_wait = False
         # open a fresh per-decision capture buffer for this step (flushed in _finish)
         self.capture.begin_step(self.session.step, anchor=f"states/*_step{self.session.step}.state")
         # FULL-MAP collision from RAM (wOverworldMap) is GROUND TRUTH for walkability — it already
@@ -324,10 +333,13 @@ class ReasoningLoop:
             return self._jev_turn(obs, player_desc, self._blocked_dirs(obs, None), None, shot)
         if flow == "dialogue":
             self._note_dialogue_step()
+            self._step_dialogue = True
             return self._advance_dialog(obs, shot)
-        # flow == "navigate" -- but a conversation between text boxes, or a script that owns the
-        # controls, is not the agent's turn: wait instead of planning/moving/wedging (F5).
-        if self._should_defer_to_script(ctx_kind):
+        # flow == "navigate" -- but the gap between two text boxes of a conversation, or a script
+        # that owns the controls, is not the agent's turn: wait instead of planning/moving/wedging
+        # (F5). The raw text detector alone never forces a wait: the flow router just said navigate.
+        if self._should_defer_to_script():
+            self._step_forced_wait = True
             return self._forced_wait(obs, shot)
         # otherwise fall through to the navigation path below
 
@@ -1121,7 +1133,7 @@ class ReasoningLoop:
         picked = target.get("picked") if isinstance(target, dict) else None
         want_kind = "item" if (directive is not None and directive.intent == Intent.GRAB_ITEM) else "person"
         named = bool(name_matches(npcs, sprite))
-        if sprite and not named:
+        if sprite and not named and picked is None:   # once per target (before a pick is cached)
             self.on_event("approach_npc_miss", {"step": self.session.step, "sprite": sprite,
                                                 "seen": [n.get("sprite") for n in npcs]})
 
@@ -1629,18 +1641,18 @@ class ReasoningLoop:
         except Exception:
             return False
 
-    def _in_conversation(self, ctx_kind) -> bool:
-        """A text box is up, a script owns the controls, or we're in the brief no-text gap between two
-        text boxes (within CONVO_GRACE_STEPS of the last step routed to dialogue)."""
-        return (ctx_kind == "dialog" or self._script_active()
-                or (self.session.step - self._last_dialog_step) <= CONVO_GRACE_STEPS)
+    def _in_conversation(self) -> bool:
+        """A script owns the controls, or we're within CONVO_GRACE_STEPS of a step ROUTED to dialogue
+        (covers the brief no-text gap between two text boxes). Deliberately NOT the raw text
+        detector: when the flow router confidently routes a text read to navigate, trust the router."""
+        return self._script_active() or (self.session.step - self._last_dialog_step) <= CONVO_GRACE_STEPS
 
     def _note_dialogue_step(self) -> None:
         """This step is routed to dialogue: the conversation is progressing (not a stall)."""
         self._last_dialog_step = self.session.step
         self._forced_waits = 0
 
-    def _should_defer_to_script(self, ctx_kind) -> bool:
+    def _should_defer_to_script(self) -> bool:
         """Should a would-be navigation step WAIT instead (conversation gap / script in control)?
         Bounded: FORCED_WAIT_MAX_STEPS consecutive forced waits disarm the gate (event
         `script_wait_timeout`) until the script flag clears and no dialogue has been routed within the
@@ -1652,12 +1664,12 @@ class ReasoningLoop:
                 self._forced_wait_armed = True     # the condition cleared -> re-arm for next time
             self._forced_waits = 0
             return False
-        if not self._in_conversation(ctx_kind):
+        if not self._in_conversation():
             self._forced_waits = 0
             return False
         if self._forced_waits >= FORCED_WAIT_MAX_STEPS:
             self.on_event("script_wait_timeout", {"step": self.session.step, "waits": self._forced_waits,
-                                                  "script_active": script, "ctx_kind": ctx_kind})
+                                                  "script_active": script})
             self._forced_wait_armed = False
             self._forced_waits = 0
             return False
@@ -1813,7 +1825,12 @@ class ReasoningLoop:
         suppress = bool(ctx.get("forced_movement") or ctx.get("in_battle"))
         # standing still through a conversation/script is not being stuck (F5) — suppress the
         # detector AND freeze (not reset) the block budget, so a dialogue LOOP stays escapable
-        convo = self._forced_wait_armed and self._in_conversation(ctx.get("kind"))
+        # decided at step START (a step whose own action triggers a script is NOT frozen — it's the
+        # one overworld step per dialogue-loop cycle that keeps the loop escapable); a step routed to
+        # dialogue stays frozen even while the forced-wait gate is disarmed
+        convo = self._step_dialogue or (self._forced_wait_armed and self._step_convo)
+        if not self._step_forced_wait:
+            self._forced_waits = 0   # ANY step that isn't a forced wait (dialogue, menu, battle, nav)
         stuck = self.stuck.update(
             rstep.action, result, obs.player, shot if self.vision else None,
             progress=pv, forced_movement=suppress or convo,

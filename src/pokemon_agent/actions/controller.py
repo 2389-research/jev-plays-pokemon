@@ -30,6 +30,9 @@ PRESS_SETTLE_FRAMES = 24
 DIRECTION_BUTTONS = frozenset(DIRECTION_BUTTON.values())
 # A warp commits its destination coords + sprites ~35 frames after the map id flips; cap the wait.
 WARP_SETTLE_MAX = 120
+# Some warps land on the SAME (x, y) on the new map (e.g. Red's House 1F/2F stairs at (7,1)), so the
+# coords never change; past the observed commit window (34-36 frames) treat the warp as settled.
+WARP_SAMEXY_SETTLE = 60
 
 
 def _pos(emu: Emulator) -> tuple[int, int, int] | None:
@@ -118,6 +121,9 @@ class ActionController:
             now = _pos(self.emu)
             if now is not None and (now[0], now[1]) != (flip[0], flip[1]):
                 events.append("warp_settled")
+                return waited
+            if waited >= WARP_SAMEXY_SETTLE and now is not None and now[2] == flip[2]:
+                events.append("warp_settled_samexy")   # destination tile == source tile
                 return waited
         events.append("warp_settle_timeout")
         return waited

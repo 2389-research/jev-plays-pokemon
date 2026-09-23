@@ -90,3 +90,53 @@ def test_sprites_without_kind_count_as_people():
 
 def test_no_npcs_returns_none():
     assert select_npc([], sprite="Oak", picked=None, player=_p(0, 0), want_kind="person") is None
+
+
+# ---- loop wiring (review issue 11a / 5) -------------------------------------------------------
+def _nav_loop(map_id=40):
+    from pokemon_agent.actions.controller import ActionController
+    from pokemon_agent.agent.reason_loop import ReasoningLoop
+    from pokemon_agent.agent.reasoner import ReasonStep, ReflectionPlan
+    from pokemon_agent.agent.session import Session
+    from pokemon_agent.core.models import GoalState, WaitAction
+    from pokemon_agent.emulator.fake_emulator import FakeEmulator
+    from pokemon_agent.observations.builder import ObservationBuilder
+
+    class Stub:
+        def reflect(self, **k): return ReflectionPlan(), 0, {}
+        def step(self, **k): return ReasonStep(location="", objective="", reasoning="", action=WaitAction(frames=1)), 0, {}
+    emu = FakeEmulator(map_id=map_id)
+    loop = ReasoningLoop(builder=ObservationBuilder(emu), controller=ActionController(emu),
+                         reasoner=Stub(), session=Session(GoalState(primary="p", current="p")),
+                         vision=False, reflect_every=100, goal_map=2)
+    loop.world.ingest_collision(map_id, 10, 12, {(x, y) for x in range(10) for y in range(12)}, None, None)
+    return loop
+
+
+def _obs(px, py, npcs, map_id=40):
+    player = SimpleNamespace(x=px, y=py, map_id=map_id, facing="north")
+    return SimpleNamespace(player=player, map_dims=(10, 12), game_state={"npcs": npcs}, exits=[])
+
+
+def test_approach_caches_a_map_tagged_pick_and_grab_item_targets_the_item():
+    from pokemon_agent.agent.plan import Directive, Intent
+    loop = _nav_loop()
+    target = {"kind": "approach_npc", "sprite": None}
+    d = Directive(intent=Intent.GRAB_ITEM, target={"kind": "item", "map": 40}, success={"has_item": "Potion"})
+    npcs = [{"x": 5, "y": 7, "sprite": "Scientist", "kind": "person"},   # nearer, but a person
+            {"x": 6, "y": 3, "sprite": "Poke Ball", "kind": "item"}]
+    loop._resolve_target(target, d, _obs(5, 9, npcs), set(), set())
+    assert target["picked"] == [6, 3, 40]
+
+
+def test_approach_miss_is_emitted_once_not_every_step():
+    from pokemon_agent.agent.plan import Directive, Intent
+    loop = _nav_loop()
+    seen = []
+    loop.on_event = lambda kind, payload: seen.append(kind)
+    target = {"kind": "approach_npc", "sprite": "Zubat"}           # no such sprite here
+    d = Directive(intent=Intent.TALK_TO, target={"kind": "npc", "map": 40}, success={"talked_on_map": 40})
+    npcs = [{"x": 5, "y": 2, "sprite": "Oak", "kind": "person"}]
+    for y in (9, 8, 7):
+        loop._resolve_target(target, d, _obs(5, y, npcs), set(), set())
+    assert seen.count("approach_npc_miss") == 1

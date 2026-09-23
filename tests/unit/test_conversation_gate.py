@@ -39,6 +39,30 @@ def _loop():
     return loop, emu
 
 
+def _legacy_loop(on_step=None):
+    """No planner (no goal) -> the legacy Jev path; `on_step(emu)` runs inside the reasoner's step,
+    i.e. as part of THIS step's action (to simulate an action that triggers a script)."""
+    from pokemon_agent.actions.controller import ActionController
+    from pokemon_agent.agent.reason_loop import ReasoningLoop
+    from pokemon_agent.agent.reasoner import ReasonStep, ReflectionPlan
+    from pokemon_agent.agent.session import Session
+    from pokemon_agent.core.models import GoalState
+    from pokemon_agent.emulator.fake_emulator import FakeEmulator
+    from pokemon_agent.observations.builder import ObservationBuilder
+    emu = FakeEmulator(map_id=40)
+
+    class Stub:
+        def reflect(self, **k): return ReflectionPlan(), 0, {}
+        def step(self, **k):
+            if on_step:
+                on_step(emu)
+            return ReasonStep(location="", objective="", reasoning="", action=WaitAction(frames=1)), 0, {}
+    loop = ReasoningLoop(builder=ObservationBuilder(emu), controller=ActionController(emu),
+                         reasoner=Stub(), session=Session(GoalState(primary="p", current="p")),
+                         vision=False, reflect_every=100)
+    return loop, emu
+
+
 # ---------------------------------------------------------------- F4
 def test_commit_directive_resets_the_objective_budget():
     from pokemon_agent.agent.plan import Directive, Intent
@@ -53,17 +77,28 @@ def test_commit_directive_resets_the_objective_budget():
 
 # ---------------------------------------------------------------- F5: in_conversation
 def test_in_conversation_sources():
+    """Only a step ROUTED to dialogue (and its short grace window) or a script owning the controls
+    count — never the raw text detector alone (the flow router may confidently disagree with it)."""
     from pokemon_agent.agent.reason_loop import CONVO_GRACE_STEPS
     loop, emu = _loop()
     loop.session.step = 100
-    assert loop._in_conversation("dialog")                      # a text box is up
-    assert not loop._in_conversation("overworld")               # plain overworld
-    loop._last_dialog_step = 100 - CONVO_GRACE_STEPS            # the gap between two text boxes
-    assert loop._in_conversation("overworld")
-    loop._last_dialog_step = 100 - CONVO_GRACE_STEPS - 1        # the conversation is over
-    assert not loop._in_conversation("overworld")
+    assert not loop._in_conversation()                          # plain overworld
+    loop._note_dialogue_step()                                  # this step was routed to dialogue
+    assert loop._in_conversation()
+    loop.session.step = 100 + CONVO_GRACE_STEPS                 # the gap between two text boxes
+    assert loop._in_conversation()
+    loop.session.step = 100 + CONVO_GRACE_STEPS + 1             # the conversation is over
+    assert not loop._in_conversation()
     emu.write_memory(JOYIGNORE, 0xFC)                           # a script owns the controls
-    assert loop._in_conversation("overworld")
+    assert loop._in_conversation()
+
+
+def test_false_positive_text_routed_to_navigate_never_forces_waits():
+    """Review issue 1: a persistent false 'dialog' text read that the flow router confidently
+    routes to NAVIGATE must not be overridden into ~95% forced waits."""
+    loop, _ = _loop()
+    loop.session.step = 300
+    assert not any(loop._should_defer_to_script() for _ in range(50))
 
 
 # ---------------------------------------------------------------- F5: forced-wait timeout
@@ -75,15 +110,15 @@ def test_forced_waits_time_out_disarm_and_rearm():
     emu.write_memory(JOYIGNORE, 0xFC)   # a flag stuck on
     loop.session.step = 1000
     for _ in range(FORCED_WAIT_MAX_STEPS):
-        assert loop._should_defer_to_script("overworld") is True
-    assert loop._should_defer_to_script("overworld") is False     # timed out -> fall through
+        assert loop._should_defer_to_script() is True
+    assert loop._should_defer_to_script() is False     # timed out -> fall through
     assert "script_wait_timeout" in events
-    assert loop._should_defer_to_script("overworld") is False     # disarmed while the flag persists
+    assert loop._should_defer_to_script() is False     # disarmed while the flag persists
     emu.write_memory(JOYIGNORE, 0)
     loop.session.step += CONVO_GRACE_STEPS + 1
-    assert loop._should_defer_to_script("overworld") is False     # nothing to wait for; re-armed
+    assert loop._should_defer_to_script() is False     # nothing to wait for; re-armed
     emu.write_memory(JOYIGNORE, 0xFC)
-    assert loop._should_defer_to_script("overworld") is True      # armed again
+    assert loop._should_defer_to_script() is True      # armed again
 
 
 def test_a_non_forced_step_resets_the_forced_wait_counter():
@@ -92,10 +127,19 @@ def test_a_non_forced_step_resets_the_forced_wait_counter():
     emu.write_memory(JOYIGNORE, 0xFC)
     loop.session.step = 500
     for _ in range(FORCED_WAIT_MAX_STEPS - 1):
-        loop._should_defer_to_script("overworld")
+        loop._should_defer_to_script()
     loop._note_dialogue_step()          # the cutscene advanced a text box -> not a stall
     for _ in range(FORCED_WAIT_MAX_STEPS):
-        assert loop._should_defer_to_script("overworld") is True
+        assert loop._should_defer_to_script() is True
+
+
+def test_a_menu_step_also_resets_the_forced_wait_counter():
+    """Review issue 6: ANY non-forced step (menu, battle...) resets the counter, not just dialogue."""
+    loop, _ = _legacy_loop()
+    loop._forced_waits = 39
+    loop._route_flow = lambda obs, ctx: "menu"
+    loop.step_once()
+    assert loop._forced_waits == 0
 
 
 def test_grace_window_overworld_step_waits_without_managing_the_directive():
@@ -138,3 +182,38 @@ def test_a_repeated_same_npc_dialogue_cycle_still_wedges():
             break
     assert loop._blocked_for_n >= BLOCK_TRIGGER, "a dialogue loop became unescapable"
     assert cycle <= 15
+
+
+def test_a_step_whose_own_action_triggers_a_script_is_not_frozen():
+    """Review issue 2: conversation-ness is decided at STEP START. A step whose action triggers a
+    script (e.g. a coordinate trigger that pushes you back) must still feed the block budget — it
+    is the one overworld step per loop cycle that keeps a dialogue loop escapable."""
+    from pokemon_agent.core.models import StuckInfo
+    loop, emu = _legacy_loop(on_step=lambda e: e.write_memory(JOYIGNORE, 0xFC))
+    loop._blocked_for_n = 3
+    loop.stuck.update = lambda *a, **k: StuckInfo(stuck=True, kind="local_loop")
+    loop.step_once()
+    assert loop._blocked_for_n == 4          # counted, not frozen
+
+
+def test_the_step_after_a_script_starts_is_a_frozen_forced_wait():
+    from pokemon_agent.core.models import StuckInfo
+    loop, emu = _legacy_loop()
+    emu.write_memory(JOYIGNORE, 0xFC)        # the script is running at step start
+    loop._blocked_for_n = 3
+    loop.stuck.update = lambda *a, **k: StuckInfo(stuck=True, kind="local_loop")
+    loop.step_once()
+    assert isinstance(loop._prev.action, WaitAction)
+    assert loop._blocked_for_n == 3          # frozen
+
+
+def test_routed_dialogue_stays_frozen_even_while_the_gate_is_disarmed():
+    """Review issue 7: a disarmed gate must not re-expose real dialogue steps to the detector."""
+    from pokemon_agent.core.models import StuckInfo
+    loop, _ = _legacy_loop()
+    loop._forced_wait_armed = False
+    loop._route_flow = lambda obs, ctx: "dialogue"
+    loop._blocked_for_n = 3
+    loop.stuck.update = lambda *a, **k: StuckInfo(stuck=True, kind="local_loop")
+    loop.step_once()
+    assert loop._blocked_for_n == 3

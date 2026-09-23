@@ -136,3 +136,29 @@ def test_map_edge_connection_does_not_wait_for_a_warp(emu):
     res = ActionController(emu).execute(MoveAction(direction=Direction.NORTH))
     assert _pos(emu)[0] == 12, f"did not cross to Route 1: {_pos(emu)}"
     assert res.frames_elapsed < 40, f"edge crossing waited {res.frames_elapsed} frames"
+
+
+# ---------------------------------------------------------------- F5 on real RAM (review issue 10)
+def test_agent_waits_while_a_real_cutscene_owns_the_controls(emu):
+    """after_starter is mid-cutscene: ~40 frames in, wJoyIgnore = 0xFF while Oak's script runs.
+    The executive must WAIT (no directive management, no moves) instead of navigating."""
+    _need("after_starter.state")
+    from pokemon_agent.actions.controller import ActionController
+    from pokemon_agent.agent.reason_loop import ReasoningLoop
+    from pokemon_agent.agent.reasoner import ReasonStep, ReflectionPlan
+    from pokemon_agent.agent.session import Session
+    from pokemon_agent.core.models import GoalState, WaitAction
+    from pokemon_agent.observations.builder import ObservationBuilder
+
+    class Stub:
+        def reflect(self, **k): return ReflectionPlan(), 0, {}
+        def step(self, **k): return ReasonStep(location="", objective="", reasoning="", action=WaitAction(frames=1)), 0, {}
+    emu.load_state(STATES / "after_starter.state")
+    emu.tick(60)
+    assert emu.read_memory(0xCD6B) != 0, "fixture should be mid-script here"
+    loop = ReasoningLoop(builder=ObservationBuilder(emu), controller=ActionController(emu),
+                         reasoner=Stub(), session=Session(GoalState(primary="p", current="p")),
+                         vision=False, reflect_every=100, goal_map=2)
+    loop._manage_directive = lambda obs: pytest.fail("executive ran while a script owned the controls")
+    loop.step_once()
+    assert isinstance(loop._prev.action, WaitAction)

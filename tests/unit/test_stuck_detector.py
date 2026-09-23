@@ -50,7 +50,9 @@ def _wedge_to_threshold(det, *, dist):
 
 
 def test_objective_wedge_persists_into_the_next_step_without_a_reset():
-    """The incident: a later step whose target is farther can never count as 'getting closer'
+    """CHARACTERIZATION (documents the detector's behavior when nobody calls reset_objective; it is
+    not a regression test for the fix, which is covered by the reset test below and the loop-level
+    test that _commit_directive calls reset_objective). The incident: a later step whose target is farther can never count as 'getting closer'
     against the all-time best distance, so it is wedged from its very first update."""
     det = StuckDetector(wedge_threshold=5)
     s, action, prog = _wedge_to_threshold(det, dist=0)

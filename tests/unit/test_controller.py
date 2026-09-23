@@ -38,3 +38,17 @@ def test_press_returns_completed():
     res = ctrl.execute(PressAction(button=GameButton.A))
     assert res.result == "completed"
     assert res.events == ["pressed:a"]
+
+
+def test_same_xy_warp_settles_without_the_full_timeout():
+    """Review issue 3: some stairs land on the SAME (x, y) on the new map (Red's House 1F/2F at
+    (7,1)), so 'coords differ from the flip tile' never fires. Settle after the observed commit
+    window instead of burning the 120-frame cap with a misleading timeout event."""
+    from pokemon_agent.actions.controller import WARP_SETTLE_MAX
+    emu = FakeEmulator(map_id=37)
+    emu.x, emu.y = 7, 1
+    ctrl = ActionController(emu)
+    events = []
+    frames = ctrl._settle_map_change((7, 1, 38), (7, 1, 37), events)
+    assert "warp_settled_samexy" in events and "warp_settle_timeout" not in events
+    assert frames < WARP_SETTLE_MAX

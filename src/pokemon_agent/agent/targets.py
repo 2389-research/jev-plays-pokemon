@@ -70,8 +70,15 @@ def name_matches(npcs: list[dict], name: str | None) -> list[dict]:
     return [n for n in npcs if name and _name_hit(n, name)] if name else []
 
 
+def npc_key(npc: dict, map_id) -> tuple:
+    """Identity of an NPC on a map: its sprite slot when known (survives wandering), else its tile."""
+    if npc.get("slot") is not None:
+        return (map_id, int(npc["slot"]))
+    return (map_id, int(npc["x"]), int(npc["y"]))
+
+
 def select_npc(npcs: list[dict], *, sprite: str | None, picked, player, want_kind: str = "person",
-               chooser=None) -> dict | None:
+               chooser=None, tried=None) -> dict | None:
     """Choose which sprite an ``approach_npc`` target means. Pure, so it's testable without a loop.
 
     1. **Candidate pool**: the sprites matching the requested name if any do; otherwise the sprites
@@ -83,6 +90,9 @@ def select_npc(npcs: list[dict], *, sprite: str | None, picked, player, want_kin
        a torn warp frame) or a legacy ``[x, y]`` pick is ignored.
     3. ``chooser(pool)`` (the calibrated Jev pick) when there are several candidates.
     4. Nearest not-yet-talked candidate.
+
+    ``tried`` (``npc_key``s of NPCs whose conversations didn't achieve the step) are removed from the
+    pool AFTER the kind fallback; None when every candidate has been tried (the caller wedges).
     """
     if not npcs:
         return None
@@ -94,6 +104,11 @@ def select_npc(npcs: list[dict], *, sprite: str | None, picked, player, want_kin
             pool = [n for n in npcs if n.get("kind") != "item"]
         pool = pool or list(npcs)
     pmap = getattr(player, "map_id", None)
+    if tried:
+        tried = {tuple(t) for t in tried}
+        pool = [n for n in pool if npc_key(n, pmap) not in tried]
+        if not pool:
+            return None
     if isinstance(picked, (list, tuple)) and len(picked) >= 3 and picked[2] == pmap:
         px, py = int(picked[0]), int(picked[1])
         return min(pool, key=lambda n: abs(int(n["x"]) - px) + abs(int(n["y"]) - py))

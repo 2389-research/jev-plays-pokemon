@@ -114,5 +114,77 @@ def test_resume_inside_a_building_resolves_the_return_warp():
     loop = ReasoningLoop(builder=ObservationBuilder(emu), controller=ActionController(emu),
                          reasoner=StubReasoner(), session=Session(GoalState(primary="g", current="g")),
                          vision=False, reflect_every=100, goal_map=2, memory=mem)
-    assert loop._prev_map == 1
+    assert loop._prev_map == 1                        # seeded from history (fallback)
+    emu.write_memory(0xD365, 1)                       # the game's wLastMap inside the Viridian Mart
     assert loop._resolve_exits([{"x": 3, "y": 7, "dest_map": 255}], 42)[0]["dest_map"] == 1
+
+
+# ---- spec 2026-09-23-grind-talk-shop-fixes F3 ------------------------------------------------------
+def _bag(emu, pairs):
+    emu.write_memory(0xD31D, len(pairs))
+    for i, (iid, q) in enumerate(pairs):
+        emu.write_memory(0xD31E + 2 * i, iid)
+        emu.write_memory(0xD31F + 2 * i, q)
+    emu.write_memory(0xD31E + 2 * len(pairs), 0xFF)
+
+
+def test_satisfied_buy_closes_the_counter_instead_of_rebuying(monkeypatch):
+    """brock-goals: the Antidote buy succeeded 16x ($1,600) — the counter reopened and the menu path
+    re-bought though has_item was already true."""
+    events = []
+    loop, emu = _loop(events)
+    _bag(emu, [(20, 1)])                                   # a Potion is already in the bag
+    calls = _patch(monkeypatch, result={"ok": True})
+    obs, shot = loop.builder.build(capture_screenshot=False)
+    out = loop._maybe_shop(obs, shot)
+    assert calls["buy"] == 0 and calls["close"] == 1 and out is not None
+
+
+def test_ok_buy_that_did_not_reach_the_bag_is_a_failure_with_money(monkeypatch):
+    """brock-goals2: 9x shop_buy ok:true at Pewter Mart with $177 (Potion $300), 0 Potions."""
+    events = []
+    loop, emu = _loop(events)
+    emu.write_memory(0xD347, 0x00); emu.write_memory(0xD348, 0x01); emu.write_memory(0xD349, 0x77)   # $177 BCD
+    calls = _patch(monkeypatch, result={"ok": True, "item": "Potion", "qty": 1})
+    obs, shot = loop.builder.build(capture_screenshot=False)
+    loop._maybe_shop(obs, shot)
+    step = loop._plan_steps[0]
+    assert calls["buy"] == 1 and step.status == "wedged" and loop._l1_event is True
+    assert "did not go through" in step.wedge_reason and "$177" in step.wedge_reason
+    buy = [p for k, p in events if k == "shop_buy"][-1]
+    assert buy["verified"] is False
+
+
+def test_game_signals_include_money():
+    from pokemon_agent.agent.signals import game_signals
+    emu = FakeEmulator(map_id=42)
+    emu.write_memory(0xD347, 0x00); emu.write_memory(0xD348, 0x30); emu.write_memory(0xD349, 0x00)   # $3000
+    assert game_signals(emu)["money"] == 3000
+
+
+def test_return_warp_uses_the_games_wlastmap_not_the_previous_map():
+    """brock-goals2 steps 1071-1239: at Viridian Forest North Gate (47) the north LAST_MAP doors resolved
+    to the forest (_prev_map=51) instead of Route 2 (wLastMap=13) -> the off-route veto blocked the exit."""
+    events = []
+    loop, emu = _loop(events)
+    loop._prev_map = 51
+    emu.write_memory(0xD365, 13)
+    out = loop._resolve_exits([{"x": 5, "y": 0, "dest_map": 255}, {"x": 5, "y": 7, "dest_map": 51}], 47)
+    assert [e["dest_map"] for e in out] == [13, 51]
+    emu.write_memory(0xD365, 47)                      # nonsense (== current map) -> fall back to _prev_map
+    assert loop._resolve_exits([{"x": 5, "y": 0, "dest_map": 255}], 47)[0]["dest_map"] == 51
+
+
+def test_l1_sees_item_quantities():
+    from pokemon_agent.agent.signals import game_signals
+    emu = FakeEmulator(map_id=42)
+    _bag(emu, [(0x0B, 15), (20, 1)])                  # 15 Antidotes, 1 Potion
+    assert game_signals(emu)["items"] == ["Antidote x15", "Potion"]
+
+
+def test_a_purchase_is_not_a_whiteout_setback():
+    from pokemon_agent.actions.stuck_detector import StuckDetector
+    sd = StuckDetector()
+    sd._last_money = 3000
+    sd.note_spend(2700)
+    assert sd._last_money == 2700

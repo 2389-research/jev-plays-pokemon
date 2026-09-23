@@ -14,7 +14,7 @@ from __future__ import annotations
 import heapq
 
 from ..core.models import Direction
-from .world_map import WALL
+from .world_map import DELTA, WALL
 
 POLICIES = ("shortest", "dodge-grass", "farm-exp")
 
@@ -80,3 +80,51 @@ def grass_nearby(world, map_id: int, center: tuple[int, int], radius: int = 4) -
     cx, cy = center
     return any(cls == "grass" and abs(x - cx) + abs(y - cy) <= radius
                for (x, y), cls in terr.items())
+
+
+_REVERSE = {Direction.NORTH: Direction.SOUTH, Direction.SOUTH: Direction.NORTH,
+            Direction.EAST: Direction.WEST, Direction.WEST: Direction.EAST}
+_ORDER = (Direction.NORTH, Direction.EAST, Direction.SOUTH, Direction.WEST)
+
+
+def grind_step(world, map_id: int, pos: tuple[int, int], last_dir: Direction | None,
+               avoid: set | None = None, blocked: set | None = None) -> Direction | None:
+    """Grind in place: the next step that keeps us walking through grass (every grass step rolls a
+    wild encounter). On grass: keep going straight while the next tile is grass, else turn onto a
+    grass neighbor (not back where we came from), else reverse — so we sweep the patch instead of
+    ping-ponging two tiles. Off grass: the first step toward the nearest reachable grass tile.
+    None when the map has no reachable grass (the caller wedges the step so L1 grinds elsewhere).
+    ``blocked`` = direction values the executor forbids from ``pos`` (ledges — never hop one)."""
+    tiles = world.tiles.get(map_id, {})
+    terr = world.terrain.get(map_id, {})
+    avoid = avoid or set()
+    grass = {c for c, cls in terr.items() if cls == "grass" and tiles.get(c) != WALL and c not in avoid}
+    if not grass:
+        return None
+
+    blocked = {getattr(b, "value", b) for b in (blocked or set())}
+
+    def nb(d):
+        return (pos[0] + DELTA[d][0], pos[1] + DELTA[d][1])
+
+    def ok(d):
+        return d.value not in blocked
+
+    if pos in grass:
+        if last_dir is not None and ok(last_dir) and nb(last_dir) in grass:
+            return last_dir
+        back = _REVERSE.get(last_dir) if last_dir is not None else None
+        turns = [d for d in _ORDER if d != back and ok(d) and nb(d) in grass]
+        if turns:
+            return turns[0]
+        if back is not None and ok(back) and nb(back) in grass:
+            return back
+        # a lone grass tile: step off onto any walkable neighbor (we'll come straight back)
+        return next((d for d in _ORDER if ok(d) and tiles.get(nb(d)) not in (None, WALL)
+                     and nb(d) not in avoid), None)
+
+    for g in sorted(grass, key=lambda c: abs(c[0] - pos[0]) + abs(c[1] - pos[1]))[:12]:
+        d = policy_first_step(world, map_id, pos, g, "shortest", avoid)
+        if d is not None and ok(d):
+            return d
+    return None

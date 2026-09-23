@@ -1,0 +1,72 @@
+"""Grind in place (spec 2026-09-23-grind-talk-shop-fixes-design F1): pace the grass on the grind map.
+
+runs/brock-goals2-20260923: a grind step on Route 2 compiled to "travel to map 13"; already on map 13
+the executor had no target, stood at (8,0) for 120 steps (0 battles) and wedged ~25x.
+"""
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+from pokemon_agent.agent.routing import grind_step
+from pokemon_agent.core.models import Direction
+
+MAP = 13
+
+
+def _world(rows: list[str]):
+    """'G' grass, '.' floor, '#' wall."""
+    from pokemon_agent.agent.world_map import WALL
+    tiles, terr = {}, {}
+    for y, row in enumerate(rows):
+        for x, ch in enumerate(row):
+            tiles[(x, y)] = WALL if ch == "#" else "floor"
+            if ch == "G":
+                terr[(x, y)] = "grass"
+    return SimpleNamespace(tiles={MAP: tiles}, terrain={MAP: terr}, bounds={MAP: (len(rows[0]), len(rows))})
+
+
+W = _world(["#######",
+            "#GGG..#",
+            "#GGG..#",
+            "#.....#",
+            "#######"])
+
+
+def test_on_grass_keeps_going_straight():
+    assert grind_step(W, MAP, (1, 1), Direction.EAST) == Direction.EAST
+
+
+def test_on_grass_turns_at_the_edge_without_reversing():
+    d = grind_step(W, MAP, (3, 1), Direction.EAST)     # (4,1) is floor -> turn, not back west
+    assert d == Direction.SOUTH
+
+
+def test_off_grass_heads_to_the_nearest_grass():
+    assert grind_step(W, MAP, (5, 3), None) in (Direction.WEST, Direction.NORTH)
+
+
+def test_no_grass_on_the_map_returns_none():
+    bare = _world(["####", "#..#", "####"])
+    assert grind_step(bare, MAP, (1, 1), None) is None
+
+
+def test_unreachable_grass_returns_none():
+    walled = _world(["#####", "#.#G#", "#####"])
+    assert grind_step(walled, MAP, (1, 1), None) is None
+
+
+def test_avoid_cells_are_not_grass_targets():
+    one = _world(["#####", "#.G.#", "#####"])
+    assert grind_step(one, MAP, (1, 1), None, avoid={(2, 1)}) is None
+
+
+def test_a_long_pace_visits_more_than_two_tiles():
+    pos, last, seen = (1, 1), None, set()
+    from pokemon_agent.agent.world_map import DELTA
+    for _ in range(12):
+        d = grind_step(W, MAP, pos, last)
+        pos = (pos[0] + DELTA[d][0], pos[1] + DELTA[d][1])
+        last = d
+        seen.add(pos)
+        assert W.terrain[MAP].get(pos) == "grass"
+    assert len(seen) >= 4       # sweeps the patch (no 2-tile ping-pong)

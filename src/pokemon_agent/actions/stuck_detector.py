@@ -40,6 +40,10 @@ class StuckDetector:
         self._last_money: int | None = None
         self._recent_pos: deque[tuple] = deque(maxlen=6)  # for A-B oscillation detection
 
+    def note_spend(self, money: int) -> None:
+        """A deliberate purchase lowered money: move the baseline so it isn't read as a whiteout."""
+        self._last_money = money
+
     def reset_objective(self) -> None:
         """Start a fresh objective budget for a NEW plan step. Without this, `_best_dist` is the
         closest map-hop distance EVER seen across all steps, so a later step whose target is farther

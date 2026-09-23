@@ -49,7 +49,7 @@ from .quest_reconciler import QuestStep, compile_steps_to_directives, reconcile_
 from .reasoner import Reasoner, ReasonStep
 from .session import Session
 from .signals import game_signals, needs_emergency_heal
-from .targets import build_targets, name_matches, select_npc
+from .targets import build_targets, name_matches, npc_key, select_npc
 from .world_map import DELTA, WALL
 
 MAX_GOTO_STEPS = 18  # safety bound on one navigation macro
@@ -63,6 +63,8 @@ JEV_NPC_CONF = 0.4  # trust Jev's NPC pick only at/above this confidence (else f
 # shows no text and the flow router says "navigate"; during scripted sequences the game ignores input
 # (wJoyIgnore != 0). In both the agent must WAIT, not plan/move/wedge.
 WJOYIGNORE = 0xCD6B        # non-zero while a script owns the controls
+GRIND_ENCOUNTER_WINDOW = 60  # grinding: steps without a WILD battle before the grind step wedges
+WLASTMAP = 0xD365          # wLastMap: where a LAST_MAP (0xFF) warp returns to (the last OUTDOOR map)
 CONVO_GRACE_STEPS = 2      # steps after a dialogue step still treated as the same conversation
 FORCED_WAIT_MAX_STEPS = 40  # consecutive forced waits before giving up on the gate (never stall forever)
 FLOW_MIN_CONF = 0.55  # trust Jev's flow-gate pick (dialogue vs navigate) only at/above this; else _safe_flow
@@ -227,6 +229,13 @@ class ReasoningLoop:
         self._goal_prev_status: dict[str, str] = {}
         self._goal_pinged: set[tuple] = set()
         self._notepad_changed = False            # the recorder logs the full notepad only when it changed
+        # grind in place (F1): which step is grinding, since when, the last WILD battle's end, last dir
+        self._grind_qid: str | None = None
+        self._grind_start = 0
+        self._last_wild_battle_end: int | None = None
+        self._grind_last = None
+        self._battle_wild = False
+        self._talk_npc = None                    # npc_key of the NPC we're about to talk to (F2 rotation)
         # conversation/script gate (F5): last step routed to dialogue, consecutive forced waits, and
         # whether forced waiting is armed (a timeout disarms it until the script flag clears)
         self._last_dialog_step = -(10**9)
@@ -321,6 +330,7 @@ class ReasoningLoop:
 
         # --- battle owns the step (deterministic RAM bit — a fact, never a classification) ---
         if ctx.get("in_battle"):
+            self._battle_wild = self.controller.emu.read_memory(0xD057) == 1   # 1 wild, 2 trainer
             rstep, latency, usage, result = self._battle_turn(obs)
             self._prev = rstep
             self._emit_reason(rstep, latency)
@@ -332,6 +342,7 @@ class ReasoningLoop:
                                          "objective": self._battle_objective})
             self._last_in_battle = False
             self._battle_objective = None
+            self._note_battle_end(wild=self._battle_wild)
 
         # --- FLOW ROUTER: menu is deterministic (RAM cursor); navigate-vs-dialogue is a calibrated
         # Jev choice (falls back to the deterministic ctx_kind detector when Jev isn't wired). Replaces
@@ -781,6 +792,9 @@ class ReasoningLoop:
             interact = directive.intent in (Intent.TALK_TO, Intent.GRAB_ITEM)
             return {"kind": "tile", "x": txy[0], "y": txy[1], "interact": interact}
         if tmap is None or tmap == player.map_id:
+            # arrived — but a level goal isn't met by standing here: pace the grass (F1)
+            if self._is_grind(directive) and not self._directive_satisfied(directive):
+                return {"kind": "grind"}
             return None
         hop = self.memory.graph.next_hop(player.map_id, tmap)
         if hop is None:
@@ -844,6 +858,8 @@ class ReasoningLoop:
         # Ground-truth PortalGraph waypoint: for a cross-map hop the graph covers, head straight to
         # the EXACT next portal tile (deterministic) instead of asking the LLM proposer, which
         # oscillated at gates. This is what actually crosses Viridian Forest toward Pewter.
+        if default is not None and default.get("kind") == "grind":
+            return default   # grinding is mechanics, not a destination: never let the proposer override it
         tmap0 = directive.target_map if directive is not None else None
         portal = self._portal_next(obs.player, tmap0) if (tmap0 is not None and obs.player is not None) else None
         self._cap_det("portal_next", {"map_id": getattr(obs.player, "map_id", None), "target_map": tmap0}, portal)
@@ -931,6 +947,10 @@ class ReasoningLoop:
             return None  # configured model failed with no grounded route -> already flagged; STALL
                          # visibly (step_once's await-plan wait) rather than wander deterministically
         move = self._resolve_target(target, directive, obs, blocked_dirs, occupied)
+        if target.get("kind") == "grind":
+            if move is None:   # no reachable grass on this map: hand the grind back to L1 right away
+                self._wedge_active(f"grind: no reachable grass on {map_name(player.map_id)}")
+            return move        # (never re-propose a grind target)
         if move is not None:
             self._target_stuck = 0
             return move
@@ -1209,10 +1229,24 @@ class ReasoningLoop:
                                        "conf": round(float(conf), 2), "n": len(pool)})
             return pool[idx]
 
+        if isinstance(target, dict):
+            self._judge_last_talk(target, directive)
+            picked = target.get("picked")
+        tried = target.get("tried") if isinstance(target, dict) else None
         npc = select_npc(npcs, sprite=sprite, picked=picked, player=player, want_kind=want_kind,
-                         chooser=None if named else jev_pick)
+                         chooser=None if named else jev_pick, tried=tried)
+        if npc is None:
+            # every candidate here was talked to (twice) without achieving the step: hand it to L1
+            if directive is not None and directive.quest_id is not None:
+                who = sorted({str(n.get("sprite")) for n in npcs if n.get("kind") != "item"})
+                self._mark_step(directive.quest_id, "wedged",
+                                reason=f"talked to everyone here ({', '.join(who)}); none satisfied "
+                                       f"{directive.success}")
+                self._l1_event = True
+            return None
         if isinstance(target, dict):   # cache BY POSITION + MAP (works for spriteless/moving npcs)
             target["picked"] = [int(npc["x"]), int(npc["y"]), getattr(player, "map_id", None)]
+        self._talk_npc = npc_key(npc, getattr(player, "map_id", None))
 
         nx, ny = int(npc["x"]), int(npc["y"])
         adj = {Direction.NORTH: (nx, ny + 1), Direction.SOUTH: (nx, ny - 1),
@@ -1242,9 +1276,9 @@ class ReasoningLoop:
                     if not facing_ok or not self._counter_bumped:
                         self._counter_bumped = True
                         return MoveAction(direction=d)   # blocked step into the counter -> bump/turn
-                    return InteractAction()
+                    return self._interact_with(target)
                 if facing_ok:
-                    return InteractAction()          # adjacent AND facing -> talk
+                    return self._interact_with(target)   # adjacent AND facing -> talk
                 return MoveAction(direction=d)        # adjacent, turn to face (a blocked step turns you)
         others = occupied - {(nx, ny)}
         # try each of the 4 stand-tiles nearest-first; take the first BFS-reachable one (cheap, and
@@ -1255,6 +1289,33 @@ class ReasoningLoop:
                 return mv
         return None
 
+    def _interact_with(self, target) -> InteractAction:
+        """Press A at the picked NPC, remembering who/when so the NEXT navigate step can judge whether
+        that conversation achieved the step (F2 rotation)."""
+        if isinstance(target, dict) and getattr(self, "_talk_npc", None) is not None:
+            target["talking_to"] = list(self._talk_npc)
+            target["talk_step"] = self.session.step
+        return InteractAction()
+
+    def _judge_last_talk(self, target: dict, directive) -> None:
+        """F2: after a conversation with the picked NPC ends, if the step's success still doesn't hold,
+        count it as unproductive; at 2 (some NPCs must be talked to twice) mark that NPC tried and drop
+        the pick so select_npc moves on. Skipped for verify: criteria (the judge is throttled)."""
+        tk = target.get("talking_to")
+        if not tk or self._last_dialog_step <= target.get("talk_step", 10**9):
+            return
+        target.pop("talking_to", None)
+        target.pop("talk_step", None)
+        if directive is None or "verify" in (directive.success or {}) or self._directive_satisfied(directive):
+            return
+        talks = target.setdefault("talks", {})
+        key = ",".join(str(v) for v in tk)
+        talks[key] = talks.get(key, 0) + 1
+        if talks[key] >= 2:
+            target.setdefault("tried", []).append(list(tk))
+            target["picked"] = None
+            self.on_event("npc_rotate", {"step": self.session.step, "tried": list(tk), "talks": talks[key]})
+
     def _resolve_target(self, target, directive, obs, blocked_dirs, occupied):
         """Turn a typed target ({tile|exit|enter|approach_npc}) into ONE move. Returns a MoveAction /
         InteractAction, or None when even this target can't make progress (caller then unsticks)."""
@@ -1262,6 +1323,14 @@ class ReasoningLoop:
             return None
         kind = target.get("kind")
         player = obs.player
+        if kind == "grind":
+            from .routing import grind_step
+            if directive is not None and self._grind_qid != directive.quest_id:
+                self._grind_qid, self._grind_start, self._grind_last = directive.quest_id, self.session.step, None
+            d = grind_step(self.world, player.map_id, (player.x, player.y), self._grind_last,
+                           avoid=occupied, blocked=blocked_dirs)
+            self._grind_last = d
+            return MoveAction(direction=d) if d is not None else None
         if kind == "tile":
             xy = (int(target["x"]), int(target["y"]))
             door = next((e for e in (obs.exits or []) if (int(e["x"]), int(e["y"])) == xy), None)
@@ -1541,14 +1610,28 @@ class ReasoningLoop:
             return prim
         return None
 
+    def _warp_back_map(self, cur_map: int) -> int | None:
+        """Where a 0xFF ("LAST_MAP") warp leads: the game's own wLastMap (the last OUTDOOR map — so a
+        gate's far doors lead on, not back where we came from), else the previous distinct map."""
+        try:
+            last = self.controller.emu.read_memory(WLASTMAP)
+        except Exception:
+            last = None
+        if last is not None and last not in (WARP_BACK, cur_map) and last < 0xF8:
+            return last
+        if self._prev_map is not None and self._prev_map != cur_map:
+            return self._prev_map
+        return None
+
     def _resolve_exits(self, exits, cur_map: int) -> list[dict]:
         """Resolve each warp's dest: 0xFF ('return to last map') -> the map we came from, so
         building doors become real, routable graph edges (the world model knows where they go)."""
         out: list[dict] = []
+        back = self._warp_back_map(cur_map)
         for e in (exits or []):
             dest = e.get("dest_map")
-            if dest == WARP_BACK and self._prev_map is not None and self._prev_map != cur_map:
-                dest = self._prev_map
+            if dest == WARP_BACK and back is not None:
+                dest = back
                 out.append({**e, "dest_map": dest, "dest_name": map_name(dest)})
             else:
                 out.append(e)
@@ -1653,6 +1736,14 @@ class ReasoningLoop:
             qty = 1
         return item, qty
 
+    @staticmethod
+    def _bag_qty(items: list[dict], name: str) -> int:
+        from ..games.pokemon_red.game_state import resolve_item_id
+        want = resolve_item_id(name)
+        return sum(int(it.get("qty") or 0) for it in items
+                   if (want is not None and resolve_item_id(str(it.get("item"))) == want)
+                   or str(it.get("item")).lower() == str(name).lower())
+
     def _maybe_shop(self, obs, shot) -> ActionResult | None:
         """When the Mart's BUY/SELL/QUIT counter menu is open AND the active directive names an item
         to acquire, run the deterministic buy macro (design §6.1) instead of letting Jev flail through
@@ -1668,13 +1759,14 @@ class ReasoningLoop:
         d = self._directive
         item, qty = self._shop_item_qty(d) if d is not None else (None, 1)
         step = self._step_by_qid(d.quest_id) if d is not None else None
-        if item is None or (step is not None and step.status in ("done", "wedged")):
+        satisfied = d is not None and self._directive_satisfied(d)
+        if item is None or satisfied or (step is not None and step.status in ("done", "wedged")):
             # The counter is open but there is nothing (left) to buy — e.g. the clerk's "anything
             # else?" reopened it after a failed buy. Back out deterministically so the step can
             # advance and L1 can re-plan, instead of re-entering the same buy forever.
             mode_before = detect_mode(emu)
             shop_macro.close_shop(emu)
-            self.on_event("shop_closed", {"step": self.session.step, "item": item,
+            self.on_event("shop_closed", {"step": self.session.step, "item": item, "satisfied": satisfied,
                                           "step_status": step.status if step else None})
             rstep = ReasonStep(location="mart", objective="leave the counter",
                                reasoning="SHOP: nothing to buy here; closing the counter",
@@ -1684,10 +1776,22 @@ class ReasoningLoop:
             return self._finish(obs, rstep, ActionResult(success=True, result="completed", mode_before=mode_before,
                                                          mode_after=detect_mode(emu), detail="shop closed"),
                                 0, {}, shot)
+        from ..games.pokemon_red.game_state import read_items, read_money
         mode_before = detect_mode(emu)
+        held_before = self._bag_qty(read_items(emu), item)
         res = shop_macro.shop_buy(emu, item, qty)
         ok = bool(res.get("ok"))
-        self.on_event("shop_buy", {"step": self.session.step, "item": item, "qty": qty, "result": res})
+        verified = None
+        if ok:
+            # the macro only knows it answered YES: VERIFY the item actually reached the bag (can't
+            # afford -> "not enough money", the bag is unchanged but the macro still says ok)
+            verified = self._bag_qty(read_items(emu), item) > held_before
+            if not verified:
+                ok = False
+                res = {**res, "ok": False, "reason": f"purchase did not go through (money ${read_money(emu)})"}
+        self.on_event("shop_buy", {"step": self.session.step, "item": item, "qty": qty, "result": res,
+                                   "verified": verified})
+        self.stuck.note_spend(read_money(emu))   # money spent at a Mart is not a whiteout setback
         if not ok:
             # A definitive failure (item not on this shelf, can't afford) will NOT self-resolve — the
             # has_item goal can never be met here, so re-firing the macro every step would thrash the
@@ -1762,11 +1866,43 @@ class ReasoningLoop:
         self._emit_reason(rstep, 0)
         return self._finish(obs, rstep, result, 0, {}, shot)
 
+    @staticmethod
+    def _is_grind(directive) -> bool:
+        """A TRAVEL whose success is purely a level threshold (a grind step)."""
+        s = (directive.success or {}) if directive is not None else {}
+        return directive is not None and directive.intent == Intent.TRAVEL and bool(s) and set(s) == {"level"}
+
+    def _grinding(self) -> bool:
+        d = self._directive
+        return (d is not None and self._is_grind(d) and self._grind_qid == d.quest_id
+                and bool(self._target) and self._target.get("kind") == "grind")
+
+    def _wedge_active(self, reason: str) -> None:
+        """Wedge the active step with a specific reason (shown to L1 as why_wedged) and arm L1."""
+        d = self._directive
+        if d is not None and d.quest_id is not None:
+            self._mark_step(d.quest_id, "wedged", reason=reason)
+        self._grind_qid = None
+        self._l1_event = True
+
+    def _note_battle_end(self, *, wild: bool) -> None:
+        if wild:
+            self._last_wild_battle_end = self.session.step
+
     def _apply_stuck_to_budget(self, stuck, *, frozen: bool) -> None:
         """Feed one step's stuck verdict into the block budget (BLOCK_TRIGGER wedges the step).
         A conversation/script step is FROZEN — neither counted nor treated as progress — so a
         dialogue loop (re-talking a blocking NPC) still accumulates across its overworld steps."""
         if frozen:
+            return
+        if self._grinding():
+            # pacing grass looks like a loop and levels come slowly: while wild battles keep coming the
+            # grind IS progress; after a full window with no wild encounter, hand it back to L1
+            since = max(self._grind_start, self._last_wild_battle_end or 0)
+            if self.session.step - since > GRIND_ENCOUNTER_WINDOW:
+                self._wedge_active(f"grind: no wild encounter in {GRIND_ENCOUNTER_WINDOW} steps on "
+                                   f"{map_name(self.controller.emu.read_memory(0xD35E))}")
+            self._blocked_for_n = 0
             return
         if stuck.stuck:
             # a local loop / no-objective-progress leg counts toward the block budget that feeds

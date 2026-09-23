@@ -237,6 +237,7 @@ item / NPC where you can), but do NOT emit step objects or JSON steps yourself h
 GOALS are the agent's own horizons (primary = the long-term why, secondary = the current chapter,
 tertiary = the immediate focus, possibly a diversion; GOAL_STATUS says whether a criterion holds now;
 INTERRUPTED is a paused focus); NOTEPAD is the agent's own notes. Say if a goal should change.
+ITEMS and SIGNALS.money are ground truth — where the NOTEPAD disagrees, trust ITEMS.
 
 TOOL — knowledge base: you SHOULD look things up in a Pokémon Red guide before concluding —
 especially WHERE things are (which map has the item / NPC / Poké Center) and what a story gate
@@ -280,6 +281,9 @@ heal step) — you don't have to rewrite a goal for it.
     full rewritten text only when it changes; keep it short (NOTEPAD_TRUNCATED = it was cut).
   - A goal's optional done_when uses ONLY has_item:/no_item:/level>=/badges>=/hp_frac>=/verify:
     (never on_map or talked — goals have no map).
+  - ITEMS and SIGNALS.money are GROUND TRUTH. If your NOTEPAD disagrees with ITEMS (e.g. it says you
+    have Poké Balls and ITEMS has none), trust ITEMS and correct the notepad. Catching needs Poké
+    Balls in ITEMS; buying needs enough money.
 
 You are given: CURRENT_MAP, PARTY, ITEMS, BADGES, PLAN (existing steps), SIGNALS, GOALS,
 GOAL_STATUS, INTERRUPTED, NOTEPAD, BRAINSTORM (the prior assessment), and MAPS (an id->name table —

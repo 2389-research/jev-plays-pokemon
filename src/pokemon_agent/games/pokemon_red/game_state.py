@@ -284,6 +284,7 @@ def read_npcs(emu: Emulator) -> list[dict]:
                 "facing": _FACING.get(emu.read_memory(WSPRITE1 + i * 16 + 9), "?"),
                 "sprite": name,
                 "sprite_id": pic,
+                "slot": i,                      # stable identity for a wandering NPC (sprite slot)
                 "kind": _sprite_kind(name),
             })
     except Exception:

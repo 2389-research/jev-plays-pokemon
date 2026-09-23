@@ -216,3 +216,41 @@ def test_navigator_never_plans_across_a_cut_edge():
 def test_loop_loads_cut_edges_onto_the_world():
     loop = _loop_at(MTMOON_1F)
     assert frozenset({(10, 22), (9, 22)}) in loop.world.cut_edges.get(MTMOON_1F, set())
+
+
+_STUCK = __import__("pathlib").Path("runs/verify-mtmoon3-20260923")
+
+
+@pytest.mark.skipif(not (_STUCK / "latest.state").exists() or not __import__("pathlib").Path("roms/pokemon_red.gb").exists(),
+                    reason="stuck Mt Moon state / ROM not present")
+def test_portal_tile_route_detours_around_the_cut_at_mt_moon_1f():
+    """verify-mtmoon4: the portal-tile path (_bfs_full_collision over RAM walkability) still stepped
+    west across the (10,22)-(9,22) elevation edge; it must detour (the correct first step is east)."""
+    from pokemon_agent.actions.controller import ActionController
+    from pokemon_agent.agent.memory import AgentMemory
+    from pokemon_agent.agent.plan import Directive, Intent, ReflectionPlan
+    from pokemon_agent.agent.reason_loop import ReasoningLoop
+    from pokemon_agent.agent.reasoner import ReasonStep
+    from pokemon_agent.agent.session import Session
+    from pokemon_agent.core.models import GoalState, WaitAction
+    from pokemon_agent.emulator.pyboy_adapter import PyBoyEmulator
+    from pokemon_agent.observations.builder import ObservationBuilder
+
+    class Stub:
+        def reflect(self, **kw):
+            return ReflectionPlan(next_objective="go"), 0, {}
+
+        def step(self, **kw):
+            return ReasonStep(location="", objective="", reasoning="", action=WaitAction(frames=1)), 0, {}
+    emu = PyBoyEmulator("roms/pokemon_red.gb", window="null")
+    emu.load_state(_STUCK / "latest.state")
+    emu.tick(4)
+    loop = ReasoningLoop(builder=ObservationBuilder(emu), controller=ActionController(emu), reasoner=Stub(),
+                         session=Session(GoalState(primary="g", current="g")), vision=False, reflect_every=100,
+                         goal_map=2, memory=AgentMemory.load(_STUCK / "latest.mem.json"))
+    obs, _ = loop.builder.build(capture_screenshot=False)
+    assert (obs.player.map_id, obs.player.x, obs.player.y) == (MTMOON_1F, 10, 22)
+    d = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": CERULEAN}, success={"on_map": CERULEAN})
+    move = loop._resolve_target({"kind": "tile", "x": 5, "y": 5, "portal": True}, d, obs, set(), set())
+    assert move is not None and move.direction.value != "west"
+    emu.close()

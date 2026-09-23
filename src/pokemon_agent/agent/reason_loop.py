@@ -1159,6 +1159,7 @@ class ReasoningLoop:
             return None
         walk = set(coll["walkable"]) | {goal}   # the door tile may be off the walkable set
         blocked = set(occupied) - {goal}
+        cuts = (getattr(self.world, "cut_edges", None) or {}).get(getattr(player, "map_id", None), set())
         prev: dict[tuple[int, int], tuple[tuple[int, int], Direction] | None] = {start: None}
         q = deque([start])
         found = False
@@ -1170,7 +1171,8 @@ class ReasoningLoop:
             cx, cy = cur
             for d, (dx, dy) in DELTA.items():
                 nb = (cx + dx, cy + dy)
-                if nb in walk and nb not in prev and nb not in blocked:
+                if nb in walk and nb not in prev and nb not in blocked \
+                        and frozenset({cur, nb}) not in cuts:     # elevation edge (tile-pair collision)
                     prev[nb] = (cur, d)
                     q.append(nb)
         if not found:
@@ -2073,6 +2075,12 @@ class ReasoningLoop:
                                 and e.get("dest_map") != allowed_next):
                             blocked.add(d.value)
         blocked |= set(self.controller.emu.ledge_dirs())
+        if obs.player is not None:   # a step across an elevation (tile-pair) edge is never legal
+            here = (obs.player.x, obs.player.y)
+            cuts = (getattr(self.world, "cut_edges", None) or {}).get(obs.player.map_id, set())
+            for d, (dx, dy) in DELTA.items():
+                if frozenset({here, (here[0] + dx, here[1] + dy)}) in cuts:
+                    blocked.add(d.value)
         return blocked
 
     def _emit_reason(self, rstep, latency) -> None:

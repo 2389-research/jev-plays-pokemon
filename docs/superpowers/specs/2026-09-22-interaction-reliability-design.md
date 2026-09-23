@@ -104,6 +104,6 @@ Fixtures (local, `states/*.state` is gitignored — ROM-guarded tests `pytest.sk
 
 ## 5. Out of scope / follow-ups
 - **Anchor/observation timing:** the step-N state anchor appeared to reflect a later frame than step N+1's logged observation at the Pallet→Lab warp. Likely a symptom of R3 (observing mid-warp); re-check behavioral-replay fidelity at warp boundaries after F3 lands.
-- The starter-selection loop (walking onto a Poké Ball to choose a starter) — separate issue.
+- The starter-selection loop — **not needed** (decision 2026-09-22): runs start from the post-Squirtle save `states/pallet_ready.state` (`--state pallet_ready`).
 - Spinner/arrow-tile rides that end on a warp flip the map >1 tile from the pre-step tile and would be classified as a connection (today's torn behavior — no regression). Harden later by also requiring `flip_xy` on the new map's boundary for a connection.
 - Hold-to-register for the direct-`emu.press` macros (shop/menus/battle) — revisit only if a macro is observed missing inputs.

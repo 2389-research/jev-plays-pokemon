@@ -350,6 +350,10 @@ WORKED EXAMPLES (one per objective class — copy the SHAPE, adapt the specifics
                        "done_when":"badges>=1","why":"beat the gym leader"}
   reach a place   -> {"kind":"travel","map":1,"talk":false,"who":null,
                        "done_when":"on_map","why":"head to Viridian City"}
+                      Routing knows the real paths — through caves, gates and maps that are split into
+                      separate parts (Route 4's two halves are joined only THROUGH Mt. Moon). To cross a
+                      dungeon, add ONE travel step to the place beyond it (e.g. Cerulean City), not a step
+                      per map you pass through: "go to Route 4" is already true at the cave entrance.
   story beat not  -> {"kind":"action","map":12,"talk":true,"who":"the guard",
   RAM-trackable        "done_when":"verify:did the guard let us pass?","why":"..."}
 

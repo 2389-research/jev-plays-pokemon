@@ -708,6 +708,12 @@ class ReasoningLoop:
             if step is None or step.status in ("done", "wedged"):
                 self._directive = None
 
+        # --- 3c. an intermediate travel step that is merely ON THE WAY to the next one: skip it ------
+        if self._directive is not None and not satisfied and self._travel_on_the_way(obs):
+            self.on_event("travel_step_merged", {"step": self.session.step, "skipped": self._directive.reason,
+                                                 "next": self._quest[0].reason})
+            satisfied = True
+
         # --- 4. termination / advance -----------------------------------------------------------
         if self._directive is None or satisfied:
             if self._directive is not None:
@@ -1448,6 +1454,31 @@ class ReasoningLoop:
             return MoveAction(direction=Direction(goal_dir))
         return None
 
+    def _portal_route(self, player, tmap) -> list[dict] | None:
+        """The full ground-truth portal route from the player to map ``tmap`` (None if off-graph)."""
+        pg = self.portals
+        if pg is None or player is None or player.map_id not in pg.maps or int(tmap) not in pg.maps:
+            return None
+        try:
+            coll = read_collision_map(self.controller.emu)
+        except Exception:
+            coll = None
+        comp = pg.component_at(player.map_id, player.x, player.y, coll["walkable"] if coll else set())
+        return pg.route(player.map_id, comp, int(tmap)) if comp is not None else None
+
+    def _travel_on_the_way(self, obs) -> bool:
+        """The active TRAVEL step's map lies on the ground-truth route to the NEXT travel step's map, so
+        it adds nothing and can mislead: a map id can cover separate areas (Route 4's two halves), and
+        'go to Route 4' from inside Mt. Moon walks back out the entrance. Skip it; route to the next."""
+        d = self._directive
+        if d is None or d.intent != Intent.TRAVEL or set(d.success or {}) != {"on_map"} or not self._quest:
+            return False
+        nxt = self._quest[0]
+        if nxt.intent != Intent.TRAVEL or nxt.quest_id == d.quest_id or set(nxt.success or {}) != {"on_map"}:
+            return False
+        r = self._portal_route(obs.player, nxt.success["on_map"])
+        return bool(r) and any(p["dest_map"] == d.success["on_map"] for p in r[:-1])
+
     def _portal_next(self, player, tmap) -> dict | None:
         """The next PORTAL to head toward on the way to map ``tmap``, from the ground-truth
         PortalGraph (or None if it doesn't cover this leg). Locates the player's walkable component
@@ -2011,6 +2042,11 @@ class ReasoningLoop:
         None when there's no target-bearing directive / no known route."""
         if obs.player is None or directive is None or directive.target_map is None:
             return None
+        # ground truth first: the PortalGraph's next portal (the WorldGraph only knows map-level edges
+        # and e.g. vetoed the Mt. Moon door because it thinks Route 4 connects straight to Cerulean)
+        portal = self._portal_next(obs.player, directive.target_map)
+        if portal is not None and portal.get("dest_map") is not None:
+            return portal["dest_map"]
         hop = self.memory.graph.next_hop(obs.player.map_id, directive.target_map)
         return hop[0] if hop else None
 

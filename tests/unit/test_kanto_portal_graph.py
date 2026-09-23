@@ -131,3 +131,62 @@ def test_executor_hops_at_the_ledge_takeoff_and_drops_the_target():
     d = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": CERULEAN}, success={"on_map": CERULEAN})
     move = loop._resolve_target(target, d, obs, {"south"}, set())   # the ledge veto doesn't block the hop
     assert isinstance(move, MoveAction) and move.direction == Direction.SOUTH and loop._target is None
+
+
+# ---- cerulean-team incident: the Mt. Moon door (steps 150-240) ------------------------------------------
+def _loop_at(map_id):
+    from pokemon_agent.actions.controller import ActionController
+    from pokemon_agent.agent.plan import ReflectionPlan
+    from pokemon_agent.agent.reason_loop import ReasoningLoop
+    from pokemon_agent.agent.reasoner import ReasonStep
+    from pokemon_agent.agent.session import Session
+    from pokemon_agent.core.models import GoalState, WaitAction
+    from pokemon_agent.emulator.fake_emulator import FakeEmulator
+    from pokemon_agent.observations.builder import ObservationBuilder
+
+    class Stub:
+        def reflect(self, **kw):
+            return ReflectionPlan(next_objective="go"), 0, {}
+
+        def step(self, **kw):
+            return ReasonStep(location="", objective="", reasoning="", action=WaitAction(frames=1)), 0, {}
+    emu = FakeEmulator(map_id=map_id)
+    return ReasoningLoop(builder=ObservationBuilder(emu), controller=ActionController(emu), reasoner=Stub(),
+                         session=Session(GoalState(primary="g", current="g")), vision=False, reflect_every=100,
+                         goal_map=CERULEAN)
+
+
+def test_door_veto_uses_the_portal_graphs_next_hop():
+    """At (18,6) below the Mt. Moon door the old WorldGraph said 'next hop = Cerulean' (Route 4 edge),
+    so the door (-> Mt Moon 1F) was vetoed as off-route and the agent waited 90 steps."""
+    from types import SimpleNamespace
+    from pokemon_agent.agent.plan import Directive, Intent
+    loop = _loop_at(ROUTE4)
+    d = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": CERULEAN}, success={"on_map": CERULEAN})
+    obs = SimpleNamespace(player=SimpleNamespace(x=18, y=6, map_id=ROUTE4, facing="north"))
+    assert loop._next_hop_map(obs, d) == MTMOON_1F
+
+
+def test_an_intermediate_travel_step_on_the_way_is_merged_into_the_next_one():
+    """Inside Mt. Moon, 'go to Route 4' (either half satisfies it) walked straight back out the entrance;
+    with 'go to Cerulean' next, the Route 4 step is on the way and is skipped."""
+    from collections import deque
+    from types import SimpleNamespace
+    from pokemon_agent.agent.plan import Directive, Intent
+    from pokemon_agent.agent.portal_graph import PortalGraph
+    pg = PortalGraph.load()
+    appr = next(p for p in pg.portals_on(MTMOON_1F) if "MT_MOON_B1F" in p["label"])
+    ax, ay = appr.get("approach") or appr["coord"]
+    loop = _loop_at(MTMOON_1F)
+    loop._directive = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": ROUTE4},
+                                success={"on_map": ROUTE4}, quest_id="q4")
+    loop._quest = deque([Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": CERULEAN},
+                                   success={"on_map": CERULEAN}, quest_id="q5")])
+    obs = SimpleNamespace(player=SimpleNamespace(x=ax, y=ay, map_id=MTMOON_1F, facing="north"))
+    assert loop._travel_on_the_way(obs) is True
+    # not on the way: heading for B2F, then Route 3 (the route to Route 3 leaves by the entrance)
+    loop._directive = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": MTMOON_B2F},
+                                success={"on_map": MTMOON_B2F}, quest_id="q7")
+    loop._quest = deque([Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 14},
+                                   success={"on_map": 14}, quest_id="q8")])
+    assert loop._travel_on_the_way(obs) is False

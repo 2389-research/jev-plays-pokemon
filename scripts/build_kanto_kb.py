@@ -357,6 +357,9 @@ def ingest(docs: dict[str, str], url: str, ws: str, *, only_missing: bool = Fals
         print(f"  [{i}/{len(todo)}] {title[:70]}", flush=True)
     print(f"ingested {len(todo) - len(failed)}/{len(todo)} docs into workspace {ws} (removed {len(drop)}); "
           f"failed: {failed}")
+    # the search index doesn't pick up newly ingested chunks by itself: refresh it so L1 can find them
+    res = _req(f"{url}/search/rebuild", ws, method="POST", timeout=600)
+    print(f"search index rebuilt: {res}")
 
 
 def main() -> int:

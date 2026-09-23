@@ -343,8 +343,13 @@ def load_map(map_name: str, consts: dict, tilesets: dict) -> MapData:
     blocked = (lambda a, b: frozenset((tiles[a], tiles[b])) in pairs) if pairs else None
     comp = connected_components(walkable, blocked)
     warps = parse_warps(map_name)
-    return MapData(map_name, const, map_id, w_blocks, h_blocks, tileset_const,
-                   header["connections"], warps, walkable, comp, tiles)
+    md = MapData(map_name, const, map_id, w_blocks, h_blocks, tileset_const,
+                 header["connections"], warps, walkable, comp, tiles)
+    # K7: the elevation edges themselves (two walkable cells the game won't let you step between) —
+    # the runtime path-finders must not plan across them (RAM walkability can't see them)
+    md.cuts = sorted((c[0], c[1], d) for c in walkable for d, n in (("E", (c[0] + 1, c[1])), ("S", (c[0], c[1] + 1)))
+                     if n in walkable and blocked is not None and blocked(c, n))
+    return md
 
 
 # Name<->const<->id helpers built once from the header set.
@@ -875,6 +880,7 @@ def graph_json(graph: dict, version: str) -> dict:
                 "n_components": len(set(md.comp.values())) if md.comp else 0,
                 "walkable_count": len(md.walkable),
                 "grid": encode_grid(md),
+                "cuts": ";".join(f"{x},{y},{d}" for x, y, d in getattr(md, "cuts", [])),
             } for mid, md in maps.items()
         },
         "portals": {pid: {k: v for k, v in p.items()} for pid, p in graph["portals"].items()},

@@ -153,6 +153,9 @@ class ReasoningLoop:
         # packaged data is unavailable (falls back to the coarse WorldGraph).
         try:
             self.portals: PortalGraph | None = PortalGraph.load()
+            # elevation edges the RAM collision map can't see -> every path-finder honours them
+            self.world.cut_edges = {mid: c for mid in self.portals.maps
+                                    if (c := self.portals.cut_edges(mid))}
         except Exception:
             self.portals = None
         self._battle_kb: dict[str, list[str]] = {}  # cache: enemy species -> type knowledge

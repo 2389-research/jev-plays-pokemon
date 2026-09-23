@@ -42,6 +42,7 @@ def policy_first_step(world, map_id: int, start: tuple[int, int], goal: tuple[in
     tiles = world.tiles.get(map_id, {})
     terr = world.terrain.get(map_id, {})
     avoid = avoid or set()
+    cuts = (getattr(world, "cut_edges", None) or {}).get(map_id, set())
     dist = {start: 0.0}
     prev: dict[tuple[int, int], tuple[int, int]] = {}
     pq: list[tuple[float, tuple[int, int]]] = [(0.0, start)]
@@ -57,6 +58,8 @@ def policy_first_step(world, map_id: int, start: tuple[int, int], goal: tuple[in
                 continue
             if tiles.get(n) == WALL or n in avoid:
                 continue
+            if frozenset({c, n}) in cuts:
+                continue      # elevation edge (tile-pair collision)
             nd = d + tile_cost(terr.get(n, "floor"), policy)
             if nd < dist.get(n, 1e18):
                 dist[n] = nd
@@ -107,8 +110,10 @@ def grind_step(world, map_id: int, pos: tuple[int, int], last_dir: Direction | N
     def nb(d):
         return (pos[0] + DELTA[d][0], pos[1] + DELTA[d][1])
 
+    cuts = (getattr(world, "cut_edges", None) or {}).get(map_id, set())
+
     def ok(d):
-        return d.value not in blocked
+        return d.value not in blocked and frozenset({pos, nb(d)}) not in cuts
 
     if pos in grass:
         if last_dir is not None and ok(last_dir) and nb(last_dir) in grass:

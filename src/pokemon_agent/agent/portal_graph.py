@@ -162,6 +162,17 @@ class PortalGraph:
                     seen.add(nb); q.append(nb)
         return None
 
+    def cut_edges(self, map_id: int) -> set[frozenset]:
+        """Elevation (tile-pair) edges on this map: pairs of adjacent walkable cells you can't step
+        between. Path-finders must not cross them (RAM walkability can't see them)."""
+        enc = (self.maps.get(int(map_id)) or {}).get("cuts") or ""
+        out: set[frozenset] = set()
+        for tok in enc.split(";") if enc else []:
+            x, y, d = tok.split(",")
+            x, y = int(x), int(y)
+            out.add(frozenset({(x, y), (x + 1, y) if d == "E" else (x, y + 1)}))
+        return out
+
     def _grid(self, map_id: int) -> dict[tuple[int, int], int]:
         """Decode (once) the map's run-length static component grid ('.' = not walkable)."""
         mid = int(map_id)

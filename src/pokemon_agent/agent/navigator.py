@@ -41,6 +41,9 @@ class Navigator:
                 return False
         return self.world.tiles[map_id].get(xy) != WALL
 
+    def _cuts(self, map_id: int) -> set:
+        return (getattr(self.world, "cut_edges", None) or {}).get(map_id, set())
+
     def _bfs_first_step(
         self, map_id: int, start: tuple[int, int], goals: set[tuple[int, int]],
         blocked: frozenset | set | None = None, max_nodes: int = 4000,
@@ -56,6 +59,8 @@ class Navigator:
                 nxt = (x + dx, y + dy)
                 if nxt in seen or not self._passable(map_id, nxt, blocked):
                     continue
+                if frozenset({(x, y), nxt}) in self._cuts(map_id):
+                    continue      # an elevation edge: both cells walkable, the step between them isn't
                 step = first or d
                 if nxt in goals:
                     return step

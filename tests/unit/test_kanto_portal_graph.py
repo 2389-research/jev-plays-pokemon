@@ -190,3 +190,29 @@ def test_an_intermediate_travel_step_on_the_way_is_merged_into_the_next_one():
     loop._quest = deque([Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 14},
                                    success={"on_map": 14}, quest_id="q8")])
     assert loop._travel_on_the_way(obs) is False
+
+
+# ---- verify-mtmoon3: 273x 'blocked moving west' at Mt Moon 1F (10,22) — a tile-pair (elevation) cut ----
+def test_shipped_graph_carries_elevation_cut_edges(pg):
+    cuts = pg.cut_edges(MTMOON_1F)
+    assert frozenset({(10, 22), (9, 22)}) in cuts and len(cuts) >= 100
+    assert pg.cut_edges(PEWTER) == set()
+
+
+def test_navigator_never_plans_across_a_cut_edge():
+    from pokemon_agent.agent.navigator import Navigator
+    from pokemon_agent.agent.world_map import WorldMap
+    wm = WorldMap()
+    for x in range(5):
+        for y in range(3):
+            wm.tiles[1][(x, y)] = "floor"
+    wm.bounds[1] = (5, 3)
+    # a wall of cut edges between x=1 and x=2 except on row 2
+    wm.cut_edges = {1: {frozenset({(1, 0), (2, 0)}), frozenset({(1, 1), (2, 1)})}}
+    d = Navigator(wm)._bfs_first_step(1, (1, 0), {(3, 0)})
+    assert d.value == "south"          # detours via row 2 instead of stepping east across the cut
+
+
+def test_loop_loads_cut_edges_onto_the_world():
+    loop = _loop_at(MTMOON_1F)
+    assert frozenset({(10, 22), (9, 22)}) in loop.world.cut_edges.get(MTMOON_1F, set())

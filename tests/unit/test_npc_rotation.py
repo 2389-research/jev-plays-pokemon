@@ -123,3 +123,17 @@ def test_everyone_tried_wedges_the_step_with_a_reason():
     step = loop._plan_steps[0]
     assert out is None and step.status == "wedged" and loop._l1_event is True
     assert "talked to everyone here" in step.wedge_reason and "Gym Guide" in step.wedge_reason
+
+
+def test_a_travel_step_is_never_wedged_or_rotated_by_npc_talks():
+    """restart340-smoke step 64: L2 aimed a TRAVEL step (on_map 2) at the Mart NPCs; exhaustion wedged
+    the travel step as 'talked to everyone here'. Rotation is only for talk/grab steps."""
+    loop, d, events = _setup(success={"on_map": 2})
+    d.intent = Intent.TRAVEL
+    target = {"kind": "approach_npc", "sprite": None, "picked": None, "tried": [[GYM, 1], [GYM, 2], [GYM, 3]]}
+    loop._approach_npc(target, d, _obs(_p(5, 12), [GUIDE, TRAINER, BROCK]), set(), set())
+    assert loop._plan_steps[0].status == "active"
+    target2 = {"kind": "approach_npc", "sprite": None, "picked": [7, 10, GYM]}
+    for _ in range(3):
+        _talk_once(loop, d, target2, _p(7, 11, "north"))
+    assert not target2.get("tried")

@@ -1229,15 +1229,18 @@ class ReasoningLoop:
                                        "conf": round(float(conf), 2), "n": len(pool)})
             return pool[idx]
 
-        if isinstance(target, dict):
+        # rotation (F2) is for steps that are ABOUT an NPC (talk / grab); a travel step that the
+        # proposer happened to aim at an NPC must never be judged or wedged by conversations
+        talk_step = directive is not None and directive.intent in (Intent.TALK_TO, Intent.GRAB_ITEM)
+        if isinstance(target, dict) and talk_step:
             self._judge_last_talk(target, directive)
             picked = target.get("picked")
-        tried = target.get("tried") if isinstance(target, dict) else None
+        tried = target.get("tried") if isinstance(target, dict) and talk_step else None
         npc = select_npc(npcs, sprite=sprite, picked=picked, player=player, want_kind=want_kind,
                          chooser=None if named else jev_pick, tried=tried)
         if npc is None:
             # every candidate here was talked to (twice) without achieving the step: hand it to L1
-            if directive is not None and directive.quest_id is not None:
+            if talk_step and directive.quest_id is not None:
                 who = sorted({str(n.get("sprite")) for n in npcs if n.get("kind") != "item"})
                 self._mark_step(directive.quest_id, "wedged",
                                 reason=f"talked to everyone here ({', '.join(who)}); none satisfied "

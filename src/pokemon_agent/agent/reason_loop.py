@@ -58,6 +58,12 @@ SERVO_FAIL_LIMIT = 6  # consecutive servo no-route steps before the directive is
 JEV_OVERRIDE_CONF = 0.6  # Jev may override the BFS pathing suggestion only at/above this confidence
 POLICY_BUDGET = 15       # steps a Jev-chosen routing policy runs before it's re-selected for the area
 JEV_NPC_CONF = 0.4  # trust Jev's NPC pick only at/above this confidence (else fall back to nearest)
+# Conversation/script gate (interaction-reliability F5): between two text boxes the screen briefly
+# shows no text and the flow router says "navigate"; during scripted sequences the game ignores input
+# (wJoyIgnore != 0). In both the agent must WAIT, not plan/move/wedge.
+WJOYIGNORE = 0xCD6B        # non-zero while a script owns the controls
+CONVO_GRACE_STEPS = 2      # steps after a dialogue step still treated as the same conversation
+FORCED_WAIT_MAX_STEPS = 40  # consecutive forced waits before giving up on the gate (never stall forever)
 FLOW_MIN_CONF = 0.55  # trust Jev's flow-gate pick (dialogue vs navigate) only at/above this; else _safe_flow
 WARP_BACK = 0xFF     # a warp's dest_map of 0xFF means "return to the map you came from" (wLastMap)
 RESUME_EVERY = 50    # steps between always-on resumable checkpoints written into the record-dir
@@ -210,6 +216,11 @@ class ReasoningLoop:
         self._l1_event = False                   # a one-shot event asked for an L1 review next gate
         self._l1_last = None                     # last L1 review's {change, assessment, trace} (for the recorder)
         self._l1_trace: list[dict] = []          # current/last review's pipeline stage events
+        # conversation/script gate (F5): last step routed to dialogue, consecutive forced waits, and
+        # whether forced waiting is armed (a timeout disarms it until the script flag clears)
+        self._last_dialog_step = -(10**9)
+        self._forced_waits = 0
+        self._forced_wait_armed = True
         # attach the loop's Capture onto planner/reasoner so their layer methods can reach it
         self._mount_capture()
 
@@ -312,8 +323,13 @@ class ReasoningLoop:
                 return shopped
             return self._jev_turn(obs, player_desc, self._blocked_dirs(obs, None), None, shot)
         if flow == "dialogue":
+            self._note_dialogue_step()
             return self._advance_dialog(obs, shot)
-        # flow == "navigate" -> fall through to the navigation path below
+        # flow == "navigate" -- but a conversation between text boxes, or a script that owns the
+        # controls, is not the agent's turn: wait instead of planning/moving/wedging (F5).
+        if self._should_defer_to_script(ctx_kind):
+            return self._forced_wait(obs, shot)
+        # otherwise fall through to the navigation path below
 
         # --- overworld: LunaRoute sets the target, deterministic BFS routes to it. Jev is NOT a
         # navigator — when there's no clean route the DECISION goes up to LunaRoute (re-plan /
@@ -657,6 +673,7 @@ class ReasoningLoop:
     def _commit_directive(self, note: str) -> None:
         self._servo_fail = 0
         self._blocked_for_n = 0      # a fresh directive starts with a clean block counter
+        self.stuck.reset_objective()  # ...and a fresh objective budget measured against ITS target
         self._quest_step_age = 0
         self._leg_wp = None          # a new directive -> the L2 navigator picks a fresh waypoint
         self._leg_wp_fail = 0
@@ -1604,6 +1621,75 @@ class ReasoningLoop:
                               detail=f"shop_buy {item} x{qty}: {res.get('reason', 'ok')}")
         return self._finish(obs, rstep, result, 0, {}, shot)
 
+    # ------------------------------------------------ conversation / script gate (F5)
+    def _script_active(self) -> bool:
+        """True while a game script owns the controls (wJoyIgnore != 0) — input is ignored."""
+        try:
+            return self.controller.emu.read_memory(WJOYIGNORE) != 0
+        except Exception:
+            return False
+
+    def _in_conversation(self, ctx_kind) -> bool:
+        """A text box is up, a script owns the controls, or we're in the brief no-text gap between two
+        text boxes (within CONVO_GRACE_STEPS of the last step routed to dialogue)."""
+        return (ctx_kind == "dialog" or self._script_active()
+                or (self.session.step - self._last_dialog_step) <= CONVO_GRACE_STEPS)
+
+    def _note_dialogue_step(self) -> None:
+        """This step is routed to dialogue: the conversation is progressing (not a stall)."""
+        self._last_dialog_step = self.session.step
+        self._forced_waits = 0
+
+    def _should_defer_to_script(self, ctx_kind) -> bool:
+        """Should a would-be navigation step WAIT instead (conversation gap / script in control)?
+        Bounded: FORCED_WAIT_MAX_STEPS consecutive forced waits disarm the gate (event
+        `script_wait_timeout`) until the script flag clears and no dialogue has been routed within the
+        grace window — so a stuck flag or a false-positive text read can never stall the run."""
+        script = self._script_active()
+        grace = (self.session.step - self._last_dialog_step) <= CONVO_GRACE_STEPS
+        if not self._forced_wait_armed:
+            if not script and not grace:
+                self._forced_wait_armed = True     # the condition cleared -> re-arm for next time
+            self._forced_waits = 0
+            return False
+        if not self._in_conversation(ctx_kind):
+            self._forced_waits = 0
+            return False
+        if self._forced_waits >= FORCED_WAIT_MAX_STEPS:
+            self.on_event("script_wait_timeout", {"step": self.session.step, "waits": self._forced_waits,
+                                                  "script_active": script, "ctx_kind": ctx_kind})
+            self._forced_wait_armed = False
+            self._forced_waits = 0
+            return False
+        self._forced_waits += 1
+        return True
+
+    def _forced_wait(self, obs, shot) -> ActionResult:
+        """Let the game's script / next text box run: a short wait, no planning, no moves."""
+        from ..core.models import WaitAction
+        rstep = ReasonStep(location=getattr(obs.player, "map_name", "") or "",
+                           objective=(self._directive.reason if self._directive else "wait"),
+                           reasoning="waiting: conversation/script in progress",
+                           action=WaitAction(frames=12))
+        result = self.controller.execute(rstep.action)
+        self._prev = rstep
+        self._emit_reason(rstep, 0)
+        return self._finish(obs, rstep, result, 0, {}, shot)
+
+    def _apply_stuck_to_budget(self, stuck, *, frozen: bool) -> None:
+        """Feed one step's stuck verdict into the block budget (BLOCK_TRIGGER wedges the step).
+        A conversation/script step is FROZEN — neither counted nor treated as progress — so a
+        dialogue loop (re-talking a blocking NPC) still accumulates across its overworld steps."""
+        if frozen:
+            return
+        if stuck.stuck:
+            # a local loop / no-objective-progress leg counts toward the block budget that feeds
+            # the wedge trigger + the L1 gate (BLOCK_TRIGGER). This is the get-unstuck signal:
+            # circling accumulates here until it wedges the step and L1 re-plans it.
+            self._blocked_for_n += 1
+        else:
+            self._blocked_for_n = 0   # genuine progress this leg -> clear the block budget
+
     def _advance_dialog(self, obs, shot) -> ActionResult:
         from ..core.models import AdvanceDialogAction
         action = AdvanceDialogAction()
@@ -1725,20 +1811,17 @@ class ReasoningLoop:
         except Exception:
             pv = None
         suppress = bool(ctx.get("forced_movement") or ctx.get("in_battle"))
+        # standing still through a conversation/script is not being stuck (F5) — suppress the
+        # detector AND freeze (not reset) the block budget, so a dialogue LOOP stays escapable
+        convo = self._forced_wait_armed and self._in_conversation(ctx.get("kind"))
         stuck = self.stuck.update(
             rstep.action, result, obs.player, shot if self.vision else None,
-            progress=pv, forced_movement=suppress,
+            progress=pv, forced_movement=suppress or convo,
             objective_distance=self._objective_distance(obs.player),
         )
         if stuck.setback:
             self.memory.note(f"setback at step {self.session.step}", source="observed", step=self.session.step)
-        if stuck.stuck:
-            # a local loop / no-objective-progress leg counts toward the block budget that feeds
-            # the wedge trigger + the L1 gate (BLOCK_TRIGGER). This is the get-unstuck signal:
-            # circling accumulates here until it wedges the step and L1 re-plans it.
-            self._blocked_for_n += 1
-        else:
-            self._blocked_for_n = 0   # genuine progress this leg -> clear the block budget
+        self._apply_stuck_to_budget(stuck, frozen=convo and not suppress)
         if stuck.stuck or stuck.setback:
             self.on_event("stuck", {"step": self.session.step, "kind": stuck.kind,
                                     "setback": stuck.setback, "repeat_count": stuck.repeat_count})

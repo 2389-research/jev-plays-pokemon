@@ -61,7 +61,9 @@ def test_distill_writes_outcome_at_run_end(tmp_path):
 @pytest.mark.skipif(not ROM_PATH.exists(), reason="ROM not present")
 def test_live_capture_smoke(tmp_path):
     from pokemon_agent.emulator.pyboy_adapter import PyBoyEmulator
-    overworld = next((ROOT / "states" / f"{n}.state" for n in ("after_starter", "pallet_ready")
+    # a FREE-ROAM overworld state: after_starter is mid-cutscene (wJoyIgnore set for ~360 frames),
+    # where the agent correctly waits for the script instead of navigating (conversation gate)
+    overworld = next((ROOT / "states" / f"{n}.state" for n in ("pallet_ready", "after_starter")
                       if (ROOT / "states" / f"{n}.state").exists()), None)
     if overworld is None:
         pytest.skip("no overworld fixture present")

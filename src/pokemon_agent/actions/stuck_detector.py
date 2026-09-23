@@ -40,6 +40,18 @@ class StuckDetector:
         self._last_money: int | None = None
         self._recent_pos: deque[tuple] = deque(maxlen=6)  # for A-B oscillation detection
 
+    def reset_objective(self) -> None:
+        """Start a fresh objective budget for a NEW plan step. Without this, `_best_dist` is the
+        closest map-hop distance EVER seen across all steps, so a later step whose target is farther
+        can never register "getting closer" and wedges from its first update (the Oak's Parcel
+        incident: each fresh step wedged after exactly BLOCK_TRIGGER steps, one tile from Oak).
+        Cumulative exploration progress (`_best_sig`) and money/setback tracking are kept."""
+        self._best_dist = None
+        self._wedge = 0
+        self._recent_pos.clear()
+        self._count = 0
+        self._last_key = None
+
     @staticmethod
     def _key(action: AgentAction, player, screenshot_bytes: bytes | None) -> str:
         parts = [action.model_dump_json()]

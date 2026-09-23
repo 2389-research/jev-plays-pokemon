@@ -25,7 +25,9 @@ ROM_PATH = ROOT / "roms" / "pokemon_red.gb"
 
 
 def _overworld_state():
-    for n in ("after_starter", "pallet_ready"):
+    # a FREE-ROAM overworld state first: after_starter is mid-cutscene (wJoyIgnore set for ~360
+    # frames), where the agent correctly waits for the script instead of proposing targets
+    for n in ("pallet_ready", "after_starter"):
         p = ROOT / "states" / f"{n}.state"
         if p.exists():
             return p

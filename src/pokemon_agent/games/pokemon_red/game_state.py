@@ -23,6 +23,27 @@ _FACING = {0: "south", 4: "north", 8: "west", 12: "east"}
 WSPRITE1 = 0xC100  # 16 bytes/sprite; +0 picture id, +9 facing
 WSPRITE2 = 0xC200  # 16 bytes/sprite; +4 map Y, +5 map X (each carries a +4 map-border offset)
 SPRITE_COORD_OFFSET = 4  # wSpriteStateData2 stores map coords shifted by the 4-tile border
+# Missable ("toggleable") objects: the game HIDES them by setting a bit, but leaves the sprite slot
+# populated — e.g. the intro Oak in Pallet, the second lab Oak, starter balls already taken.
+WMISSABLE_LIST = 0xD5CE   # (sprite slot, missable index) pairs for the current map, 0xFF-terminated
+WMISSABLE_FLAGS = 0xD5A6  # bitfield indexed by missable index; bit set = hidden
+
+
+def hidden_sprite_slots(emu: Emulator) -> set[int]:
+    """Sprite slots (1-15) the game has hidden via its missable-object flags. Bounded parse;
+    any read error means "nothing hidden" so a bad read can never make real NPCs disappear."""
+    hidden: set[int] = set()
+    try:
+        for i in range(16):
+            slot = emu.read_memory(WMISSABLE_LIST + 2 * i)
+            if slot == 0xFF:
+                break
+            idx = emu.read_memory(WMISSABLE_LIST + 2 * i + 1)
+            if 1 <= slot <= 15 and idx < 256 and (emu.read_memory(WMISSABLE_FLAGS + idx // 8) >> (idx % 8)) & 1:
+                hidden.add(slot)
+    except Exception:
+        return set()
+    return hidden
 
 
 def _decode_byte(b: int) -> str:
@@ -249,10 +270,11 @@ def read_npcs(emu: Emulator) -> list[dict]:
     RAM map coordinates (correct even when off-screen). ``kind`` is 'item' (a pickup) or
     'person' (an NPC to talk to)."""
     out: list[dict] = []
+    hidden = hidden_sprite_slots(emu)
     try:
         for i in range(1, 16):  # slot 0 is the player
             pic = emu.read_memory(WSPRITE1 + i * 16)  # picture id: 0 = empty slot
-            if pic == 0:
+            if pic == 0 or i in hidden:   # empty slot, or a missable the game has hidden
                 continue
             b2 = WSPRITE2 + i * 16
             name = SPRITES.get(pic, f"sprite#{pic}")

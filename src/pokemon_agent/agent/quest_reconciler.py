@@ -56,17 +56,50 @@ def compile_steps_to_directives(steps: list[QuestStep]) -> list[Directive]:
     return out
 
 
-def reconcile_quests(current, proposal, *, next_id):
+def reconcile_quests(current, proposal, *, next_id, on_event=None):
     """Deterministically merge L1's proposal into the canonical plan, preserving progress.
     Keeps done + active steps; removes only named pending steps; ALWAYS drops wedged steps (they are
-    replaced by adds); inserts adds after the active step, dedup by (map, done_when)."""
+    replaced by adds); dedups adds by (map, done_when).
+
+    PLACEMENT: an add may carry ``"after"``: the id of a step that survives into the result as active
+    or pending (place it after that step, and after adds already placed there), or ``"end"`` (append at
+    the tail). Omitted/null -> the default slot right after done + active (today's behavior; with no
+    anchors the result is exactly ``done + active + new + pending``). An anchor equal to the active id
+    means "next" (default). Any other anchor falls back to the default slot and reports
+    ``on_event("l1_anchor_fallback", {"after", "reason"})`` — a fallback changes placement, never drops."""
     add = proposal.get("add") or []
     remove = set(proposal.get("remove") or [])
     done = [s for s in current if s.status == "done"]
     active = [s for s in current if s.status == "active"]
     pending = [s for s in current if s.status == "pending" and s.id not in remove]
     have = {(s.map, s.done_when or "on_map") for s in done + active + pending}
-    new_steps = []
+    status_of = {s.id: s.status for s in current}
+    live = {s.id for s in active + pending}
+    active_ids = {s.id for s in active}
+
+    def anchor_of(a):
+        after = a.get("after")
+        if after is None or after == "end":
+            return after
+        if not isinstance(after, str):
+            reason = "not_string"
+        elif after in active_ids:
+            return None                      # "after the active step" == next == the default slot
+        elif after in live:
+            return after
+        elif after not in status_of:
+            reason = "unknown"
+        elif status_of[after] == "wedged":
+            reason = "wedged"
+        elif status_of[after] == "done":
+            reason = "done"
+        else:
+            reason = "removed"
+        if on_event is not None:
+            on_event("l1_anchor_fallback", {"after": after, "reason": reason})
+        return None
+
+    placed = []                              # (new step, anchor) in emitted order
     for a in add:
         try:
             mp = int(a["map"])
@@ -77,7 +110,25 @@ def reconcile_quests(current, proposal, *, next_id):
         if key in have:
             continue
         have.add(key)
-        new_steps.append(QuestStep(id=next_id(), map=mp, talk=bool(a.get("talk")),
-                                   who=(a.get("who") or None), done_when=dw, why=str(a.get("why") or "")[:80],
-                                   kind=str(a.get("kind") or "action")))
-    return done + active + new_steps + pending
+        step = QuestStep(id=next_id(), map=mp, talk=bool(a.get("talk")),
+                         who=(a.get("who") or None), done_when=dw, why=str(a.get("why") or "")[:80],
+                         kind=str(a.get("kind") or "action"))
+        placed.append((step, anchor_of(a)))
+
+    out = done + active + pending
+    default_slot = len(done) + len(active)   # head of pending (well-defined with no active step)
+    last_on = {}                             # anchor id -> the step last inserted after it
+    for step, anchor in placed:
+        if anchor is None:
+            out.insert(default_slot, step)
+            default_slot += 1
+        elif anchor == "end":
+            out.append(step)
+        else:
+            ref = last_on.get(anchor, anchor)
+            idx = next(i for i, s in enumerate(out) if s.id == ref)
+            out.insert(idx + 1, step)
+            last_on[anchor] = step.id
+            if idx < default_slot:
+                default_slot += 1
+    return out

@@ -502,7 +502,9 @@ class ReasoningLoop:
                 self._plan_steps = reconcile_quests(
                     self._plan_steps,
                     {"add": prop.get("add", []), "remove": prop.get("remove", [])},
-                    next_id=self._next_qid)
+                    next_id=self._next_qid,
+                    on_event=lambda kind, payload: self.on_event(
+                        kind, {"step": self.session.step, **payload}))
                 if prop.get("mission"):
                     self._plan.mission = prop["mission"]
                 if prop.get("milestone"):
@@ -533,6 +535,8 @@ class ReasoningLoop:
                 self.on_event("l1_review", {"step": self.session.step, "change": True,
                                             "assessment": prop.get("assessment"),
                                             "add": len(prop.get("add", [])),
+                                            "anchors": [a.get("after") for a in prop.get("add", [])
+                                                        if isinstance(a, dict)],
                                             "remove": prop.get("remove", [])})
                 self.on_event("quest", {"step": self.session.step, "len": len(self._quest),
                                         "plan": [d.reason for d in self._quest]})

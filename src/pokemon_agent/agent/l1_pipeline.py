@@ -49,7 +49,8 @@ def run_l1_pipeline(emu, context: dict, planner, *, hard_event: bool, on_trace=N
 
     d = planner.l1_decide(context, b)
     if on_trace:
-        on_trace({"stage": "decide", "add": len(d.get("add", [])), "remove": d.get("remove", [])})
+        on_trace({"stage": "decide", "add": len(d.get("add", [])), "remove": d.get("remove", []),
+                  "anchors": [s.get("after") for s in d.get("add", []) if isinstance(s, dict)]})
 
     validated_add = []
     for step in d.get("add", []):
@@ -60,6 +61,11 @@ def run_l1_pipeline(emu, context: dict, planner, *, hard_event: bool, on_trace=N
         fixed = planner.l1_repair(context, step, err)
         ok2, err2 = validate_step(fixed)
         if ok2:
+            # placement is not repair's job: the ORIGINAL anchor always wins (REPAIR may drop or
+            # echo a mangled `after`)
+            fixed = {k: v for k, v in fixed.items() if k != "after"}
+            if "after" in step:
+                fixed["after"] = step["after"]
             validated_add.append(fixed)
         else:
             if on_trace:

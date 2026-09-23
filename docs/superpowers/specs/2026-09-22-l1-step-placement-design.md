@@ -27,7 +27,7 @@ The captured DECIDE input for step 25 is in `runs/fix-accept-20260922-2259/decis
 
 ### 3.1 Schema — optional `after` on an added step
 Each object in DECIDE's `add` list MAY carry `"after"`:
-- `"<plan step id>"` — place the new step after that step. A **valid anchor** is the id of a step that **survives into the result with status active or pending**. Anything else — unknown, wedged, done, removed in this proposal, non-string, or the id of another new step — **falls back** to default placement;
+- `"<plan step id>"` — place the new step after that step. A **valid anchor** is the id of a step that **survives into the result with status active or pending**. Anything else — unknown (including a guessed id of another new step — new steps get ids only after the model responds), wedged, done, removed in this proposal, or non-string — **falls back** to default placement;
 - `"end"` — append at the current tail of the plan;
 - omitted / `null` — **today's behavior (default placement)**: immediately after `done + active`, i.e. at the head of the pending steps. This is well-defined even when there is **no** active step (the step-138 wedge-replacement case).
 
@@ -36,7 +36,7 @@ Each object in DECIDE's `add` list MAY carry `"after"`:
 ### 3.2 Reconciler (`agent/quest_reconciler.py`, pure)
 `reconcile_quests(current, proposal, *, next_id, on_event=None)`:
 1. Unchanged: keep done + active, drop removed pending steps and all wedged steps, dedup adds by `(map, done_when)` (an anchored add that dedups away is dropped silently, as today).
-2. Normalize: an `after` equal to the active step's id means "next" → treated as `None`. Invalid anchors (per §3.1) → `None` + `on_event("l1_anchor_fallback", {"after": value, "reason": "unknown|wedged|done|removed|not_string|new_step"})`.
+2. Normalize: an `after` equal to the active step's id means "next" → treated as `None`. Invalid anchors (per §3.1) → `None` + `on_event("l1_anchor_fallback", {"after": value, "reason": "unknown|wedged|done|removed|not_string"})`.
 3. Start from `base = done + active + pending` (pending order preserved). Process adds **in emitted order**:
    - `None` → insert at the default slot (after `done + active`, after any default-placed adds already inserted) — so with no anchors the result is byte-identical to today's `done + active + new + pending`;
    - `"<id>"` → insert after that anchor **and after any adds already placed on that anchor**;
@@ -71,7 +71,7 @@ The existing `l1_review` event gains `anchors: [after values]`; `l1_anchor_fallb
 | `after: "end"` with `[q1 active, q2, q3]` | `[q1, q2, q3, new]` |
 | `after: q1` (the active step) | normalized to default: right after q1, ordered with other default adds by emission |
 | mixed: default add, `after: q3` (last pending), `"end"` | default after active; the q3-anchored add after q3; "end" at the tail after it |
-| anchor unknown / wedged / done / removed / non-string / id of a new step | default placement + one `l1_anchor_fallback` event each |
+| anchor unknown (incl. a guessed new-step id) / wedged / done / removed / non-string | default placement + one `l1_anchor_fallback` event each |
 | no active step (wedge replacement) + unanchored add | the add is first among non-done steps (step-138 shape) |
 | anchored add whose `(map, done_when)` dedups | dropped, no error, no event |
 | **incident (pure):** captured step-25 plan + adds anchored `after: q2` | delivery `q2` precedes Pewter travel + gym |
@@ -87,9 +87,9 @@ Replay mapping for captured inputs: the record's `input` is the DECIDE `state` d
    - (a) captured **step-138** input (wedge replacement): the replacement reconciles to the front — no `after` pointing at `q2` or `"end"` — in ≥4/5;
    - (b) synthetic **emergency heal** (low-HP signals, pending plan): the heal is default-placed (no `after`) in ≥4/5;
    - (c) synthetic **steady state** (correctly ordered `[q1 travel→Pallet active, q2 deliver pending, q3 travel→Pewter pending, q4 gym pending]`, matching brainstorm): empty add/remove in ≥4/5.
-3. **Regression:** `scripts/eval_l1_decide.py` (its all-wedged scenario; extend `score_step` to accept an `after` key) — well-formedness must not drop; and `scripts/eval_criteria.py` (criteria scorecard over `tests/fixtures/criteria_cases.py`) — score must not drop.
+3. **Regression:** `scripts/eval_l1_decide.py` (its all-wedged scenario; `score_step` already ignores extra keys — optionally also check `after` is a string or null) — well-formedness must not drop; and `scripts/eval_criteria.py` (criteria scorecard over `tests/fixtures/criteria_cases.py`) — score must not drop.
 
-**End-to-end:** resume `runs/brock-run-20260922-1839` (parcel still in bag) ≤300 steps with `--capture distill --headless`. Note `--resume-from` restores the AgentPlan (mission/milestone/tried_failed) but not `_plan_steps` — L1 rebuilds the plan; clear stale `tried_failed` entries (e.g. "pick up Oak's Parcel…") for this run. Pass: the parcel is delivered, then the agent heads north; **and** the placement was actually exercised — some `l1_review` shows an anchor equal to the delivery step's id, or `plan_steps` shows the delivery step before the Pewter travel whenever both exist.
+**End-to-end:** resume `runs/brock-run-20260922-1839` (parcel still in bag) ≤300 steps with `--capture distill --headless`. Note `--resume-from` restores the AgentPlan (mission/milestone/tried_failed) but not `_plan_steps` — L1 rebuilds the plan; clear stale `tried_failed` entries (e.g. "pick up Oak's Parcel…") in a **copy** of the run dir (never edit the original record). **Invariant (must always hold):** whenever the delivery step and a Pewter travel step both exist in `plan_steps`, the delivery precedes it. **Pass:** the invariant holds, the parcel is delivered, then the agent heads north. **Exercised:** only if some `l1_review` carries an anchor equal to the delivery step's id — otherwise report the run as *passed, placement not exercised* (L1 may emit delivery + Pewter in one DECIDE, where emitted order alone suffices).
 
 ## 5. Out of scope / known limitations
 - Letting L1 reorder or move *existing* steps (only new steps are placed). **Known limitation:** an already-misordered plan, or a wrong anchor, can only be corrected by remove + re-add — L1 does not audit order (step 93 of the incident). Acceptable for now (YAGNI).

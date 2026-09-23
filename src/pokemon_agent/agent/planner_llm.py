@@ -267,9 +267,9 @@ exact ids for any "map" field).
 EVERY step you add MUST include an explicit "kind" — this is a HARD requirement; a step with no
 kind silently breaks execution downstream:
   {"kind": "travel", "map": <int>, "talk": false, "who": null,
-   "done_when": "on_map", "why": "<short>"}
+   "done_when": "on_map", "why": "<short>", "after": null}
   {"kind": "action", "map": <int>, "talk": <true|false>, "who": "<npc name, if talk, else null>",
-   "done_when": "<criterion>", "why": "<short>"}
+   "done_when": "<criterion>", "why": "<short>", "after": null}
 
 The kind rule:
   - "travel" is ONLY for moving to a map with no other objective on arrival; its done_when is
@@ -316,6 +316,14 @@ WORKED EXAMPLES (one per objective class — copy the SHAPE, adapt the specifics
   story beat not  -> {"kind":"action","map":12,"talk":true,"who":"the guard",
   RAM-trackable        "done_when":"verify:did the guard let us pass?","why":"..."}
 
+PLACEMENT — "after" says where a new step goes. Leave it null (the default) for something to do
+NEXT, before the rest of the plan — heals and replacements for a wedged step are always NEXT. Set
+"after": "<id>" only when the step must come AFTER an existing step that hasn't happened yet; the id
+must be from PLAN with status active or pending. Several steps with the same "after" run in the order
+you list them. "end" appends after everything. Example: PLAN [q4 travel->Viridian City (active),
+q5 buy Potions at the Viridian Mart (pending)], grinding on Route 2 should wait until after shopping ->
+{"kind":"action","map":13,"talk":false,"who":null,"done_when":"level>=10","why":"grind","after":"q5"}
+
 RULES:
   - Emit MINIMAL steps: only what's missing from the existing PLAN, anchored to it — don't repeat
     steps already present and on track.
@@ -330,7 +338,7 @@ otherwise — the default is to catch nothing.
 
 Return ONLY JSON:
 {"assessment": "<one line: what changed and why>",
- "add": [ <new step objects as above> ],
+ "add": [ <new step objects as above, each with its "after" (null unless it must follow a PLAN step)> ],
  "remove": [ <ids of existing plan steps to drop> ],
  "mission": "<the overall mission>",
  "milestone": "<the current concrete sub-goal>",

@@ -254,3 +254,58 @@ def test_portal_tile_route_detours_around_the_cut_at_mt_moon_1f():
     move = loop._resolve_target({"kind": "tile", "x": 5, "y": 5, "portal": True}, d, obs, set(), set())
     assert move is not None and move.direction.value != "west"
     emu.close()
+
+
+# ---- verify-mtmoon6: stuck at Mt Moon B2F (21,17) — the two fossils block the corridor to the exit ------
+def test_fossils_are_items():
+    from pokemon_agent.games.pokemon_red.game_state import _sprite_kind
+    assert _sprite_kind("Fossil") == "item"
+
+
+def test_route_blockers_names_the_objects_in_the_way():
+    from pokemon_agent.agent.routing import route_blockers
+    walk = {(x, y) for x in range(6) for y in range(3)} - {(2, 0), (2, 2)}   # a 1-wide gap at (2,1)
+    occ = {(2, 1): "Fossil", (0, 0): "Rocket"}
+    assert route_blockers(walk, (0, 1), (5, 1), occ) == [("Fossil", (2, 1))]
+    assert route_blockers(walk, (0, 1), (5, 1), {(0, 0): "Rocket"}) == []       # not blocked
+    assert route_blockers(walk - {(2, 1)}, (0, 1), (5, 1), occ) is None         # blocked by walls, not NPCs
+
+
+_B2F = __import__("pathlib").Path("runs/verify-mtmoon6-20260923")
+
+
+@pytest.mark.skipif(not (_B2F / "latest.state").exists() or not __import__("pathlib").Path("roms/pokemon_red.gb").exists(),
+                    reason="stuck B2F state / ROM not present")
+def test_blocked_route_wedges_with_the_blockers_named():
+    from pokemon_agent.actions.controller import ActionController
+    from pokemon_agent.agent.memory import AgentMemory
+    from pokemon_agent.agent.plan import Directive, Intent, ReflectionPlan
+    from pokemon_agent.agent.quest_reconciler import QuestStep
+    from pokemon_agent.agent.reason_loop import ReasoningLoop
+    from pokemon_agent.agent.reasoner import ReasonStep
+    from pokemon_agent.agent.session import Session
+    from pokemon_agent.core.models import GoalState, WaitAction
+    from pokemon_agent.emulator.pyboy_adapter import PyBoyEmulator
+    from pokemon_agent.observations.builder import ObservationBuilder
+
+    class Stub:
+        def reflect(self, **kw):
+            return ReflectionPlan(next_objective="go"), 0, {}
+
+        def step(self, **kw):
+            return ReasonStep(location="", objective="", reasoning="", action=WaitAction(frames=1)), 0, {}
+    emu = PyBoyEmulator("roms/pokemon_red.gb", window="null")
+    emu.load_state(_B2F / "latest.state")
+    emu.tick(4)
+    loop = ReasoningLoop(builder=ObservationBuilder(emu), controller=ActionController(emu), reasoner=Stub(),
+                         session=Session(GoalState(primary="g", current="g")), vision=False, reflect_every=100,
+                         goal_map=2, memory=AgentMemory.load(_B2F / "latest.mem.json"))
+    obs, _ = loop.builder.build(capture_screenshot=False)
+    loop._plan_steps = [QuestStep(id="q9", map=CERULEAN, done_when="on_map", status="active", kind="travel")]
+    d = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": CERULEAN}, success={"on_map": CERULEAN},
+                  quest_id="q9")
+    loop._directive = d
+    assert loop._navigate_leg(d, obs, set()) is None
+    step = loop._plan_steps[0]
+    assert step.status == "wedged" and "Fossil" in step.wedge_reason and loop._l1_event
+    emu.close()

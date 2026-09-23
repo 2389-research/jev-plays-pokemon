@@ -133,3 +133,47 @@ def grind_step(world, map_id: int, pos: tuple[int, int], last_dir: Direction | N
         if d is not None and ok(d):
             return d
     return None
+
+
+def route_blockers(walkable: set, start: tuple[int, int], goal: tuple[int, int], occupied: dict,
+                   cuts: set | None = None) -> list[tuple[str, tuple[int, int]]] | None:
+    """Why a route fails: ``[]`` if ``goal`` is reachable around the ``occupied`` cells (NPCs/objects,
+    {cell: name}); ``None`` if it's unreachable even ignoring them (walls, not objects); otherwise the
+    objects standing in the way — those on the shortest object-free path plus their adjacent objects
+    (e.g. both fossils filling Mt. Moon B2F's two-wide corridor). L1 decides what to do about them."""
+    cuts = cuts or set()
+    walk = set(walkable) | {goal}
+
+    def bfs(block):
+        prev = {start: None}
+        q = [start]
+        while q:
+            c = q.pop(0)
+            if c == goal:
+                path, n = [], c
+                while n is not None:
+                    path.append(n)
+                    n = prev[n]
+                return path
+            for dx, dy in _STEP:
+                n = (c[0] + dx, c[1] + dy)
+                if n in walk and n not in prev and n not in block and frozenset({c, n}) not in cuts:
+                    prev[n] = c
+                    q.append(n)
+        return None
+
+    if bfs(set(occupied) - {goal}) is not None:
+        return []
+    free = bfs(set())
+    if free is None:
+        return None
+    hit = [c for c in free if c in occupied and c != goal]
+    frontier, seen = list(hit), set(hit)
+    while frontier:
+        c = frontier.pop()
+        for dx, dy in _STEP:
+            n = (c[0] + dx, c[1] + dy)
+            if n in occupied and n not in seen:
+                seen.add(n)
+                frontier.append(n)
+    return sorted(((occupied[c], c) for c in seen), key=lambda t: (t[1][1], t[1][0]))

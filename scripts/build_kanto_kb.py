@@ -277,6 +277,9 @@ def build_docs() -> dict[str, str]:
              f"- Saffron City gates (Routes 5/6/7/8): the guards are thirsty; give one a drink ({', '.join(drinks)} —"
              " sold in the vending machines on the Celadon Department Store roof). After that all four gates open.",
              "- Viridian City north exit: an old man blocks it until you deliver Oak's Parcel.",
+             "- Mt. Moon B2F: the Dome Fossil and Helix Fossil sit in the two-wide corridor that leads to the exit",
+             "  ladder — walk up to one and press A to take it (you only get one; the Super Nerd takes the other);",
+             "  once they're gone the corridor opens toward the Route 4 exit and Cerulean.",
              "- Cerulean City: the trashed house's back door (the way south to Route 5) is blocked by a police officer early;",
              "  it opens after you visit Bill on Route 25.",
              "- Snorlax sleeps across Route 12 and Route 16: wake it with the Poké Flute (from Mr. Fuji in Lavender after",
@@ -329,7 +332,7 @@ def _req(url, ws, method="GET", body=None, timeout=60):
     return json.loads(raw) if raw else None
 
 
-def ingest(docs: dict[str, str], url: str, ws: str, *, only_missing: bool = False) -> None:
+def ingest(docs: dict[str, str], url: str, ws: str, *, only_missing: bool = False, prune: bool = True) -> None:
     existing, offset = [], 0
     while True:
         page = _req(f"{url}/documents?limit=200&offset={offset}", ws)
@@ -340,8 +343,9 @@ def ingest(docs: dict[str, str], url: str, ws: str, *, only_missing: bool = Fals
         offset += 200
     have = {d.get("title") for d in existing}
     # prune generated docs that no longer exist; replace (or, with only_missing, keep) the rest
+    # replace docs being (re)ingested; prune stale generated docs only on a FULL run
     drop = [d for d in existing if (d.get("title") or "").startswith(PREFIX)
-            and (d["title"] not in docs or not only_missing)]
+            and ((d["title"] in docs and not only_missing) or (prune and d["title"] not in docs))]
     for d in drop:
         _req(f"{url}/documents/{urllib.parse.quote(str(d['id']))}", ws, method="DELETE")
     todo = {t: c for t, c in docs.items() if not (only_missing and t in have)}
@@ -366,6 +370,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--ingest", action="store_true")
     ap.add_argument("--only-missing", action="store_true", help="ingest only docs whose title isn't there yet")
+    ap.add_argument("--only", default=None, help="replace just the docs whose title contains this text (no pruning)")
     ap.add_argument("--workspace", default=os.environ.get("ORRERY_WORKSPACE_ID", "6d677a16"))
     ap.add_argument("--url", default=os.environ.get("ORRERY_BASE_URL", "http://localhost:8100"))
     a = ap.parse_args()
@@ -378,7 +383,8 @@ def main() -> int:
         (OUT / fn).write_text(f"# {title}\n\n{content}\n")
     print(f"wrote {len(docs)} docs to {OUT} ({sum(len(c) for c in docs.values()) // 1024} KB)")
     if a.ingest:
-        ingest(docs, a.url, a.workspace, only_missing=a.only_missing)
+        sel = {t: c for t, c in docs.items() if a.only.lower() in t.lower()} if a.only else docs
+        ingest(sel, a.url, a.workspace, only_missing=a.only_missing, prune=a.only is None)
     return 0
 
 

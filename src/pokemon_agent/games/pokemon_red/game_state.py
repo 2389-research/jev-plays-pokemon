@@ -260,7 +260,7 @@ def _sprite_kind(name: str) -> str:
     """'item' = a pickup you press A to grab (Poké Ball / item on the ground); else 'person'
     (an NPC you talk to). Lets the executor route grab_item vs talk_to correctly."""
     low = name.lower()
-    if "ball" in low or low in ("item", "boulder"):
+    if "ball" in low or "fossil" in low or low in ("item", "boulder"):
         return "item"
     return "person"
 

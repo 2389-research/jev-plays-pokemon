@@ -964,6 +964,8 @@ class ReasoningLoop:
             return None  # configured model failed with no grounded route -> already flagged; STALL
                          # visibly (step_once's await-plan wait) rather than wander deterministically
         move = self._resolve_target(target, directive, obs, blocked_dirs, occupied)
+        if move is None and target.get("portal") and self._report_blockers(obs, target):
+            return None        # the route is blocked by objects/NPCs: L1 now knows exactly what
         if target.get("kind") == "grind":
             if move is None:   # no reachable grass on this map: hand the grind back to L1 right away
                 self._wedge_active(f"grind: no reachable grass on {map_name(player.map_id)}")
@@ -1931,6 +1933,32 @@ class ReasoningLoop:
         self._prev = rstep
         self._emit_reason(rstep, 0)
         return self._finish(obs, rstep, result, 0, {}, shot)
+
+    def _report_blockers(self, obs, target) -> bool:
+        """A portal route that exists on the map but is closed by objects/NPCs (e.g. the two fossils
+        filling Mt. Moon B2F's corridor, a trainer in a doorway): wedge the step at once with the
+        blockers named, so L1 can decide (pick one up / talk / battle / go around) instead of the
+        executor waiting forever. False when the route isn't blocked by objects."""
+        from .routing import route_blockers
+        player = obs.player
+        try:
+            coll = read_collision_map(self.controller.emu)
+        except Exception:
+            coll = None
+        if not coll or player is None:
+            return False
+        occ = {(int(n["x"]), int(n["y"])): str(n.get("sprite") or "someone")
+               for n in ((obs.game_state or {}).get("npcs") or []) if "x" in n and "y" in n}
+        cuts = (getattr(self.world, "cut_edges", None) or {}).get(player.map_id, set())
+        blockers = route_blockers(coll["walkable"], (player.x, player.y),
+                                  (int(target["x"]), int(target["y"])), occ, cuts)
+        if not blockers:
+            return False
+        who = ", ".join(f"{name} at ({x},{y})" for name, (x, y) in blockers)
+        self._wedge_active(f"the route {target.get('note') or 'to the target'} on {map_name(player.map_id)} is "
+                           f"blocked by {who} — deal with them (pick up / talk / battle) or go around")
+        self.on_event("route_blocked", {"step": self.session.step, "blockers": [list(c) + [n] for n, c in blockers]})
+        return True
 
     @staticmethod
     def _is_grind(directive) -> bool:

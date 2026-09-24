@@ -300,6 +300,8 @@ def read_npcs(emu: Emulator) -> list[dict]:
                 "sprite_id": pic,
                 "slot": i,                      # stable identity for a wandering NPC (sprite slot)
                 "kind": _sprite_kind(name),
+                # movement byte 1 (pokered SPRITESTATEDATA2_MOVEMENTBYTE1): $FE = walks around, $FF = stays
+                "wanders": emu.read_memory(b2 + 6) == 0xFE,
             })
     except Exception:
         pass

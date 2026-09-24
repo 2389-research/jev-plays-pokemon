@@ -66,6 +66,8 @@ BLOCKED_PORTAL_TTL = 600  # steps before a portal observed blocked is retried (s
 JEV_OVERRIDE_CONF = 0.6  # Jev may override the BFS pathing suggestion only at/above this confidence
 POLICY_BUDGET = 15       # steps a Jev-chosen routing policy runs before it's re-selected for the area
 JEV_NPC_CONF = 0.4  # trust Jev's NPC pick only at/above this confidence (else fall back to nearest)
+APPROACH_WAIT = 6  # steps to wait for a wandering sprite to leave the only side of an interaction target
+NPC_MOBILE_WINDOW = 40  # a sprite seen changing tile within this many steps counts as one that wanders
 # Conversation/script gate (interaction-reliability F5): between two text boxes the screen briefly
 # shows no text and the flow router says "navigate"; during scripted sequences the game ignores input
 # (wJoyIgnore != 0). In both the agent must WAIT, not plan/move/wedge.
@@ -221,6 +223,8 @@ class ReasoningLoop:
         self._target_map: int | None = None
         self._target_stuck = 0          # consecutive legs the current target made no progress
         self._counter_bumped = False    # bumped a counter this leg (talk-over-counter NPCs: nurse/clerk)
+        self._approach_block: str | None = None   # why no side of the last interaction target is reachable
+        self._approach_wait = 0
         self._edge_attempt: tuple | None = None  # (map,x,y) we last tried to step OFF to cross a map edge
         self._recent_targets: deque = deque(maxlen=6)
         # Jev-picked routing POLICY (shortest / dodge-grass / farm-exp), re-chosen per leg/area
@@ -378,6 +382,8 @@ class ReasoningLoop:
         if obs.player and obs.exits:  # learn real cross-map warp edges as we see them
             self.memory.graph.observe_exits(obs.player.map_id, obs.exits)
         self._observe_heard(obs)
+        self._observe_npcs(obs)
+        self._check_answer(obs)
         self._observe_progress(obs)
         if obs.game_state and obs.game_state.get("npcs"):
             obs.game_state["npcs"] = self.interactions.annotate_npcs(obs.player, obs.game_state["npcs"])
@@ -952,6 +958,7 @@ class ReasoningLoop:
         self._target_map = None      # defensive: never pair a stale map with the (now cleared) target
         self._target_stuck = 0
         self._counter_bumped = False  # a fresh leg re-bumps a counter before talking over it
+        self._approach_wait = 0
         self._edge_attempt = None
         self._recent_targets.clear()
         self.on_event("directive", {"step": self.session.step, "intent": self._directive.intent.value,
@@ -1097,13 +1104,16 @@ class ReasoningLoop:
             "npcs": [{"x": int(n["x"]), "y": int(n["y"]), "sprite": n.get("sprite"),
                       "talked_to": n.get("talked_to")}
                      for n in ((obs.game_state or {}).get("npcs") or []) if "x" in n and "y" in n],
+            "objects": [{"name": o["name"], "x": o["x"], "y": o["y"]} for o in objects_on(player.map_id)],
             "recent_trail": list(self._recent)[-8:],
             "recent_targets": [dict(t) for t in self._recent_targets],
             "reachable": reach,
             "candidate_exits": self._candidate_exits(obs, reach),
             "default": default,
             "stuck": stuck,
-            "why": ("the last target was unreachable or made no progress; propose a DIFFERENT one"
+            "why": ((f"the last target couldn't be reached: {self._approach_block}; propose a DIFFERENT one"
+                     if self._approach_block else
+                     "the last target was unreachable or made no progress; propose a DIFFERENT one")
                     if stuck else "pick the next target toward the goal"),
         }
         target = self.planner.propose_target(self.controller.emu, ctx)
@@ -1325,9 +1335,12 @@ class ReasoningLoop:
             if (player.x, player.y) == (ex, ey):
                 d = self._warp_exit_dir((ex, ey), obs.map_dims)
                 return MoveAction(direction=d) if d is not None else None
-        tgt = min(tiles, key=lambda c: abs(c[0] - player.x) + abs(c[1] - player.y))
-        return self._bfs_move(player, tgt, interact=False, blocked_dirs=blocked_dirs,
-                              occupied=(occupied - {tgt}))
+        # a door someone is standing in can't be walked onto: take the nearest free one
+        free = [c for c in tiles if c not in occupied]
+        if not free:
+            return None
+        tgt = min(free, key=lambda c: abs(c[0] - player.x) + abs(c[1] - player.y))
+        return self._bfs_move(player, tgt, interact=False, blocked_dirs=blocked_dirs, occupied=occupied)
 
     def _bfs_full_collision(self, player, xy, blocked_dirs, occupied):
         """First step of a BFS to ``xy`` over the FULL current-map collision (ground truth from RAM),
@@ -1341,10 +1354,10 @@ class ReasoningLoop:
             return None
         goal = (int(xy[0]), int(xy[1]))
         start = (int(player.x), int(player.y))
-        if start == goal:
-            return None
+        if start == goal or goal in set(occupied):
+            return None          # someone stands on the goal: exempt from terrain, never from occupancy
         walk = set(coll["walkable"]) | {goal}   # the door tile may be off the walkable set
-        blocked = (set(occupied) | self._warp_tiles(player.map_id)) - {goal}   # never through another door
+        blocked = set(occupied) | (self._warp_tiles(player.map_id) - {goal})   # never through another door
         cuts = (getattr(self.world, "cut_edges", None) or {}).get(getattr(player, "map_id", None), set())
         hops = ledge_hops(coll.get("terrain") or {})
         prev: dict[tuple[int, int], tuple[tuple[int, int], Direction, bool] | None] = {start: None}
@@ -1413,8 +1426,9 @@ class ReasoningLoop:
         and a pick cached on another map (e.g. a torn warp frame) can never drag us onto the wrong sprite."""
         player = obs.player
         npcs = [n for n in ((obs.game_state or {}).get("npcs") or []) if "x" in n and "y" in n]
-        sprite = target.get("sprite") if isinstance(target, dict) else target
-        named = bool(name_matches(npcs, sprite))
+        sprite = (target.get("sprite") or target.get("object")) if isinstance(target, dict) else target
+        use_obj = isinstance(target, dict) and target.get("kind") == "use_object"
+        named = not use_obj and bool(name_matches(npcs, sprite))
         talk_step = directive is not None and directive.intent in (Intent.TALK_TO, Intent.GRAB_ITEM)
         mid = getattr(player, "map_id", None)
         # a THING, not a person (Bill's PC, a sign, a trash can): RAM has no sprite for it, so aim at its
@@ -1432,8 +1446,9 @@ class ReasoningLoop:
                         self._l1_event = True
                     return None
             self._talk_npc = tuple(key)
-            return self._face_and_interact({"x": obj["x"], "y": obj["y"], "sprite": obj["name"]}, target,
-                                           obs, blocked_dirs, occupied, face=obj.get("face"))
+            return self._report_unreachable(
+                self._face_and_interact({"x": obj["x"], "y": obj["y"], "sprite": obj["name"]}, target,
+                                        obs, blocked_dirs, occupied, face=obj.get("face")), target, directive)
         if not npcs:
             # nobody here. When THIS is the step's map, don't walk out: leaving can reset a scripted event
             # (Bill steps into his teleporter; re-entering Route 25 turns him back into a Pokémon) — hand
@@ -1486,66 +1501,182 @@ class ReasoningLoop:
         if isinstance(target, dict):   # cache BY POSITION + MAP (works for spriteless/moving npcs)
             target["picked"] = [int(npc["x"]), int(npc["y"]), getattr(player, "map_id", None)]
         self._talk_npc = npc_key(npc, getattr(player, "map_id", None))
-        return self._face_and_interact(npc, target, obs, blocked_dirs, occupied)
+        return self._report_unreachable(self._face_and_interact(npc, target, obs, blocked_dirs, occupied),
+                                        target, directive)
+
+    def _report_unreachable(self, move, target, directive):
+        """No side of the person/object can be reached (``_approach_block``): a step that is ABOUT them
+        is wedged with the precise reason for L1 (once per target), instead of trying anyway; the next
+        stuck proposal shows L2 the same reason."""
+        block = self._approach_block if move is None else None
+        if block is None:
+            return move
+        if isinstance(target, dict):
+            if target.get("blocked") == block:
+                return move
+            target["blocked"] = block
+        if directive is not None and directive.intent in (Intent.TALK_TO, Intent.GRAB_ITEM) \
+                and directive.quest_id is not None:
+            self._wedge_active(f"can't get beside them — {block}")
+        return move
 
     def _face_and_interact(self, npc, target, obs, blocked_dirs, occupied, face: str | None = None):
         """Reach a tile beside ``npc`` (a person, or an object from the map table), face it, press A.
-        ``face`` limits the approach to the one side the game accepts (Bill's PC: facing north)."""
+        ``face`` limits the approach to the one side the game accepts (Bill's PC: facing north).
+        WHERE to stand is ``interaction.plan``: only standable sides (walkable, nobody on it, not a
+        door), nearest by walking distance, re-planned every step. None when no side is reachable —
+        ``self._approach_block`` then says why, naming who stands where."""
+        from .interaction import plan as plan_sides, report, sides
         player = obs.player
         nx, ny = int(npc["x"]), int(npc["y"])
-        adj = {Direction.NORTH: (nx, ny + 1), Direction.SOUTH: (nx, ny - 1),
-               Direction.EAST: (nx - 1, ny), Direction.WEST: (nx + 1, ny)}  # tile you stand on to face npc
-        if face:
-            adj = {d: c for d, c in adj.items() if d.value == face}
-        # COUNTER TALK: an NPC behind a real COUNTER tile (nurse, Mart clerk) can't be stood next to —
-        # the adjacent tile IS the counter. You talk to them from 2 tiles away in a straight line,
-        # over the counter. When the intervening cell is an actual counter (RAM's per-tileset talk-over
-        # tiles, never a generic wall), the stand tile is that 2-away cell instead of the (blocked) one.
+        self._approach_block = None
+        # COUNTER TALK: an NPC behind a real COUNTER tile (nurse, Mart clerk) is talked to from 2 tiles
+        # away in a straight line, over the counter (RAM's per-tileset talk-over tiles, never a wall).
         counters = getattr(self.world, "counters", {}).get(getattr(player, "map_id", None), set())
-        far = {Direction.NORTH: (nx, ny + 2), Direction.SOUTH: (nx, ny - 2),
-               Direction.EAST: (nx - 2, ny), Direction.WEST: (nx + 2, ny)}
-        counter_dirs = set()
-        for d, mid in list(adj.items()):
-            if mid in counters:
-                adj[d] = far[d]        # reach the counter NPC from across the counter
-                counter_dirs.add(d)
         facing_map = {"north": Direction.NORTH, "south": Direction.SOUTH,
                       "east": Direction.EAST, "west": Direction.WEST}
-        for d, stand in adj.items():
-            if (player.x, player.y) == stand:
-                facing_ok = facing_map.get(getattr(player, "facing", None)) == d
-                if d in counter_dirs:
-                    # COUNTER TALK (nurse/clerk): arriving on the tile already facing the counter is
-                    # NOT enough — the game only registers a talk-over-counter after you BUMP the
-                    # counter (a blocked step into it). Bump once per leg, then interact; once the
-                    # dialog opens, dialog-mode drives the rest.
-                    if not facing_ok or not self._counter_bumped:
-                        self._counter_bumped = True
-                        return MoveAction(direction=d)   # blocked step into the counter -> bump/turn
-                    return self._interact_with(target)
-                if facing_ok:
-                    return self._interact_with(target)   # adjacent AND facing -> talk
-                return MoveAction(direction=d)        # adjacent, turn to face (a blocked step turns you)
+        for s in sides((nx, ny), counters=counters, face=face):
+            if (player.x, player.y) != s.stand:
+                continue
+            d = s.face
+            facing_ok = facing_map.get(getattr(player, "facing", None)) == d
+            if s.counter:
+                # the game only registers a talk-over-counter after you BUMP the counter (a blocked
+                # step into it). Bump once per leg, then interact; dialog-mode drives the rest.
+                if not facing_ok or not self._counter_bumped:
+                    self._counter_bumped = True
+                    return MoveAction(direction=d)   # blocked step into the counter -> bump/turn
+                return self._interact_with(target, (nx, ny), npc)
+            if facing_ok:
+                return self._interact_with(target, (nx, ny), npc)   # adjacent AND facing -> talk
+            return MoveAction(direction=d)        # adjacent, turn to face (a blocked step turns you)
         others = occupied - {(nx, ny)}
-        # try each of the 4 stand-tiles nearest-first; take the first BFS-reachable one (cheap, and
-        # avoids burning a re-propose cycle when the single nearest stand-tile happens to be a wall).
-        # A stand tile another sprite is standing on is not a place we can go (runs/sleeves-cerulean:
-        # a beaten trainer stood on Misty's front tile; the BFS treats its goal as free, so the agent
-        # walked into him 15+ times while her open side was one step away).
-        free = [c for c in adj.values() if c not in others]
-        for stand in sorted(free, key=lambda c: abs(c[0] - player.x) + abs(c[1] - player.y)):
-            mv = self._bfs_move(player, stand, interact=False, blocked_dirs=blocked_dirs, occupied=others)
+        geo = self._interaction_geometry(obs)
+        if geo is None:
+            # no RAM collision (offline/tests): nearest free side over the learned map
+            free = [s.stand for s in sides((nx, ny), counters=counters, face=face) if s.stand not in others]
+            for stand in sorted(free, key=lambda c: abs(c[0] - player.x) + abs(c[1] - player.y)):
+                mv = self._bfs_move(player, stand, interact=False, blocked_dirs=blocked_dirs, occupied=others)
+                if mv is not None:
+                    return mv
+            return None
+        planned = plan_sides((player.x, player.y), (nx, ny), counters=counters, face=face, **geo)
+        best = planned[0] if planned else None
+        if best is not None and best.dist is not None:
+            mv = (self._bfs_full_collision(player, best.stand, blocked_dirs, others)
+                  or self._bfs_move(player, best.stand, interact=False, blocked_dirs=blocked_dirs, occupied=others))
             if mv is not None:
+                self._approach_wait = 0
                 return mv
+        # no side reachable. Someone who wanders (not a beaten trainer who never moves) may step aside:
+        # wait a few steps before reporting.
+        if any(s.status == "occupied" and self._npc_mobile(obs, s.stand) for s in planned) \
+                and getattr(self, "_approach_wait", 0) < APPROACH_WAIT:
+            self._approach_wait = getattr(self, "_approach_wait", 0) + 1
+            from ..core.models import WaitAction
+            return WaitAction(frames=30)
+        self._approach_block = report(str(npc.get("sprite") or "the target"), (nx, ny), (player.x, player.y),
+                                      planned)
+        self.on_event("approach_blocked", {"step": self.session.step, "report": self._approach_block})
         return None
 
-    def _interact_with(self, target) -> InteractAction:
+    def _interaction_geometry(self, obs) -> dict | None:
+        """What ``interaction.plan`` needs about the current map: RAM walkability, who stands where,
+        doors, elevation cuts, ledges. None when the emulator collision is unreadable."""
+        player = obs.player
+        try:
+            coll = read_collision_map(self.controller.emu)
+        except Exception:
+            coll = None
+        if not coll or player is None or coll.get("map_id") != player.map_id:
+            return None
+        occ = {(int(n["x"]), int(n["y"])): str(n.get("sprite") or "someone")
+               for n in ((obs.game_state or {}).get("npcs") or []) if "x" in n and "y" in n}
+        return {"walkable": set(map(tuple, coll["walkable"])), "occupied": occ,
+                "warps": self._warp_tiles(player.map_id),
+                "cuts": (getattr(self.world, "cut_edges", None) or {}).get(player.map_id, set()),
+                "terrain": coll.get("terrain")}
+
+    def _observe_npcs(self, obs) -> None:
+        """Remember when each sprite (by slot) last changed tile, so a wanderer can be told apart from a
+        sprite that never moves (a beaten trainer)."""
+        player = obs.player
+        if player is None:
+            return
+        seen = self.__dict__.setdefault("_npc_seen", {})
+        for n in ((obs.game_state or {}).get("npcs") or []):
+            if "x" not in n or n.get("slot") is None:
+                continue
+            k, xy = (player.map_id, int(n["slot"])), (int(n["x"]), int(n["y"]))
+            prev = seen.get(k)
+            if prev is None:
+                seen[k] = (xy, None)
+            elif prev[0] != xy:
+                seen[k] = (xy, self.session.step)
+
+    def _npc_mobile(self, obs, xy) -> bool:
+        """The sprite on ``xy`` walks around: RAM's movement byte says so, or (when that isn't read) it
+        has been seen changing tile in the last NPC_MOBILE_WINDOW steps."""
+        player = obs.player
+        n = next((n for n in ((obs.game_state or {}).get("npcs") or [])
+                  if "x" in n and (int(n["x"]), int(n["y"])) == tuple(xy)), None)
+        if n is None:
+            return False
+        if n.get("wanders") is not None:
+            return bool(n["wanders"])
+        if n.get("slot") is None:
+            return False
+        rec = self.__dict__.get("_npc_seen", {}).get((player.map_id, int(n["slot"])))
+        return bool(rec and rec[1] is not None and self.session.step - rec[1] <= NPC_MOBILE_WINDOW)
+
+    def _interact_with(self, target, at=None, npc=None) -> InteractAction:
         """Press A at the picked NPC, remembering who/when so the NEXT navigate step can judge whether
-        that conversation achieved the step (F2 rotation)."""
+        that conversation achieved the step (F2 rotation), and who should answer (``_check_answer``)."""
         if isinstance(target, dict) and getattr(self, "_talk_npc", None) is not None:
             target["talking_to"] = list(self._talk_npc)
             target["talk_step"] = self.session.step
+        if at is not None:
+            self._await_answer = {"xy": tuple(at), "step": self.session.step, "target": target,
+                                  "name": str((npc or {}).get("sprite") or "the target"),
+                                  "sprite": "slot" in (npc or {}) or "kind" in (npc or {})}
         return InteractAction()
+
+    def _check_answer(self, obs) -> None:
+        """When the text opens after we pressed A, check WHO answered: the sprite we're facing must be the
+        one we aimed at. Someone else (we bumped another person, or the pick resolved to the wrong
+        sprite) is not the target conversation: it isn't counted, the approach retries, and a second
+        wrong answer goes to L1 with the reason. An object has no sprite, so only a PERSON in front of
+        us answering instead counts against it."""
+        aw = getattr(self, "_await_answer", None)
+        if aw is None:
+            return
+        if self.session.step - aw["step"] > 3:
+            self._await_answer = None
+            return
+        gs = obs.game_state or {}
+        if not gs.get("dialog_active"):
+            return
+        self._await_answer = None
+        facing = gs.get("facing") or {}
+        fs = facing.get("facing_sprite")
+        if not fs or fs.get("x") is None:
+            return
+        got = (int(fs["x"]), int(fs["y"]))
+        if got == aw["xy"] or (not aw["sprite"] and list(got) != list(facing.get("front_tile") or [])):
+            return
+        who = str(fs.get("sprite") or "someone")
+        tgt = aw["target"]
+        n = 1
+        if isinstance(tgt, dict):
+            tgt.pop("talking_to", None)
+            tgt.pop("talk_step", None)
+            n = tgt["wrong_answer"] = tgt.get("wrong_answer", 0) + 1
+        self.on_event("wrong_answer", {"step": self.session.step, "wanted": aw["name"], "at": list(aw["xy"]),
+                                       "got": who, "got_at": list(got), "n": n})
+        d = self._directive
+        if n >= 2 and d is not None and d.intent in (Intent.TALK_TO, Intent.GRAB_ITEM):
+            self._wedge_active(f"pressed A at {aw['name']} ({aw['xy'][0]},{aw['xy'][1]}) but {who} at "
+                               f"({got[0]},{got[1]}) answered — twice")
 
     def _judge_last_talk(self, target: dict, directive) -> None:
         """F2: after a conversation with the picked NPC ends, if the step's success still doesn't hold,
@@ -1651,7 +1782,7 @@ class ReasoningLoop:
             return self._route_to_tile(obs, xy, blocked_dirs, avoid)
         if kind == "enter":
             return self._enter_map(int(target["map"]), obs, blocked_dirs, occupied)
-        if kind == "approach_npc":
+        if kind in ("approach_npc", "use_object"):
             return self._approach_npc(target, directive, obs, blocked_dirs, occupied)
         if kind == "explore":
             return self._explore_move(directive, obs, blocked_dirs, occupied)

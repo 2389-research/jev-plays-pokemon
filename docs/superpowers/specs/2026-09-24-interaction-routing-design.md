@@ -109,6 +109,37 @@ text opens.
 - **Regression:** the full suite, plus one fresh-from-Squirtle run to confirm nothing breaks in the
   opening.
 
+## Implemented (2026-09-24)
+- `agent/interaction.py`: `why_not`/`standable`, `sides` (counter + required `face`), `distances`,
+  `plan` (status + walking distance per side, nearest open first), `report`.
+- `_face_and_interact` stands on `plan(...)[0]`; none reachable -> `_approach_block` (event
+  `approach_blocked`). A talk/grab step is wedged with it once per target (`_report_unreachable`);
+  the next stuck proposal's WHY carries it. A wanderer on the only side is waited for (`APPROACH_WAIT`)
+  first; "wanders" is RAM's movement byte ($FE), with observed movement as fallback.
+- Pathfinders: `Navigator.step_toward` (stand-on targets; sets `goal_blocked`), `_bfs_full_collision`
+  and `_leave_via_nearest_exit` never treat an occupied goal as free; terrain exemption kept for doors.
+- Who answered: `_check_answer` compares the faced sprite when the text opens with the one we pressed A
+  at; a different speaker isn't counted, the second one wedges the step with the reason. For an object,
+  only a person directly in front answering counts against it.
+- L2: `use_object` kind, OBJECTS in its context, and approach_npc / use_object / enter as the standard
+  answer for a person, thing or door ("never pick the tile beside someone to talk to them — name them").
+
+Live (scripts/eval_l2_live.py, n=5, each moment replayed with its recorded objective, focus, stuck state
+and talked_to flags):
+
+| scenario | L2 named the target | router reached it once named |
+|---|---|---|
+| clerk (counter) | 5/5 | 5/5 |
+| nurse (counter) | 4/5 | 4/4 |
+| Bill's PC (object, face north) | 5/5 (was walking out: 0/5) | 5/5 |
+| Youngster (wanderer) | 5/5 | 5/5 |
+| Misty, trainer on her front tile | 1/5 | 1/1 (her east side, 4 steps) |
+| Misty from the gym entrance | 4/5 | 0/4 — the unbeaten Swimmer challenges us on the way (line of sight) |
+
+Every router miss was a trainer challenge (normal play), not routing. In "Misty, trainer on her front
+tile" L2 mostly names the Swimmer: L1's focus at that moment says "Swimmer if unfought, then Misty" while
+the step says talk to Misty — a plan inconsistency, not a routing one.
+
 ## Out of scope
 - A model coordinate-picking mode for interactions (dropped; see Problem).
 - Field moves (Cut, Surf, Strength) and bag items. Separate specs.

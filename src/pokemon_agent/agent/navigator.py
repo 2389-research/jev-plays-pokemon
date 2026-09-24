@@ -108,12 +108,21 @@ class Navigator:
         interact = bool(target.get("interact", True))
         here = (player.x, player.y)
 
-        # never treat the target tile itself as an obstacle for reaching it
-        blk = frozenset(b for b in (blocked or ()) if b != (tx, ty))
+        # A tile we must STAND ON is never exempt from occupancy: someone standing there makes it
+        # unreachable, not one step away (runs/sleeves-cerulean: 15+ walks into a trainer on Misty's
+        # front tile). Only an interaction target (the person/object itself) may be in ``blocked``.
+        self.goal_blocked = False
+        if interact:
+            blk = frozenset(b for b in (blocked or ()) if b != (tx, ty))
+        else:
+            blk = frozenset(blocked or ())
 
         if not interact:  # exit: stand on the tile itself
             if here == (tx, ty):
                 return None, True
+            if (tx, ty) in blk:
+                self.goal_blocked = True
+                return None, False
             d = self._bfs_first_step(m, here, {(tx, ty)}, blk)
             return (MoveAction(direction=d), False) if d else (None, False)
 

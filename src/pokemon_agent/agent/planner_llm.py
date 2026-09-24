@@ -105,10 +105,14 @@ arrival (stepping through a door, or off a map edge) — you just pick the tile.
 when you REACH it, get STUCK, or the map changes. You are also the get-unstuck mechanism: when WHY
 says the last target was unreachable or made no progress, pick a DIFFERENT tile.
 
-Return ONLY ONE JSON object. Normally a coordinate:
+Return ONLY ONE JSON object. To walk somewhere (explore, head toward the goal), a coordinate:
   {"x":<int>,"y":<int>,"why":"<one short sentence: why this tile>"}
-To talk to a person instead of move:
-  {"kind":"approach_npc","sprite":"<name>","why":"..."}
+For anything involving a PERSON, a THING or a DOOR, name it instead — the router works out where to
+stand, walks there around anyone in the way, faces it and presses A (or steps through the door):
+  talk to a person:        {"kind":"approach_npc","sprite":"<name from NPCS>","why":"..."}
+  use a thing (PC, sign):  {"kind":"use_object","object":"<name from OBJECTS>","why":"..."}
+  go through a door:       {"kind":"enter","map":<dest map id from CANDIDATE_EXITS>,"why":"..."}
+Never pick the tile beside someone to talk to them — name them.
 
 COORDINATES: (x,y); x = column (increases EAST), y = row (increases SOUTH, y=0 is the north edge).
 The MAP_VIEW starts with a LEGEND naming every symbol (path, grass 'G' walkable, '#'/water NOT
@@ -999,6 +1003,7 @@ class Planner:
             "exit_tile": list(exit_tile) if exit_tile else None,
             "candidate_exits": context.get("candidate_exits"),
             "npcs": context.get("npcs"),
+            "objects": context.get("objects") or None,
             "recent_trail": context.get("recent_trail"),
             "recent_targets": context.get("recent_targets"),
             "default": default,
@@ -1049,6 +1054,12 @@ class Planner:
                     reason = "approach_npc missing sprite"
                     continue
                 return self._cap_target(state, content, {"kind": "approach_npc", "sprite": sprite, "note": note}, _lat, _usage)
+            if kind == "use_object":
+                obj = (data.get("object") or data.get("sprite") or None)
+                if not obj:
+                    reason = "use_object missing object"
+                    continue
+                return self._cap_target(state, content, {"kind": "use_object", "object": obj, "note": note}, _lat, _usage)
             if kind == "exit":
                 return self._cap_target(state, content, {"kind": "exit", "note": note}, _lat, _usage)
             reason = f"unknown kind {kind!r}"

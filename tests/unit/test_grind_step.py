@@ -70,3 +70,12 @@ def test_a_long_pace_visits_more_than_two_tiles():
         seen.add(pos)
         assert W.terrain[MAP].get(pos) == "grass"
     assert len(seen) >= 4       # sweeps the patch (no 2-tile ping-pong)
+
+
+def test_the_no_encounter_window_follows_the_map_encounter_rate():
+    """runs/sleeves-explore: a flat 60 gave up grinding in Viridian Forest (rate 8/256, ~32 steps per
+    encounter) while sweeping its grass. The window is ~4.6x the expected steps for the map's rate."""
+    from pokemon_agent.agent.reason_loop import GRIND_ENCOUNTER_WINDOW, grind_grass_window
+    assert grind_grass_window(51) >= 140                        # Viridian Forest (8/256)
+    assert grind_grass_window(13) == GRIND_ENCOUNTER_WINDOW     # Route 2 (25/256): the floor
+    assert grind_grass_window(99999) == GRIND_ENCOUNTER_WINDOW  # unknown map

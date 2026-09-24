@@ -70,7 +70,30 @@ JEV_NPC_CONF = 0.4  # trust Jev's NPC pick only at/above this confidence (else f
 # shows no text and the flow router says "navigate"; during scripted sequences the game ignores input
 # (wJoyIgnore != 0). In both the agent must WAIT, not plan/move/wedge.
 WJOYIGNORE = 0xCD6B        # non-zero while a script owns the controls
-GRIND_ENCOUNTER_WINDOW = 60  # grinding: steps without a WILD battle before the grind step wedges
+GRIND_ENCOUNTER_WINDOW = 60  # grinding: min GRASS steps without a wild battle before the grind wedges
+GRIND_HARD_CAP = 300         # grinding: loop steps without a wild battle, whatever happens (unreachable grass)
+
+
+def grind_grass_window(map_id) -> int:
+    """Grass steps to allow without a wild encounter before giving up on a grind: ~4.6x the expected
+    steps per encounter (256/rate) for this map's real rate -> under 1% false give-ups. Viridian
+    Forest's rate is 8/256 (~32 steps/encounter): the old flat 60 gave up ~15% of the time."""
+    import json as _json
+    from pathlib import Path as _P
+    global _WILD_RATES
+    if _WILD_RATES is None:
+        try:
+            p = _P(__file__).resolve().parents[1] / "games" / "pokemon_red" / "wild_rates.json"
+            _WILD_RATES = {int(k): int(v) for k, v in _json.loads(p.read_text()).items()}
+        except Exception:
+            _WILD_RATES = {}
+    rate = _WILD_RATES.get(map_id)
+    if not rate:
+        return GRIND_ENCOUNTER_WINDOW
+    return max(GRIND_ENCOUNTER_WINDOW, min(GRIND_HARD_CAP, int(4.6 * 256 / rate + 0.5)))
+
+
+_WILD_RATES: dict | None = None
 WLASTMAP = 0xD365          # wLastMap: where a LAST_MAP (0xFF) warp returns to (the last OUTDOOR map)
 CONVO_GRACE_STEPS = 2      # steps after a dialogue step still treated as the same conversation
 FORCED_WAIT_MAX_STEPS = 40  # consecutive forced waits before giving up on the gate (never stall forever)
@@ -2683,9 +2706,20 @@ class ReasoningLoop:
             # pacing grass looks like a loop and levels come slowly: while wild battles keep coming the
             # grind IS progress; after a full window with no wild encounter, hand it back to L1
             since = max(self._grind_start, self._last_wild_battle_end or 0)
-            if self.session.step - since > GRIND_ENCOUNTER_WINDOW:
-                self._wedge_active(f"grind: no wild encounter in {GRIND_ENCOUNTER_WINDOW} steps on "
-                                   f"{map_name(self.controller.emu.read_memory(0xD35E))}")
+            if getattr(self, "_grass_since", None) != since:        # a new grind / a wild battle ended
+                self._grass_since, self._grass_steps = since, 0
+            emu = self.controller.emu
+            mid = emu.read_memory(0xD35E)
+            try:
+                here = read_player(emu)
+                if (self.world.terrain.get(mid) or {}).get((here.x, here.y)) == "grass":
+                    self._grass_steps += 1                  # only grass steps roll an encounter
+            except Exception:
+                pass
+            window = grind_grass_window(mid)
+            if self._grass_steps > window or self.session.step - since > GRIND_HARD_CAP:
+                self._wedge_active(f"grind: no wild encounter in {self._grass_steps} grass steps "
+                                   f"({self.session.step - since} steps) on {map_name(mid)}")
             self._blocked_for_n = 0
             return
         if stuck.stuck:

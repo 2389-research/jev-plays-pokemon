@@ -105,24 +105,41 @@ def test_stuck_verdicts_inside_the_encounter_window_do_not_count():
     assert loop._blocked_for_n == 0 and loop._plan_steps[0].status == "active"
 
 
+def _grass_steps(loop, n, *, on=(1, 1)):
+    loop.controller.emu.x, loop.controller.emu.y = on
+    for _ in range(n):
+        loop.session.step += 1
+        loop._apply_stuck_to_budget(SimpleNamespace(stuck=False, kind=None), frozen=False)
+
+
 def test_no_wild_encounter_for_the_window_wedges_with_the_reason():
+    """Counted in GRASS steps (only those roll an encounter), window from the map's rate (Route 2:
+    25/256 -> the 60 floor)."""
     loop, d, _ = _setup(GRASSY)
     loop._navigate_leg(d, _obs(1, 1), set())
-    loop.session.step += GRIND_ENCOUNTER_WINDOW + 1
-    loop._apply_stuck_to_budget(SimpleNamespace(stuck=False, kind=None), frozen=False)
+    _grass_steps(loop, GRIND_ENCOUNTER_WINDOW + 2)
     step = loop._plan_steps[0]
-    assert step.status == "wedged" and "no wild encounter" in step.wedge_reason and loop._l1_event
+    assert step.status == "wedged" and "no wild encounter in" in step.wedge_reason and "grass steps" in step.wedge_reason
+    assert loop._l1_event
+
+
+def test_steps_off_the_grass_only_count_toward_the_hard_cap():
+    from pokemon_agent.agent.reason_loop import GRIND_HARD_CAP
+    loop, d, _ = _setup(GRASSY)
+    loop._navigate_leg(d, _obs(1, 1), set())
+    _grass_steps(loop, GRIND_ENCOUNTER_WINDOW + 5, on=(4, 3))          # a floor tile: no encounter rolls
+    assert loop._plan_steps[0].status == "active"
+    _grass_steps(loop, GRIND_HARD_CAP, on=(4, 3))
+    assert loop._plan_steps[0].status == "wedged"
 
 
 def test_a_wild_battle_resets_the_window():
     loop, d, _ = _setup(GRASSY)
     loop._navigate_leg(d, _obs(1, 1), set())
-    loop.session.step += GRIND_ENCOUNTER_WINDOW - 5
+    _grass_steps(loop, GRIND_ENCOUNTER_WINDOW - 5)
     loop._note_battle_end(wild=True)
-    loop.session.step += 20
-    loop._apply_stuck_to_budget(SimpleNamespace(stuck=False, kind=None), frozen=False)
+    _grass_steps(loop, 20)
     assert loop._plan_steps[0].status == "active"
     loop._note_battle_end(wild=False)                     # a trainer battle does not reset it
-    loop.session.step += GRIND_ENCOUNTER_WINDOW
-    loop._apply_stuck_to_budget(SimpleNamespace(stuck=False, kind=None), frozen=False)
+    _grass_steps(loop, GRIND_ENCOUNTER_WINDOW)
     assert loop._plan_steps[0].status == "wedged"

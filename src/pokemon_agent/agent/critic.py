@@ -24,7 +24,7 @@ hints in HEARD that point somewhere; unexplored doors/people that could hold the
 invent game facts — if the way forward is unknown, say that exploring (and which unexplored things
 first) is the move. Two or three sentences.
 
-Return ONLY JSON: {"diagnosis": "<what's going wrong>", "suggestion": "<what to try instead>"}"""
+Write in English. Return ONLY JSON: {"diagnosis": "<what's going wrong>", "suggestion": "<what to try instead>"}"""
 
 
 INTERRUPT_SYSTEM = """An agent playing Pokémon Red has a PLANNER that wants to INTERRUPT the step currently
@@ -34,7 +34,7 @@ would be worse — e.g. the party is about to faint and the active step walks th
 active step became impossible or obsolete, or something urgent appeared. Reject churn: reordering for
 its own sake, misreading an active step that is simply still travelling to its map, a reason the
 PARTY / SIGNALS contradict, or repeating an interrupt that was already rejected (RECENT_FEEDBACK).
-Return ONLY JSON: {"approve": <true|false>, "why": "<one sentence>"}"""
+Write in English. Return ONLY JSON: {"approve": <true|false>, "why": "<one sentence>"}"""
 
 
 class Critic:

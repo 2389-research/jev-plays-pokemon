@@ -1608,6 +1608,22 @@ class ReasoningLoop:
                 # a model-named tile that IS an exit door: step THROUGH the warp (the model said "leave
                 # via (4,11)" — honor it), don't just stop on the doormat.
                 if door is not None:
+                    # standing ON a warp we ARRIVED through (a ladder/stair drops you on its twin) doesn't
+                    # fire until you step off and back on (runs/sleeves-mtmoon: 8 moves into a wall on a
+                    # Mt. Moon ladder). Try stepping through once; if we're still here, step off — the
+                    # route brings us straight back on and the warp fires.
+                    key = (player.map_id, xy)
+                    last = getattr(self, "_warp_try", None)
+                    if last is not None and last[0] == key and self.session.step - last[1] <= 3:
+                        self._warp_try = None
+                        off = next((d for d, (dx, dy) in DELTA.items()
+                                    if d.value not in blocked_dirs
+                                    and self.world.tiles.get(player.map_id, {}).get((xy[0] + dx, xy[1] + dy)) not in (None, WALL)
+                                    and (xy[0] + dx, xy[1] + dy) not in occupied), None)
+                        if off is not None:
+                            self.on_event("warp_step_off", {"step": self.session.step, "tile": list(xy)})
+                            return MoveAction(direction=off)
+                    self._warp_try = (key, self.session.step)
                     d = self._warp_exit_dir(xy, obs.map_dims)
                     return MoveAction(direction=d) if d is not None else None
                 # a map-EDGE opening L2 routed to (a boundary tile, no warp): step OFF the edge to

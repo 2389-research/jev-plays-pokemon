@@ -480,6 +480,11 @@ paused focus, add "interrupted": "" (see GOALS above); otherwise never include "
 # turned into steps (DECIDE) — runs/sleeves-mtmoon: brainstorm never saw them, so training never came up
 BRAINSTORM_SYSTEM = BRAINSTORM_SYSTEM.replace("{TRAINING}", TRAINING_TEXT)
 DECIDE_SYSTEM = DECIDE_SYSTEM.replace("{TRAINING}", TRAINING_TEXT)
+# runs/sleeves-mtmoon step 1730: one assessment came back in Chinese — state the language outright
+_ENGLISH = "\nWrite every text field (assessment, why, notepad, goals) in English."
+BRAINSTORM_SYSTEM += _ENGLISH
+DECIDE_SYSTEM += _ENGLISH
+TRIAGE_SYSTEM += _ENGLISH
 
 
 REPAIR_SYSTEM = """You are the L1 REPAIR step for an agent playing Pokémon Red. ONE quest step

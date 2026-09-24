@@ -125,3 +125,19 @@ def test_in_map_paths_never_cross_another_door():
         p = SimpleNamespace(x=p.x + dx, y=p.y + dy, map_id=BILLS, facing=mv.direction.value)
         seen.add((p.x, p.y))
     assert (p.x, p.y) == (4, 5) and not ({(2, 7), (3, 7)} & seen)
+
+
+def test_standing_on_an_arrival_warp_steps_off_then_back_on():
+    """runs/sleeves-mtmoon: arriving through a ladder puts you ON its twin, which doesn't fire until you
+    step off and back on — the executor walked into a wall 8x ('0 steps away'). Try through once, then
+    step off to a free neighbour."""
+    from pokemon_agent.core.models import MoveAction
+    loop, d = _setup("x")
+    loop.world.ingest_collision(BILLS, 8, 8, {(x, y) for x in range(1, 7) for y in range(1, 8)}, None, {})
+    obs = SimpleNamespace(player=SimpleNamespace(x=3, y=7, map_id=BILLS, facing="south"), game_state={"npcs": []},
+                          exits=[{"x": 3, "y": 7}], map_dims=(8, 8))
+    tgt = {"kind": "tile", "x": 3, "y": 7, "portal": True}
+    first = loop._resolve_target(tgt, d, obs, {"south"}, set())       # the exit direction (walled here)
+    loop.session.step += 1
+    second = loop._resolve_target(tgt, d, obs, {"south"}, set())
+    assert isinstance(second, MoveAction) and second.direction.value != "south" and first != second

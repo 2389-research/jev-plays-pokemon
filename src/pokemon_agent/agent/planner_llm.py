@@ -235,6 +235,21 @@ IGNORED in SINCE_LAST_REVIEW.your_last_edits is not a reason to try it again.
 Return ONLY JSON: {"change": <true|false>, "why": "<one short sentence>"}"""
 
 
+TRAINING_TEXT = """TRAINING — only Pokémon that take part in a battle earn EXP, and the LEAD (first in the party) starts
+every battle, so a bench that never leads stays weak. Training a member is your call: set "lead":
+"<nickname>" (the harness moves it to the front of the party), then grind with a step whose done_when is
+"level:<nickname>>=N" — somewhere its level can handle (weak wild Pokémon, heal often). Set the lead
+back (e.g. "lead": "Dylan") before a gym battle. PARTY shows each member's nickname, level, HP and — in
+"evolves" — what it will become (e.g. "Gyarados at L20"): weigh a Pokémon by its future, not just its level now.
+SWITCH-TRAINING is another option, if you want it: "train": ["<nickname>", ...] puts that member first
+and, when a battle starts, the battle layer sends it out and immediately switches to your strongest
+healthy member — Gen 1 splits the EXP among every member that took part, so it grows without doing the
+fighting. The cost: the incoming member takes one free enemy hit per battle. "train": "clear" stops it.
+Whether and whom to train is your call (SIGNALS.train shows the current setting); a member's future
+evolutions are in the knowledge base (e.g. search "<species> evolution").
+"""
+
+
 BRAINSTORM_SYSTEM = """You are the L1 BRAINSTORM step for an agent playing Pokémon Red, working
 toward its own GOALS (primary = the long-term aim, e.g. the next badge). TRIAGE has flagged that the plan may need to
 change. Your job here is OPEN-ENDED assessment, not a final plan: think through the situation —
@@ -278,7 +293,7 @@ it's worth it: catching wild Pokémon is how the team grows. Catching needs Pok�
 at a Poké Mart) and a free party slot; set a standing CATCH goal to have the battle layer catch the
 species you want. SIGNALS.catch shows your current catch goal and whether it can fire right now (ready,
 and why not — e.g. no Poké Balls).
-
+{TRAINING}
 TOOL — knowledge base: you SHOULD look things up in a Pokémon Red guide before concluding —
 especially WHERE things are (which map has the item / NPC / Poké Center) and what a story gate
 requires. To search, reply with ONLY {"search": ["query1", "query2"]} (1-3 queries); results come
@@ -440,19 +455,7 @@ and why not — e.g. no Poké Balls).
 LEARN FROM LOSSES — SIGNALS.recent_battles lists your last fights and their results. If you LOST (e.g.
 to a gym leader), don't simply heal and retry the same way: change something first — train team members,
 buy Potions, pick a better lead or a counter type — and say in the notepad what you're changing and why.
-TRAINING — only Pokémon that take part in a battle earn EXP, and the LEAD (first in the party) starts
-every battle, so a bench that never leads stays weak. Training a member is your call: set "lead":
-"<nickname>" (the harness moves it to the front of the party), then grind with a step whose done_when is
-"level:<nickname>>=N" — somewhere its level can handle (weak wild Pokémon, heal often). Set the lead
-back (e.g. "lead": "Dylan") before a gym battle. PARTY shows each member's nickname, level, HP and — in
-"evolves" — what it will become (e.g. "Gyarados at L20"): weigh a Pokémon by its future, not just its level now.
-SWITCH-TRAINING is another option, if you want it: "train": ["<nickname>", ...] puts that member first
-and, when a battle starts, the battle layer sends it out and immediately switches to your strongest
-healthy member — Gen 1 splits the EXP among every member that took part, so it grows without doing the
-fighting. The cost: the incoming member takes one free enemy hit per battle. "train": "clear" stops it.
-Whether and whom to train is your call (SIGNALS.train shows the current setting); a member's future
-evolutions are in the knowledge base (e.g. search "<species> evolution").
-To set or change the CATCH goal add "catch": ["<species>", ...] (or ["any"]); the battle layer then
+{TRAINING}To set or change the CATCH goal add "catch": ["<species>", ...] (or ["any"]); the battle layer then
 catches a matching wild Pokémon when it can (weakened into the catch band, then a ball). A goal that
 SIGNALS.catch says isn't ready does nothing until you fix the reason (e.g. add a step to buy Poké Balls:
 {"kind":"action","map":<mart>,"talk":true,"who":"the Mart clerk","done_when":"has_item:Poke Ball>=5"}).
@@ -471,6 +474,12 @@ Return ONLY JSON:
  "interrupt_active": {"why": "<only when replacing the ACTIVE step — the concrete reason it can't wait>"}}
 Omit "goals", "notepad", "catch", "lead", "train" and "interrupt_active" entirely when not needed (the common case). To drop the
 paused focus, add "interrupted": "" (see GOALS above); otherwise never include "interrupted"."""
+
+
+# the TEAM/TRAINING options must be known where the strategy is formed (BRAINSTORM), not only where it's
+# turned into steps (DECIDE) — runs/sleeves-mtmoon: brainstorm never saw them, so training never came up
+BRAINSTORM_SYSTEM = BRAINSTORM_SYSTEM.replace("{TRAINING}", TRAINING_TEXT)
+DECIDE_SYSTEM = DECIDE_SYSTEM.replace("{TRAINING}", TRAINING_TEXT)
 
 
 REPAIR_SYSTEM = """You are the L1 REPAIR step for an agent playing Pokémon Red. ONE quest step

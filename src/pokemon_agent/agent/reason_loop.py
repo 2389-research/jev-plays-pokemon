@@ -1853,9 +1853,29 @@ class ReasoningLoop:
                            active=bool(gs.get("dialog_active")), lines=gs.get("dialog_lines") or [],
                            speaker=speaker, speaker_xy=xy, in_battle=battling)
 
+    def _observe_party(self, party: list[dict]) -> None:
+        """Note who joined the team (a catch, a gift) with what it will become — the moment a player
+        thinks about their team — in the since-last-review account."""
+        from ..games.pokemon_red.evolution import evolution_line
+        party = [m for m in party if int(m.get("level") or 0) > 0 and str(m.get("species") or "").lower()
+                 not in ("", "no mon")]            # mid-catch reads show an empty 'No Mon L0' slot
+        names = [str(m.get("nickname") or m.get("species")) for m in party]
+        prev = getattr(self, "_party_names", None)
+        self._party_names = names
+        if prev is None:
+            return
+        for m in party:
+            nm = str(m.get("nickname") or m.get("species"))
+            if names.count(nm) > prev.count(nm):
+                ev = evolution_line(m.get("species"))
+                self.episode.record(self.session.step, "discovery",
+                                    text=f"new team member: {m.get('species')} L{m.get('level')}"
+                                         + (f" (evolves: {ev})" if ev else " (does not evolve)"))
+
     def _observe_progress(self, obs) -> None:
         gs, player = obs.game_state or {}, obs.player
         party = gs.get("party") or []
+        self._observe_party(party)
         sig = (len(set(self._map_history)), self.heard.distinct_count(),
                tuple(sorted((str(i.get("item")), i.get("qty")) for i in (gs.get("items") or []))),
                (gs.get("badges") or {}).get("count"), sum(int(m.get("level") or 0) for m in party),

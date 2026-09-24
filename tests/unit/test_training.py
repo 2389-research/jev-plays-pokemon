@@ -115,3 +115,42 @@ def test_loop_moves_the_lead_to_the_front_once(monkeypatch):
     assert loop._maybe_apply_lead() is True and calls == [1]
     assert loop._maybe_apply_lead() is False and calls == [1]          # already in front
     assert any(k == "lead_set" for k, _ in events)
+
+
+# ---- L1 learns from losing (verify-train: lost to Misty's Starmie, healed, walked straight back in) ----
+def test_battle_result_classification():
+    from pokemon_agent.agent.reason_loop import ReasoningLoop
+    f = ReasoningLoop._classify_battle
+    assert f(alive=0, enemy_hp=12, party_grew=False) == "lost"
+    assert f(alive=2, enemy_hp=0, party_grew=False) == "won"
+    assert f(alive=3, enemy_hp=5, party_grew=True) == "caught"
+    assert f(alive=3, enemy_hp=5, party_grew=False) == "ended"
+
+
+def test_a_lost_battle_is_recorded_for_l1_and_triggers_a_review():
+    from pokemon_agent.actions.controller import ActionController
+    from pokemon_agent.agent.plan import ReflectionPlan
+    from pokemon_agent.agent.reason_loop import ReasoningLoop
+    from pokemon_agent.agent.reasoner import ReasonStep
+    from pokemon_agent.agent.session import Session
+    from pokemon_agent.core.models import GoalState, WaitAction
+    from pokemon_agent.emulator.fake_emulator import FakeEmulator
+    from pokemon_agent.observations.builder import ObservationBuilder
+
+    class Stub:
+        def reflect(self, **kw):
+            return ReflectionPlan(next_objective="go"), 0, {}
+
+        def step(self, **kw):
+            return ReasonStep(location="", objective="", reasoning="", action=WaitAction(frames=1)), 0, {}
+    events = []
+    emu = FakeEmulator(map_id=65)
+    loop = ReasoningLoop(builder=ObservationBuilder(emu), controller=ActionController(emu), reasoner=Stub(),
+                         session=Session(GoalState(primary="g", current="g")), vision=False, reflect_every=100,
+                         goal_map=2, on_event=lambda k, p: events.append((k, p)))
+    loop._battle_track = {"start": 10, "where": "Cerulean Gym", "trainer": True, "opponents": ["Staryu", "Starmie"],
+                          "alive": 0, "enemy_hp": 30, "party_size": 5}
+    loop._record_battle_end(party_size_now=5)
+    rec = loop._battle_log[-1]
+    assert rec["result"] == "lost" and rec["opponents"] == ["Staryu", "Starmie"] and rec["where"] == "Cerulean Gym"
+    assert loop._l1_event is True and any(k == "battle_lost" for k, _ in events)

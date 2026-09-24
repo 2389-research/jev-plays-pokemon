@@ -222,7 +222,8 @@ answer from what's given, do not search.
 Usually the plan is fine — say so. Say change=true only when something is clearly wrong: a step
 that can't complete, a stuck/blocked signal, an emergency (e.g. low HP with no heal step in the
 plan). A goal that already shows met is not by itself a reason to change; say change=true for goals
-only if a goal is clearly wrong or impossible. A standing catch goal that SIGNALS.catch says is not ready
+only if a goal is clearly wrong or impossible. A battle LOST recently (SIGNALS.recent_battles) is a reason to change — the
+plan needs to adapt, not repeat. A standing catch goal that SIGNALS.catch says is not ready
 (e.g. no Poké Balls) IS a reason to change — the plan needs a step to fix it or the goal dropped.
 
 Return ONLY JSON: {"change": <true|false>, "why": "<one short sentence>"}"""
@@ -385,6 +386,9 @@ it's worth it: catching wild Pokémon is how the team grows. Catching needs Pok�
 at a Poké Mart) and a free party slot; set a standing CATCH goal to have the battle layer catch the
 species you want. SIGNALS.catch shows your current catch goal and whether it can fire right now (ready,
 and why not — e.g. no Poké Balls).
+LEARN FROM LOSSES — SIGNALS.recent_battles lists your last fights and their results. If you LOST (e.g.
+to a gym leader), don't simply heal and retry the same way: change something first — train team members,
+buy Potions, pick a better lead or a counter type — and say in the notepad what you're changing and why.
 TRAINING — only Pokémon that take part in a battle earn EXP, and the LEAD (first in the party) starts
 every battle, so a bench that never leads stays weak. Training a member is your call: set "lead":
 "<nickname>" (the harness moves it to the front of the party), then grind with a step whose done_when is

@@ -241,6 +241,9 @@ class ReasoningLoop:
         self._battle_wild = False
         self._talk_npc = None                    # npc_key of the NPC we're about to talk to (F2 rotation)
         self._lead_retry_at = 0                  # training: next step a failed lead swap may be retried
+        # battle record for L1 (SIGNALS.recent_battles): the live battle's tracking + the last few results
+        self._battle_track: dict | None = None
+        self._battle_log: deque = deque(maxlen=6)
         # conversation/script gate (F5): last step routed to dialogue, consecutive forced waits, and
         # whether forced waiting is armed (a timeout disarms it until the script flag clears)
         self._last_dialog_step = -(10**9)
@@ -363,6 +366,7 @@ class ReasoningLoop:
             self._last_in_battle = False
             self._battle_objective = None
             self._note_battle_end(wild=self._battle_wild)
+            self._record_battle_end(party_size_now=len(read_party(self.controller.emu)))
 
         # --- FLOW ROUTER: menu is deterministic (RAM cursor); navigate-vs-dialogue is a calibrated
         # Jev choice (falls back to the deterministic ctx_kind detector when Jev isn't wired). Replaces
@@ -541,6 +545,7 @@ class ReasoningLoop:
             from .signals import catch_status
             signals["catch"] = catch_status(self._plan.battle_goals, read_items(emu), signals["party"])
             signals["lead"] = (self._plan.battle_goals or {}).get("lead")
+            signals["recent_battles"] = list(self._battle_log)[-4:]
             cur_mid = obs.player.map_id if obs.player else None
             context = {
                 "current_map": {"id": cur_mid,
@@ -2037,6 +2042,48 @@ class ReasoningLoop:
         self._grind_qid = None
         self._l1_event = True
 
+    @staticmethod
+    def _classify_battle(*, alive: int, enemy_hp: int, party_grew: bool) -> str:
+        if alive == 0:
+            return "lost"
+        if party_grew:
+            return "caught"
+        if enemy_hp == 0:
+            return "won"
+        return "ended"      # fled / ran / other
+
+    def _track_battle(self, emu) -> None:
+        """Every battle step: who we're facing and how many of ours can still fight (for the result)."""
+        from ..games.pokemon_red import battle as _b
+        from ..games.pokemon_red.game_state import read_battle
+        if not _b.in_battle(emu):
+            return
+        if self._battle_track is None:
+            mid = emu.read_memory(0xD35E)
+            self._battle_track = {"start": self.session.step, "where": map_name(mid),
+                                  "trainer": _b.is_trainer_battle(emu), "opponents": [],
+                                  "party_size": len(read_party(emu))}
+        b = read_battle(emu) or {}
+        sp = (b.get("enemy") or {}).get("species")
+        if sp and sp != "?" and sp not in self._battle_track["opponents"]:
+            self._battle_track["opponents"].append(sp)
+        self._battle_track["enemy_hp"] = (b.get("enemy") or {}).get("hp", 0)
+        self._battle_track["alive"] = sum(1 for m in read_party(emu) if int(m.get("hp") or 0) > 0)
+
+    def _record_battle_end(self, *, party_size_now: int) -> None:
+        """Close the battle record. A LOSS arms an L1 review: retrying the same way rarely works."""
+        t, self._battle_track = self._battle_track, None
+        if not t:
+            return
+        result = self._classify_battle(alive=t.get("alive", 1), enemy_hp=t.get("enemy_hp", 1),
+                                     party_grew=party_size_now > t.get("party_size", party_size_now))
+        rec = {"step": self.session.step, "where": t["where"], "trainer": t["trainer"],
+               "opponents": t["opponents"], "result": result}
+        self._battle_log.append(rec)
+        if result == "lost":
+            self._l1_event = True
+            self.on_event("battle_lost", rec)
+
     def _note_battle_end(self, *, wild: bool) -> None:
         if wild:
             self._last_wild_battle_end = self.session.step
@@ -2292,6 +2339,7 @@ class ReasoningLoop:
                 "step": self.session.step, "objective": self._battle_objective,
                 "enemy": (state.get("enemy") or {}).get("species"),
                 "trainer": state.get("is_trainer")})
+        self._track_battle(emu)
         self._last_in_battle = battle.in_battle(emu)
 
         # the party-SWITCH flow ('change POKEMON?' / 'Bring out which?' / 'already out!'): the default A

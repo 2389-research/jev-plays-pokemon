@@ -445,7 +445,7 @@ class TypeSafeReasoner:
         state = {"task": "Pick the person to walk up to and talk to for the current objective.",
                  "objective": objective, "candidates": candidates}
         instr = ("Choose the ONE person who best fits OBJECTIVE — the specific NPC the plan needs "
-                 "(e.g. Professor Oak for a lab errand, a shop CLERK to buy/collect, the NURSE to heal). "
+                 "(e.g. the person an errand names, a shop CLERK to buy/collect, the NURSE to heal). "
                  "Prefer someone NOT already talked to unless the objective needs them again.")
         resp = self.client.system_one(state=state, questions={"npc": Choice(instructions=instr, criteria=criteria)})
         ans = resp.answers["npc"]

@@ -72,7 +72,7 @@ walks the agent to the tile you choose, and you are asked again once it arrives 
 closer — so pick the best next stepping-stone, not the whole path.
 
 WHAT YOU MUST DO — OBJECTIVE and DESTINATION tell you where you are going and why (e.g. "reach
-Viridian Mart — next hop is Viridian City to the north"). Always move toward it.
+<a building> — next hop is <the town it's in> to the north"). Always move toward it.
 
 MEMORY — you are NOT memoryless. RECENT_TRAIL is your last several frames as
 "(x,y)mMAP action -> result" (watch for bouncing between the same tiles). RECENT_WAYPOINTS is
@@ -157,19 +157,19 @@ unblocked.
 For EACH step give an ACCEPTANCE CRITERION (done_when) — the checkable condition that PROVES the
 step is complete (like a quest objective), so a step can't be marked done prematurely. Choose:
   "on_map"            — arrived on that map (default for pure travel).
-  "has_item:<name>"   — that item is now in the bag (talk to the Mart clerk -> has_item:Oak's Parcel).
-  "no_item:<name>"    — that item is gone (delivered/used: give parcel to Oak -> no_item:Oak's Parcel).
+  "has_item:<name>"   — that item is now in the bag (collect/buy it -> has_item:<item>).
+  "no_item:<name>"    — that item is gone (delivered/used: hand it over -> no_item:<item>).
   "level>=<N>"        — party reached level N.   "badges>=<N>" — earned N badges.
   "hp_frac>=<F>"      — party healed to fraction F of max HP (talk to a Poké Center nurse -> hp_frac>=0.95).
   "talked"            — had a conversation on that map (only when nothing more specific fits).
   "verify:<yes/no question>" — a verifier judges it from game state, when none of the above fit.
 
-When "talk" is true, set "who" to the NPC you must talk to (e.g. "Oak", "the Mart clerk") so the
+When "talk" is true, set "who" to the NPC you must talk to (e.g. "the Mart clerk", a named person) so the
 agent approaches the RIGHT person, not the nearest one.
 
 Return ONLY JSON:
 {"plan": "one-line summary",
- "steps": [{"map": <int map id>, "talk": <true|false>, "who": "<npc name to talk to, e.g. Oak>",
+ "steps": [{"map": <int map id>, "talk": <true|false>, "who": "<npc name to talk to>",
             "done_when": "<criterion>", "why": "<short>"}]}"""
 
 
@@ -186,8 +186,8 @@ The done_when is the checkable ACCEPTANCE CRITERION that proves a step is comple
 one of:
   "on_map"            — arrived on that map (default for pure travel).
   "talked"            — had a conversation on that map (only when nothing more specific fits).
-  "has_item:<name>"   — that item is now in the bag (talk to Mart clerk -> has_item:Oak's Parcel).
-  "no_item:<name>"    — that item is gone (delivered/used -> no_item:Oak's Parcel).
+  "has_item:<name>"   — that item is now in the bag (collect/buy it -> has_item:<item>).
+  "no_item:<name>"    — that item is gone (delivered/used -> no_item:<item>).
   "level>=<N>"        — party reached level N.   "badges>=<N>" — earned N badges.
   "hp_frac>=<F>"      — party healed to fraction F of max HP (Poké Center nurse -> hp_frac>=0.95).
   "verify:<yes/no question>" — a verifier judges it from game state, when none of the above fit.
@@ -201,7 +201,7 @@ gate requires) — ground it in the guide rather than guessing.
 WHAT TO RETURN — ONLY a JSON object:
   {"assessment": "<one line: how the plan is doing>",
    "change": <true|false>,
-   "mission": "<the overall mission, e.g. 'reach Pewter and beat Brock'>",
+   "mission": "<the overall mission, e.g. 'earn the next badge'>",
    "milestone": "<the current concrete sub-goal>",
    "add": [ <new step objects, each with a VALID done_when> ],
    "remove": [ <step ids to drop from the current plan> ]}
@@ -266,14 +266,14 @@ MEMORY — what you have already tried and been told (harness-written ground tru
     ignored because the step is active, an add that duplicated an existing step). Don't repeat an edit
     that was ignored — it will be ignored again.
 PLAN status "active" = in progress. An action step at another map is active WHILE travelling there:
-"doing" says what it's doing now (e.g. "travelling to Viridian Mart"). That is normal, not a bug —
+"doing" says what it's doing now (e.g. "travelling to <its map>"). That is normal, not a bug —
 the step can't be removed and doesn't need reordering.
 When you're stuck and don't know the way, do what a player does: explore — go through the doors you
 haven't tried, talk to the people you haven't talked to (an explore step, see DECIDE).
 
 TEAM — the agent owns a TEAM, not just its starter. A single Pokémon is fragile: when the lead
-faints the run is over for that fight, and later gyms punish a one-type team (e.g. Misty's Water types,
-Lt. Surge's Electric). Growing and balancing the team is part of the long-term plan, and YOU decide when
+faints the run is over for that fight, and later gyms punish a one-type team (a gym leader's type
+can wall a team that's weak to it). Growing and balancing the team is part of the long-term plan, and YOU decide when
 it's worth it: catching wild Pokémon is how the team grows. Catching needs Poké Balls in ITEMS (bought
 at a Poké Mart) and a free party slot; set a standing CATCH goal to have the battle layer catch the
 species you want. SIGNALS.catch shows your current catch goal and whether it can fire right now (ready,
@@ -304,8 +304,8 @@ active step". Do NOT re-add or restate a step that already exists in the PLAN an
 already the active step) — repeating a step never helps and just thrashes the plan. ONLY add a step
 that is genuinely MISSING, and ONLY remove one that is truly impossible or already obsolete.
 
-GOALS — your own horizons, all held at once: PRIMARY = the long-term why (e.g. earn the Boulder
-Badge); SECONDARY = the current chapter (e.g. get to Pewter Gym with a team that can win); TERTIARY =
+GOALS — your own horizons, all held at once: PRIMARY = the long-term why (e.g. earn the next
+badge); SECONDARY = the current chapter (e.g. reach the next gym with a team that can win); TERTIARY =
 the immediate focus, which may be a diversion (heal, shop, grind, a story errand). GOALS and NOTEPAD
 follow the same rule as steps: omit "goals", "notepad" and "catch" unless something actually changed
 — a goal was achieved, you are diverting, or you learned something worth keeping. Rewording is not a
@@ -362,43 +362,44 @@ done_when MUST be exactly one of (this is the full grammar — nothing else pars
                                  expensive and fuzzy.
 
 WORKED EXAMPLES (one per objective class — copy the SHAPE, adapt the specifics):
-  pickup an item  -> {"kind":"action","map":42,"talk":true,"who":"the Mart clerk",
-                       "done_when":"has_item:Oak's Parcel","why":"buy/collect the parcel"}
-  buy at a Mart   -> {"kind":"action","map":56,"talk":true,"who":"the Mart clerk",
+(<angle brackets> are placeholders: put REAL map ids from MAPS and real names there.)
+  pickup an item  -> {"kind":"action","map":<map where it is>,"talk":true,"who":"<who hands it over>",
+                       "done_when":"has_item:<item>","why":"collect the item"}
+  buy at a Mart   -> {"kind":"action","map":<a Mart's map>,"talk":true,"who":"the Mart clerk",
                        "done_when":"has_item:Potion","why":"buy Potions before the gym"}
                       Talking to a Mart clerk opens the shop and the buy runs automatically. Add this
                       when you have money and want consumables (e.g. Potions before a gym). Only items
                       on that Mart's shelf are bought — each Mart stocks different items (search the KB).
                       A wedged step's "why_wedged" says why it failed (e.g. the shelf it saw): don't
                       re-add the same step where it already failed.
-  deliver an item -> {"kind":"action","map":0,"talk":true,"who":"Oak",
-                       "done_when":"no_item:Oak's Parcel","why":"hand the parcel to Oak"}
+  deliver an item -> {"kind":"action","map":<recipient's map>,"talk":true,"who":"<recipient>",
+                       "done_when":"no_item:<item>","why":"hand the item over"}
                       CANONICAL: deliver -> no_item:<item>. The item LEAVING the bag proves
                       delivery. Do NOT model a delivery as has_item:<something else>.
-  use an object   -> {"kind":"action","map":88,"talk":true,"who":"Bill's PC",
-                       "done_when":"verify:did the machine run?","why":"run the Cell Separator"}
+  use an object   -> {"kind":"action","map":<its map>,"talk":true,"who":"<the object, e.g. a PC>",
+                       "done_when":"verify:<did it do what you needed?>","why":"use the machine"}
                       "who" can name a THING you press A on (a PC, machine, trash can, statue) —
                       current_map.objects lists them; current_map.people lists who is here now.
-  heal            -> {"kind":"action","map":41,"talk":true,"who":"the Nurse",
+  heal            -> {"kind":"action","map":<a Poké Center's map>,"talk":true,"who":"the Nurse",
                        "done_when":"hp_frac>=1.0","why":"heal the party at the Poké Center"}
                       Add a step like this ONLY when SIGNALS shows low HP / emergency_heal — don't
                       invent healing from generic caution.
-  grind           -> {"kind":"action","map":31,"talk":false,"who":null,
-                       "done_when":"level>=12","why":"grind in the grass toward the goal"}
-  earn a badge    -> {"kind":"action","map":2,"talk":true,"who":"Brock",
-                       "done_when":"badges>=1","why":"beat the gym leader"}
-  reach a place   -> {"kind":"travel","map":1,"talk":false,"who":null,
-                       "done_when":"on_map","why":"head to Viridian City"}
+  grind           -> {"kind":"action","map":<a map with wild grass>,"talk":false,"who":null,
+                       "done_when":"level>=<N>","why":"grind in the grass toward the goal"}
+  earn a badge    -> {"kind":"action","map":<the gym's map>,"talk":true,"who":"<the gym leader>",
+                       "done_when":"badges>=<current badges + 1>","why":"beat the gym leader"}
+  reach a place   -> {"kind":"travel","map":<destination map>,"talk":false,"who":null,
+                       "done_when":"on_map","why":"head to <place>"}
                       Routing knows the real paths — through caves, gates and maps that are split into
-                      separate parts (Route 4's two halves are joined only THROUGH Mt. Moon). To cross a
-                      dungeon, add ONE travel step to the place beyond it (e.g. Cerulean City), not a step
-                      per map you pass through: "go to Route 4" is already true at the cave entrance.
-  story beat not  -> {"kind":"action","map":12,"talk":true,"who":"the guard",
+                      separate parts (one route can have halves joined only THROUGH a cave). To cross a
+                      dungeon, add ONE travel step to the place beyond it, not a step per map you pass
+                      through: "go to <the route>" is already true at the cave entrance.
+  story beat not  -> {"kind":"action","map":<its map>,"talk":true,"who":"the guard",
   RAM-trackable        "done_when":"verify:did the guard let us pass?","why":"..."}
-  explore         -> {"kind":"explore","map":3,"who":"door to Cerulean Trashed House (never visited) at (27,11)",
-                       "why":"find the way south"}
+  explore         -> {"kind":"explore","map":<this map>,"who":"<an entry copied from UNEXPLORED_HERE>",
+                       "why":"find the way forward"}
                       "who" (optional) = what to try first: COPY one entry from UNEXPLORED_HERE (or give
-                      its coordinates, e.g. "(27,11)").
+                      its coordinates, e.g. "(12,7)").
                       Visits what's unexplored on that map — doors to places never visited, people not
                       talked to, objects not checked (UNEXPLORED_HERE), your "who" first if given — until
                       something NEW turns up (a new place or something new heard); then you review again.
@@ -406,16 +407,18 @@ WORKED EXAMPLES (one per objective class — copy the SHAPE, adapt the specifics
                       failing — instead of re-adding the failed step. No done_when needed.
 
 PLACEMENT — "after" says where a new step goes. Leave it null (the default) for something to do
-NEXT, before the rest of the plan — emergency heals and replacements for a wedged step are always
-NEXT. Set
+NEXT: right AFTER the ACTIVE step finishes, before the rest of the plan (replacements for a wedged step
+go here). NEXT never stops the active step — if something can't wait for the active step to finish
+(e.g. an emergency heal while the active step walks through grass), INTERRUPT it (see INTERRUPTING
+under MEMORY). Set
 "after": "<id>" only when the step must come AFTER an existing step that hasn't happened yet; the id
 must be from PLAN with status active or pending. "after" is NOT inherited from the step listed before
 it — put it on EVERY step that must wait. Several steps with the same "after" run in the order you list
-them. "end" appends after everything. Example: PLAN [q4 travel->Viridian City (active), q5 buy Potions
-at the Viridian Mart (pending)]; grinding on Route 2 and then entering Viridian Forest should both wait
-until after shopping ->
-{"kind":"action","map":13,"talk":false,"who":null,"done_when":"level>=10","why":"grind","after":"q5"}
-{"kind":"travel","map":51,"talk":false,"who":null,"done_when":"on_map","why":"forest","after":"q5"}
+them. "end" appends after everything. Example: PLAN [q4 travel-><town> (active), q5 buy Potions
+at <the town's Mart> (pending)]; grinding on <the next route> and then entering <the next area>
+should both wait until after shopping ->
+{"kind":"action","map":<route id>,"talk":false,"who":null,"done_when":"level>=10","why":"grind","after":"q5"}
+{"kind":"travel","map":<area id>,"talk":false,"who":null,"done_when":"on_map","why":"next area","after":"q5"}
 
 RULES:
   - Emit MINIMAL steps: only what's missing from the existing PLAN, anchored to it — don't repeat
@@ -428,8 +431,8 @@ RULES:
     "verify:" whenever one applies.
 
 TEAM — the agent owns a TEAM, not just its starter. A single Pokémon is fragile: when the lead
-faints the run is over for that fight, and later gyms punish a one-type team (e.g. Misty's Water types,
-Lt. Surge's Electric). Growing and balancing the team is part of the long-term plan, and YOU decide when
+faints the run is over for that fight, and later gyms punish a one-type team (a gym leader's type
+can wall a team that's weak to it). Growing and balancing the team is part of the long-term plan, and YOU decide when
 it's worth it: catching wild Pokémon is how the team grows. Catching needs Poké Balls in ITEMS (bought
 at a Poké Mart) and a free party slot; set a standing CATCH goal to have the battle layer catch the
 species you want. SIGNALS.catch shows your current catch goal and whether it can fire right now (ready,

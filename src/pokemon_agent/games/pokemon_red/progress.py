@@ -33,12 +33,9 @@ def _map_id_for(name: str) -> int | None:
     return _NAME_TO_ID.get(name)
 
 
-# Milestones that key off being *on* a specific map are declared by name here,
-# so the id is resolved from the table (never hardcoded).
-_MILESTONE_MAP_NAMES = {
-    "entered_viridian_forest": "Viridian Forest",
-    "reached_pewter": "Pewter City",
-}
+# No story-specific milestones (they were Pallet->Pewter-era: "reached_pewter", "beat_brock"): the
+# agent sets its own goals; progress here is only what's true for any point in the game.
+_MILESTONE_MAP_NAMES: dict[str, str] = {}
 
 # Names we failed to resolve at import time (their milestones are forced False).
 UNRESOLVED_MILESTONES: dict[str, str] = {
@@ -67,10 +64,9 @@ def read_progress(emu) -> Progress:
     party_levels = [mon["level"] for mon in read_party(emu)]
     money = read_money(emu)
 
-    milestones: dict[str, bool] = {
-        "got_starter": party_size >= 1,
-        "beat_brock": badges >= 1,
-    }
+    milestones: dict[str, bool] = {"got_starter": party_size >= 1}
+    for n in range(1, 9):                       # one per badge, whichever order they're earned in
+        milestones[f"badge_{n}"] = badges >= n
     for key, name in _MILESTONE_MAP_NAMES.items():
         target = _map_id_for(name)
         # Unresolvable name -> milestone can never be True (no guessed id).

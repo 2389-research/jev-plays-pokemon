@@ -59,39 +59,17 @@ def test_milestone_got_starter():
     assert read_progress(MemFake({WPARTYCOUNT: 3})).milestones["got_starter"] is True
 
 
-def test_milestone_beat_brock():
-    assert read_progress(MemFake({WBADGES: 0})).milestones["beat_brock"] is False
-    assert read_progress(MemFake({WBADGES: 0x01})).milestones["beat_brock"] is True
-
-
-def test_milestone_map_based_booleans():
-    # Viridian Forest == 51, Pewter City == 2 (resolved from MAP_NAMES_RAW).
-    vf = read_progress(MemFake({WCURMAP: 51})).milestones
-    assert vf["entered_viridian_forest"] is True
-    assert vf["reached_pewter"] is False
-
-    pw = read_progress(MemFake({WCURMAP: 2})).milestones
-    assert pw["reached_pewter"] is True
-    assert pw["entered_viridian_forest"] is False
-
-    pallet = read_progress(MemFake({WCURMAP: 0})).milestones
-    assert pallet["entered_viridian_forest"] is False
-    assert pallet["reached_pewter"] is False
-
-
-def test_all_milestone_map_names_resolved():
-    # Guardrail: both map-based milestones resolve to a real id.
-    assert progress.UNRESOLVED_MILESTONES == {}
+def test_badge_milestones_are_general():
+    assert read_progress(MemFake({WBADGES: 0})).milestones["badge_1"] is False
+    ms = read_progress(MemFake({WBADGES: 0b00000111})).milestones
+    assert ms["badge_1"] and ms["badge_3"] and not ms["badge_4"]
 
 
 def test_milestone_keys_exact():
+    """No story-specific (map-named) milestones: only what's true at any point in the game."""
     ms = read_progress(MemFake({})).milestones
-    assert set(ms) == {
-        "got_starter",
-        "entered_viridian_forest",
-        "reached_pewter",
-        "beat_brock",
-    }
+    assert set(ms) == {"got_starter"} | {f"badge_{n}" for n in range(1, 9)}
+    assert progress.UNRESOLVED_MILESTONES == {}
 
 
 def test_progress_vector_flat_scalars():

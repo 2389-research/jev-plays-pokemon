@@ -209,7 +209,7 @@ SUMMARIZE_SYSTEM = """You keep the long-term memory of an agent playing Pokémon
 PREVIOUS (the summary so far) and NEW (things people, signs and objects said, with who and where).
 Write an updated summary of what's worth remembering: hints, directions, requests, warnings, where
 things are, who wants what, and anything that suggests a way forward (e.g. "a bush blocks the path
-by the Cerulean shop; someone said there might be a way around"). Keep facts and leads; drop small
+by the town's shop; someone said there might be a way around"). Keep facts and leads; drop small
 talk. Name places and people. Stay under {limit} characters.
 Return ONLY JSON: {{"summary": "<text>"}}"""
 

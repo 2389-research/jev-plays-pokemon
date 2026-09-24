@@ -84,7 +84,7 @@ Each turn you receive:
   (what people/signs actually said). Do NOT assume an interaction worked unless a dialog
   appeared. If pressing A did nothing, reposition (a different adjacent tile / facing).
   * In battle, choose moves using party/enemy HP. If party is empty you still need
-    a starter Pokémon — talk to Prof. Oak to get one.
+    a starter Pokémon — find who gives one out (the dialogue so far usually says).
 
 Coordinate rule: x increases EAST, y increases SOUTH. To reach an exit tile:
 if exit.x > your x, go EAST; if exit.x < your x, go WEST; if exit.y > your y, go
@@ -132,7 +132,7 @@ Reflect honestly:
 - Are you circling the same tiles without progress? If so, you are NOT exploring —
   the answer is usually in the '?' (unexplored) parts of MAP_VIEW. Name a specific
   unexplored area to go check.
-- If an NPC you need (e.g. Prof. Oak) is visible but you haven't talked to them, the
+- If an NPC you need (e.g. someone the dialogue told you to see) is visible but you haven't talked to them, the
   plan is to walk adjacent and interact.
 - Use SOCIAL_MEMORY: follow instructions the game already gave you; don't redo done things.
 

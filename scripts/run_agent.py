@@ -98,9 +98,9 @@ def main() -> None:
                     help="continue a previous recorded run: load latest.state + latest.mem.json from "
                          "this record-dir (e.g. runs/full-run-20260921-154251)")
     ap.add_argument("--goal-map", type=int, default=None,
-                    help="travel-target map id for the route hint (e.g. 2 = Pewter City)")
+                    help="OPTIONAL legacy hint: a map to head for when L1 has no plan yet (L1 sets its own goals)")
     ap.add_argument("--level-target", type=int, default=0,
-                    help="grind the party to >= this level before pushing to the goal (readiness need)")
+                    help="OPTIONAL legacy hint: a party level the battle layer grinds toward (L1 sets its own)")
     ap.add_argument("--no-vision", action="store_true",
                     help="reason mode: navigate from TEXT state only (fast text model, no screenshot)")
     ap.add_argument("--model", default=None)
@@ -264,7 +264,7 @@ def main() -> None:
                              low_conf_reflect=low_conf_reflect, memory=memory,
                              checkpoint_every=args.checkpoint_every,
                              checkpoint_dir=(ckpt_dir if args.checkpoint_every else None),
-                             goal_map=args.goal_map, level_target=args.level_target,
+                             goal_map=args.goal_map, level_target=args.level_target, autonomous=True,
                              strategist_provider=strategist_provider, knowledge=knowledge,
                              pather=args.pather, l1_every=args.l1_every,
                              capture_mode=args.capture, on_event=on_event_r)

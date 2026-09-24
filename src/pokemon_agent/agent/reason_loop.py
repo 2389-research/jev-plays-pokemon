@@ -107,6 +107,7 @@ class ReasoningLoop:
         checkpoint_dir: str | Path | None = None,
         goal_map: int | None = None,
         level_target: int = 0,
+        autonomous: bool = False,
         strategist_provider=None,
         knowledge=None,
         recorder=None,
@@ -178,7 +179,8 @@ class ReasoningLoop:
         # NeedsArbiter is no longer consulted here; needs flow into L1 as signals + the
         # near-faint emergency-heal reflex (signals.needs_emergency_heal).
         self.planner = None
-        if goal_map is not None or level_target > 0:
+        # L1 owns the plan when autonomous (the agent sets its own goals) or when a legacy goal is given
+        if autonomous or goal_map is not None or level_target > 0:
             from .planner_llm import Planner
             # the LLM planner needs a chat_json provider for travel-target selection: the
             # generative reasoner exposes it directly, or via its reflector (TypeSafe case).
@@ -668,6 +670,12 @@ class ReasoningLoop:
                     self._plan_steps,
                     {"add": prop.get("add", []), "remove": prop.get("remove", [])},
                     next_id=self._next_qid, on_event=_on_reconcile, allow_active_removal=allow_active)
+                act = next((s for s in self._plan_steps if s.status == "active"), None)
+                if act is not None:          # where did the new steps land? (NEXT = after the active step)
+                    new_ids = [s.id for s in self._plan_steps if s.id not in status_before]
+                    if new_ids:
+                        feedback.append(f"added {', '.join(new_ids)}: they run AFTER the active step {act.id} "
+                                        f"({self._active_doing(obs)}) finishes — interrupt it if they can't wait")
                 self._l1_feedback = feedback
                 # a provisional bootstrap default (generic goal-travel) is SUPERSEDED the moment L1
                 # supplies a real step — otherwise reconcile keeps it first (adds go after the active

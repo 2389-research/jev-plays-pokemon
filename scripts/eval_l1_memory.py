@@ -184,7 +184,9 @@ def review(ctx, prop):
     active = [s for s in ctx["plan"] if s["status"] == "active"]
     aid = active[0]["id"] if active else None
     if not prop or aid not in (prop.get("remove") or []):
-        return False, False, "no interrupt"
+        return False, False, ("no interrupt: " + (f"remove={prop.get('remove')} adds=" + str(
+            [(a.get("kind"), a.get("map"), a.get("done_when"), a.get("after")) for a in prop.get("add") or []])
+            if prop else "no change"))
     why = ((prop.get("interrupt_active") or {}).get("why") or "").strip()
     if not why:
         return True, False, "removed the active step with no interrupt reason (ignored)"
@@ -221,8 +223,18 @@ def _travel_phase_graded():
     return ctx, hard, grade
 
 
+def urgent_interrupt_two_rounds():
+    """Like urgent-interrupt, but as the loop runs it: if review 1 only queues a heal (which lands AFTER
+    the active step), review 2 sees the loop's feedback saying so. PASS = an approved interrupt within
+    two reviews."""
+    ctx, hard, grade1 = urgent_interrupt()
+    ctx["_two_rounds"] = True
+    return ctx, hard, grade1
+
+
 SCENARIOS = {"stuck-retry": stuck_retry, "heard-hint": heard_hint, "no-overreact": no_overreact,
-             "travel-phase": _travel_phase_graded, "urgent-interrupt": urgent_interrupt}
+             "travel-phase": _travel_phase_graded, "urgent-interrupt": urgent_interrupt,
+             "urgent-2rounds": urgent_interrupt_two_rounds}
 
 
 def main() -> int:
@@ -250,8 +262,23 @@ def main() -> int:
         for i in range(a.n):
             ctx, hard, grade = build()
             trace = []
-            prop = run_l1_pipeline(None, copy.deepcopy(ctx), planner, hard_event=hard, on_trace=trace.append)
+            c1 = {k: v for k, v in ctx.items() if k != "_two_rounds"}
+            prop = run_l1_pipeline(None, copy.deepcopy(c1), planner, hard_event=hard, on_trace=trace.append)
             ok, detail = grade(prop)
+            if not ok and ctx.get("_two_rounds"):
+                active = next(x for x in c1["plan"] if x["status"] == "active")
+                fb = []
+                if prop and prop.get("add"):
+                    fb.append(f"added {len(prop['add'])} step(s): they run AFTER the active step {active['id']} "
+                              f"({active.get('doing')}) finishes — interrupt it if they can't wait")
+                if prop and active["id"] in (prop.get("remove") or []):
+                    fb.append(f"remove {active['id']} IGNORED: it is the ACTIVE step ({active.get('doing')}); to "
+                              f"replace it add \"interrupt_active\": {{\"why\": ...}} (a reviewer checks it)")
+                c2 = copy.deepcopy(c1)
+                c2["since_last_review"] = {**c2.get("since_last_review", {}), "steps": 5, "your_last_edits": fb}
+                prop = run_l1_pipeline(None, c2, planner, hard_event=hard, on_trace=trace.append)
+                ok, detail = grade(prop)
+                detail = "round 2: " + detail
             passes += ok
             assess = next((t.get("assessment") for t in trace if t.get("stage") == "brainstorm"), "") or ""
             print(f"   run {i + 1}: {'PASS' if ok else 'FAIL'}  {detail}")

@@ -65,7 +65,7 @@ Do all of this:
    list short (2-5 items). Exactly one should be "active".
 3. Update LANDMARKS: carry forward useful ones and add newly-seen points of interest, each
    as a short string with a location (e.g. "stairs: bottom-left of this room",
-   "exit door: north wall", "Prof. Oak's lab: south end of town").
+   "exit door: north wall", "the big lab: south end of town").
 4. Set NEXT_CHECKPOINT: one concrete, reachable sub-target to walk to now.
 5. Update MEMORY: carry forward prior facts, add what you just learned/accomplished, drop
    nothing important. A few short sentences.

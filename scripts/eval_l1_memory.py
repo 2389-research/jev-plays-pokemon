@@ -154,7 +154,30 @@ def no_overreact():
     return ctx, False, grade
 
 
-SCENARIOS = {"stuck-retry": stuck_retry, "heard-hint": heard_hint, "no-overreact": no_overreact}
+def travel_phase():
+    """runs/fresh-squirtle step 55: an action step at the Viridian Mart is ACTIVE while the agent walks
+    Route 1 (its travel half). L1 read that as a bug and re-issued remove+add 15x (silently ignored).
+    Now it sees "doing" + what happened to its last edit. PASS = q2 is left alone."""
+    ctx = captured("fresh-squirtle-20260924", 55)
+    for s in ctx["plan"]:
+        if s["status"] == "active":
+            s["doing"] = "travelling to Viridian Mart"
+    ctx.update({"since_last_review": {"steps": 5, "your_last_edits": [
+        "remove q2 IGNORED: it is the ACTIVE step (travelling to Viridian Mart); active steps can't be removed",
+        "add (map 42, has_item:Poke Ball>=5) IGNORED: step q2 already covers it"]},
+        "stall": {"steps_without_progress": 4}})
+
+    def grade(prop):
+        if prop is None:
+            return True, "triage: no change"
+        bad = "q2" in (prop.get("remove") or []) or any(
+            int(a.get("map", -1)) == 42 and "Poke Ball" in str(a.get("done_when")) for a in prop.get("add") or [])
+        return not bad, f"remove={prop.get('remove')} adds={[(a.get('kind'), a.get('map')) for a in prop.get('add') or []]}"
+    return ctx, False, grade
+
+
+SCENARIOS = {"stuck-retry": stuck_retry, "heard-hint": heard_hint, "no-overreact": no_overreact,
+             "travel-phase": travel_phase}
 
 
 def main() -> int:

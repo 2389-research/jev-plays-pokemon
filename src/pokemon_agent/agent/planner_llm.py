@@ -228,7 +228,9 @@ plan needs to adapt, not repeat. A standing catch goal that SIGNALS.catch says i
 MEMORY: SINCE_LAST_REVIEW is what happened since the last review (maps entered, plan changes and why,
 what people said). ATTEMPTS lists steps that failed before, with counts. STALL.steps_without_progress
 counts steps with nothing new; STALL.critique is a reviewer's diagnosis. The same step failing again
-(ATTEMPTS), maps entered over and over, or a critique ARE reasons to change.
+(ATTEMPTS), maps entered over and over, or a critique ARE reasons to change. An ACTIVE step whose
+"doing" is "travelling to <its map>" is working normally — NOT a reason to change; an edit listed as
+IGNORED in SINCE_LAST_REVIEW.your_last_edits is not a reason to try it again.
 
 Return ONLY JSON: {"change": <true|false>, "why": "<one short sentence>"}"""
 
@@ -255,6 +257,12 @@ MEMORY — what you have already tried and been told (harness-written ground tru
   - UNEXPLORED_HERE: on this map, doors to places you've never been, people you haven't talked to,
     objects you haven't checked.
   - STALL: steps without progress, plus a reviewer's CRITIQUE when you've been stuck a while.
+  - SINCE_LAST_REVIEW.your_last_edits: what happened to YOUR previous edits (e.g. a remove that was
+    ignored because the step is active, an add that duplicated an existing step). Don't repeat an edit
+    that was ignored — it will be ignored again.
+PLAN status "active" = in progress. An action step at another map is active WHILE travelling there:
+"doing" says what it's doing now (e.g. "travelling to Viridian Mart"). That is normal, not a bug —
+the step can't be removed and doesn't need reordering.
 When you're stuck and don't know the way, do what a player does: explore — go through the doors you
 haven't tried, talk to the people you haven't talked to (an explore step, see DECIDE).
 

@@ -618,6 +618,7 @@ class ReasoningLoop:
                 "plan": [{"id": s.id, "map": s.map, "kind": s.kind, "talk": s.talk,
                           **({"who": s.who} if s.who else {}),
                           "done_when": s.done_when, "status": s.status,
+                          **({"doing": self._active_doing(obs)} if s.status == "active" else {}),
                           **({"why_wedged": s.wedge_reason} if s.status == "wedged" and s.wedge_reason else {})}
                          for s in self._plan_steps],
                 "signals": signals,
@@ -640,12 +641,31 @@ class ReasoningLoop:
                       if prop is not None else None)
             if step_edit:
                 live_before = {s.id: s for s in self._plan_steps if s.status in ("pending", "active")}
+                status_before = {s.id: s.status for s in self._plan_steps}
+                feedback: list[str] = []
+                for rid in prop.get("remove") or []:
+                    st = status_before.get(str(rid))
+                    if st == "active":
+                        feedback.append(f"remove {rid} IGNORED: it is the ACTIVE step "
+                                        f"({self._active_doing(obs)}); active steps can't be removed")
+                    elif st == "done":
+                        feedback.append(f"remove {rid} ignored: already done")
+                    elif st is None:
+                        feedback.append(f"remove {rid} ignored: no such step")
+
+                def _on_reconcile(kind, payload):
+                    if kind == "l1_add_deduped":
+                        feedback.append(f"add (map {payload.get('map')}, {payload.get('done_when')}) IGNORED: "
+                                        f"step {payload.get('against')} already covers it")
+                    elif kind == "l1_anchor_fallback":
+                        feedback.append(f"after={payload.get('after')} not usable ({payload.get('reason')}); "
+                                        f"placed next instead")
+                    self.on_event(kind, {"step": self.session.step, **payload})
                 self._plan_steps = reconcile_quests(
                     self._plan_steps,
                     {"add": prop.get("add", []), "remove": prop.get("remove", [])},
-                    next_id=self._next_qid,
-                    on_event=lambda kind, payload: self.on_event(
-                        kind, {"step": self.session.step, **payload}))
+                    next_id=self._next_qid, on_event=_on_reconcile)
+                self._l1_feedback = feedback
                 # a provisional bootstrap default (generic goal-travel) is SUPERSEDED the moment L1
                 # supplies a real step — otherwise reconcile keeps it first (adds go after the active
                 # step) and the real plan sits behind a possibly story-gated default forever.
@@ -1839,6 +1859,21 @@ class ReasoningLoop:
         return unexplored(pg, player.map_id, comp, visited_maps=set(self._map_history),
                           npcs=(obs.game_state or {}).get("npcs") or [], used_tiles=used, skip=self._explore_skip)
 
+    def _active_doing(self, obs) -> str:
+        """What the active step is doing RIGHT NOW (an action step first travels to its map)."""
+        d, player = self._directive, obs.player
+        if d is None:
+            return "starting"
+        tm = d.target_map
+        if d.intent == Intent.TRAVEL:
+            return f"travelling to {map_name(tm)}" if tm is not None else "travelling"
+        if d.intent == Intent.EXPLORE:
+            return f"exploring {map_name(tm)}" if tm is not None else "exploring"
+        if d.intent in (Intent.TALK_TO, Intent.GRAB_ITEM):
+            return f"on {map_name(tm)}, {'talking to' if d.intent == Intent.TALK_TO else 'picking up'} " \
+                   f"{(d.target or {}).get('sprite') or 'someone'}"
+        return d.intent.value
+
     def _social_memory(self) -> dict:
         """The per-step reasoner's interaction view + what was said lately (complete messages)."""
         return {**self.interactions.summary(), "recent_dialog": self.heard.since(self.session.step - 100, limit=8)}
@@ -1847,6 +1882,9 @@ class ReasoningLoop:
         """What L1 needs to know it has already tried and heard (spec 2026-09-24)."""
         now = self.session.step
         since = self.episode.since(now=now)
+        if getattr(self, "_l1_feedback", None):
+            since["your_last_edits"] = list(self._l1_feedback)   # what happened to L1's own edits
+            self._l1_feedback = []
         heard_new = self.heard.since(self.episode.last_review_step)
         if heard_new:
             since["heard"] = heard_new

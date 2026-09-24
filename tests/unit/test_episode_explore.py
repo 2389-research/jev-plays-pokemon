@@ -135,3 +135,34 @@ def test_a_wedge_is_explained_and_recorded_with_the_attempt():
     loop._mark_step("q7", "wedged", reason=why)
     assert loop.episode.attempts["travel|5||on_map"]["wedged"] == 1
     assert "kept moving" in loop.episode.attempts_view()[0]
+
+
+def test_l1_is_told_what_happened_to_its_edits_and_what_the_active_step_is_doing():
+    """runs/fresh-squirtle: L1 read an ACTIVE Mart step (still travelling there) as "buying on Route 1"
+    and re-issued remove+add 15x — the remove of an active step and the duplicate add were silently
+    ignored every time. L1 now sees "doing" and the fate of its last edits."""
+    loop, events = _loop(map_id=12)
+    loop._plan_steps = [QuestStep(id="q2", map=42, kind="action", talk=True, who="the Mart clerk",
+                                  done_when="has_item:Poke Ball>=5", status="active")]
+    loop._directive = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 42},
+                                success={"on_map": 42}, quest_id="q2")
+    obs = SimpleNamespace(player=SimpleNamespace(map_id=12, x=10, y=30), game_state={})
+    assert loop._active_doing(obs) == "travelling to Viridian Mart"
+
+    class P:
+        strategist = provider = object()
+    loop.planner = P()
+    import pokemon_agent.agent.reason_loop as rl
+    prop = {"assessment": "reorder", "remove": ["q2"],
+            "add": [{"kind": "action", "map": 42, "talk": True, "who": "the Mart clerk",
+                     "done_when": "has_item:Poke Ball>=5", "after": None}]}
+    orig = rl.run_l1_pipeline
+    rl.run_l1_pipeline = lambda *a, **k: prop
+    try:
+        loop._plan = rl.AgentPlan()
+        loop._run_l1(obs, hard_event=True)
+    finally:
+        rl.run_l1_pipeline = orig
+    fb = loop._memory_context(obs)["since_last_review"]["your_last_edits"]
+    assert any("remove q2 IGNORED" in f and "travelling to Viridian Mart" in f for f in fb)
+    assert any("IGNORED: step q2 already covers it" in f for f in fb)

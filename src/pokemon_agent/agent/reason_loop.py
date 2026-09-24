@@ -1529,7 +1529,11 @@ class ReasoningLoop:
         others = occupied - {(nx, ny)}
         # try each of the 4 stand-tiles nearest-first; take the first BFS-reachable one (cheap, and
         # avoids burning a re-propose cycle when the single nearest stand-tile happens to be a wall).
-        for stand in sorted(adj.values(), key=lambda c: abs(c[0] - player.x) + abs(c[1] - player.y)):
+        # A stand tile another sprite is standing on is not a place we can go (runs/sleeves-cerulean:
+        # a beaten trainer stood on Misty's front tile; the BFS treats its goal as free, so the agent
+        # walked into him 15+ times while her open side was one step away).
+        free = [c for c in adj.values() if c not in others]
+        for stand in sorted(free, key=lambda c: abs(c[0] - player.x) + abs(c[1] - player.y)):
             mv = self._bfs_move(player, stand, interact=False, blocked_dirs=blocked_dirs, occupied=others)
             if mv is not None:
                 return mv

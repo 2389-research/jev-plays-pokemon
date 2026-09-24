@@ -161,3 +161,17 @@ def test_a_verify_step_wedges_when_the_same_thing_is_heard_again_and_again():
     step = loop._plan_steps[0]
     assert step.status == "wedged" and "keeps saying the same thing" in step.wedge_reason
     assert "Team Rocket robbed this house!" in step.wedge_reason
+
+
+def test_a_side_occupied_by_another_sprite_is_never_the_stand_tile():
+    """runs/sleeves-cerulean: Misty at (4,2), a beaten trainer on her front tile (4,3); her open side is
+    (5,2). The stand-tile BFS treats its own goal as free, so the agent walked into the trainer forever."""
+    from pokemon_agent.core.models import MoveAction
+    loop, d, events = _setup()
+    misty = {"x": 4, "y": 2, "sprite": "Brunette Girl", "slot": 1, "kind": "person"}
+    trainer = {"x": 4, "y": 3, "sprite": "Cooltrainer F", "slot": 2, "kind": "person"}
+    loop.world.ingest_collision(GYM, 10, 6, {(4, 3), (5, 2), (5, 3), (6, 3), (5, 4)}, None, {})
+    obs = SimpleNamespace(player=SimpleNamespace(x=5, y=3, map_id=GYM, facing="west"),
+                          game_state={"npcs": [misty, trainer]}, exits=[], map_dims=(10, 6))
+    move = loop._face_and_interact(misty, {"kind": "approach_npc"}, obs, set(), {(4, 2), (4, 3)})
+    assert isinstance(move, MoveAction) and move.direction.value == "north"        # to (5,2), not into him

@@ -6,7 +6,10 @@ memory desyncs the world model — see the spec's recovery section). Holds:
 
   * world        — per-map tile occupancy (WorldMap)
   * graph        — cross-map warp graph (WorldGraph), seeded with the Kanto corridor
-  * interactions — talked/empty tiles + dialog log (InteractionMemory)
+  * interactions — talked/empty tiles (InteractionMemory)
+  * heard        — what people/signs said: complete messages + per-map + digest (HeardLog)
+  * episode      — what happened + every attempt, incl. removed steps (EpisodeLog)
+  * blocked_portals — portals observed impassable {id: {step, why, sig}} (retried when progress changes)
   * plan         — the current AgentPlan
   * map_history  — ordered distinct maps visited
   * tried_failed — approaches shown not to work (executor/recovery consult this)
@@ -17,6 +20,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from .episode_log import EpisodeLog
+from .heard import HeardLog
 from .interaction_memory import InteractionMemory
 from .plan import AgentPlan
 from .world_graph import WorldGraph, full_kanto_graph
@@ -44,6 +49,9 @@ class AgentMemory:
         # dead-end ledger: (map_id, x, y, direction) proven BLOCKED by a real move whose
         # coords didn't change. Append-only, RAM-keyed, model-immutable — the mask source.
         self.blocked_edges: set[tuple[int, int, int, str]] = set()
+        self.heard = HeardLog()
+        self.episode = EpisodeLog()
+        self.blocked_portals: dict[str, dict] = {}
 
     # --- updates ----------------------------------------------------------
     def observe_map(self, map_id: int | None) -> None:
@@ -87,6 +95,9 @@ class AgentMemory:
             "tried_failed": self.tried_failed,
             "notes": self.notes,
             "blocked_edges": [list(e) for e in self.blocked_edges],
+            "heard": self.heard.to_dict(),
+            "episode": self.episode.to_dict(),
+            "blocked_portals": self.blocked_portals,
         }
 
     @classmethod
@@ -101,6 +112,9 @@ class AgentMemory:
         m.tried_failed = list(d.get("tried_failed") or [])
         m.notes = list(d.get("notes") or [])
         m.blocked_edges = {tuple(e) for e in d.get("blocked_edges") or []}
+        m.heard = HeardLog.from_dict(d.get("heard") or {})
+        m.episode = EpisodeLog.from_dict(d.get("episode") or {})
+        m.blocked_portals = dict(d.get("blocked_portals") or {})
         return m
 
     def save(self, path: str | Path) -> None:

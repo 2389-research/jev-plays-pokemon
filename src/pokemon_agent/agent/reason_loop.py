@@ -51,6 +51,10 @@ from .session import Session
 from .signals import game_signals, needs_emergency_heal
 from ..games.pokemon_red.game_state import read_party
 from ..games.pokemon_red.map_objects import match_objects, objects_on
+from .critic import Critic
+from .episode_log import step_desc
+from .exploration import StallMonitor, llm_chooser, pick_target, unexplored
+from .heard import llm_summarizer
 from .targets import build_targets, name_matches, npc_key, select_npc
 from .world_map import DELTA, WALL
 
@@ -58,6 +62,7 @@ MAX_GOTO_STEPS = 18  # safety bound on one navigation macro
 L1_EVERY_N_LEGS_DEFAULT = 5  # cadence: run the L1 strategic review every N legs by default
 BLOCK_TRIGGER = 6  # blocked-for-N legs at/above which L1 fires early (navigation deadlock)
 SERVO_FAIL_LIMIT = 6  # consecutive servo no-route steps before the directive is deemed impossible
+BLOCKED_PORTAL_TTL = 600  # steps before a portal observed blocked is retried (sooner if bag/badges change)
 JEV_OVERRIDE_CONF = 0.6  # Jev may override the BFS pathing suggestion only at/above this confidence
 POLICY_BUDGET = 15       # steps a Jev-chosen routing policy runs before it's re-selected for the area
 JEV_NPC_CONF = 0.4  # trust Jev's NPC pick only at/above this confidence (else fall back to nearest)
@@ -250,6 +255,21 @@ class ReasoningLoop:
         self.unsticker = Unsticker(getattr(self.planner, "provider", None) if self.planner else None,
                                    on_event=lambda k, p: self.on_event(k, p), press=self._held_press,
                                    capture=getattr(self, "capture", None))
+        # memory L1 actually sees (spec 2026-09-24): what was heard, what happened / was attempted, stall
+        # detection + a critic, and the explore executor's state
+        self.heard = self.memory.heard
+        self.episode = self.memory.episode
+        fast = getattr(self.planner, "provider", None) if self.planner else None
+        self._summarize = llm_summarizer(fast)
+        self._choose = llm_chooser(fast)          # free-text explore preference -> a real candidate
+        self.stall = StallMonitor()
+        self.critic = Critic(fast, on_event=lambda k, p: self.on_event(k, {"step": self.session.step, **p}),
+                             capture=getattr(self, "capture", None))
+        self._explore_skip: set[str] = set()     # candidates tried / unreachable this explore step
+        self._explore_pick: str | None = None
+        self._explore_base: dict | None = None   # baseline for "something new turned up"
+        self._explore_exhausted: str | None = None
+        self._wedge_maps: list[str] = []         # maps entered since the active directive started
         # conversation/script gate (F5): last step routed to dialogue, consecutive forced waits, and
         # whether forced waiting is armed (a timeout disarms it until the script flag clears)
         self._last_dialog_step = -(10**9)
@@ -323,14 +343,26 @@ class ReasoningLoop:
         if obs.player and (not self._map_history or self._map_history[-1] != obs.player.map_id):
             if self._map_history:                      # remember where we came FROM
                 self._prev_map = self._map_history[-1]
+            first = obs.player.map_id not in self._map_history
             self._map_history.append(obs.player.map_id)
+            self.episode.record(self.session.step, "map_enter", map=obs.player.map_id,
+                                map_name=map_name(obs.player.map_id))
+            self._wedge_maps.append(map_name(obs.player.map_id))
+            if self.portals is not None:           # got through a portal we thought blocked: it isn't
+                for pid in [k for k in self.memory.blocked_portals
+                            if (self.portals.portals.get(k) or {}).get("dest_map") == obs.player.map_id]:
+                    self.memory.blocked_portals.pop(pid, None)
+                    self.on_event("portal_unblocked", {"step": self.session.step, "portal": pid, "why": "went through"})
+            if first and len(self._map_history) > 1:
+                self.episode.record(self.session.step, "discovery", text=f"first visit: {map_name(obs.player.map_id)}")
         # resolve 0xFF ("return to last map") warps so building doors become real graph edges
         # (otherwise a house exit reads as "map 255" and the agent can't route back out).
         if obs.player:
             obs.exits = self._resolve_exits(obs.exits, obs.player.map_id)
         if obs.player and obs.exits:  # learn real cross-map warp edges as we see them
             self.memory.graph.observe_exits(obs.player.map_id, obs.exits)
-        self.interactions.record_dialog(self.session.step, obs.player, obs.game_state)
+        self._observe_heard(obs)
+        self._observe_progress(obs)
         if obs.game_state and obs.game_state.get("npcs"):
             obs.game_state["npcs"] = self.interactions.annotate_npcs(obs.player, obs.game_state["npcs"])
 
@@ -477,7 +509,7 @@ class ReasoningLoop:
         self._plan, rlat, _ = self.reasoner.reflect(
             primary_goal=self.session.goal.primary, player_desc=str(player_desc),
             map_view=obs.map_view, map_history=self._map_history[-12:],
-            social_memory=self.interactions.summary(), game_state=obs.game_state,
+            social_memory=self._social_memory(), game_state=obs.game_state,
             recent=list(self._recent), previous=self._plan)
         self.on_event("reflect", {"step": self.session.step, "latency_ms": rlat,
                                   "plan": self._plan.model_dump()})
@@ -490,7 +522,7 @@ class ReasoningLoop:
             primary_goal=self.session.goal.primary,
             image=shot if self.vision else None, local_map=obs.walkability,
             map_view=obs.map_view, player_desc=str(player_desc), exits=obs.exits,
-            game_state=obs.game_state, social_memory=self.interactions.summary(),
+            game_state=obs.game_state, social_memory=self._social_memory(),
             map_history=self._map_history[-12:], recent=list(self._recent),
             previous=self._prev, plan=self._plan, targets=targets,
             route_hint=None, blocked_dirs=blocked_dirs, directive=directive)
@@ -584,6 +616,7 @@ class ReasoningLoop:
                 "items": signals["items"],
                 "badges": signals["badges"],
                 "plan": [{"id": s.id, "map": s.map, "kind": s.kind, "talk": s.talk,
+                          **({"who": s.who} if s.who else {}),
                           "done_when": s.done_when, "status": s.status,
                           **({"why_wedged": s.wedge_reason} if s.status == "wedged" and s.wedge_reason else {})}
                          for s in self._plan_steps],
@@ -595,6 +628,10 @@ class ReasoningLoop:
                 self.on_event("goals_changed", {"step": self.session.step, "interrupted": None,
                                                 "why": "interrupted focus met"})
             context.update(goals_mod.goals_view(self._plan, emu, self.memory))
+            # what it heard / tried / hasn't explored, and whether it's stalled (spec 2026-09-24)
+            if self.heard.compact(self._summarize):
+                self.on_event("heard_compacted", {"step": self.session.step, "digest_len": len(self.heard.digest)})
+            context.update(self._memory_context(obs))
             pre_status = context["goal_status"]
             prop = run_l1_pipeline(emu, context, self.planner, hard_event=(hard_event or emergency),
                                    on_trace=self._record_l1_trace)
@@ -602,6 +639,7 @@ class ReasoningLoop:
             change = (goals_mod.detect_change(self._plan, prop, step_edit=step_edit)
                       if prop is not None else None)
             if step_edit:
+                live_before = {s.id: s for s in self._plan_steps if s.status in ("pending", "active")}
                 self._plan_steps = reconcile_quests(
                     self._plan_steps,
                     {"add": prop.get("add", []), "remove": prop.get("remove", [])},
@@ -618,6 +656,11 @@ class ReasoningLoop:
                     if self._directive is not None and self._directive.quest_id in dropped:
                         self._directive = None   # the committed default is gone -> advance to L1's first real step
                     self._plan_steps = [s for s in self._plan_steps if not s.provisional]
+                kept = {s.id for s in self._plan_steps}
+                for sid, st in live_before.items():      # removed by L1: keep the attempt on record
+                    if sid not in kept:
+                        self.episode.attempt(self.session.step, st, "removed",
+                                             str(prop.get("assessment") or "")[:160])
                 self._recompile_quest()
                 if change is not None:   # after the step edit succeeded: a failed review changes nothing
                     self._apply_goals_change(change, pre_status)
@@ -652,6 +695,8 @@ class ReasoningLoop:
             # and on commit; resetting it here would suppress wedge detection.)
             self._legs_since_l1 = 0
             self._l1_event = False
+            if self.planner is not None:
+                self.episode.mark_review(self.session.step)
 
     def _apply_goals_change(self, change, pre_status: dict) -> None:
         """Apply a detected goals/notepad/interrupted/catch change (goals.apply_change) and emit it.
@@ -700,7 +745,11 @@ class ReasoningLoop:
             return
         for s in self._plan_steps:
             if s.id == quest_id:
+                prev = s.status
                 s.status = status
+                if status != prev and status in ("active", "done", "wedged"):
+                    self.episode.attempt(self.session.step, s, "started" if status == "active" else status,
+                                         reason if status == "wedged" else "")
                 if status == "done":
                     # NB: key is "step_kind", not "kind" — the recorder's on_event stamps the event
                     # type under "kind" ("step_done"), so a payload "kind" would clobber that marker.
@@ -738,8 +787,16 @@ class ReasoningLoop:
         # clears the plan.
         if (self._directive is not None and not satisfied
                 and (self._servo_fail >= SERVO_FAIL_LIMIT or self._blocked_for_n >= BLOCK_TRIGGER)):
+            why = self._explain_wedge(obs, self._directive)
+            tmap = self._directive.target_map
+            if (self._directive.intent == Intent.TRAVEL and obs.player is not None and tmap is not None
+                    and tmap != obs.player.map_id):
+                portal = self._portal_next(obs.player, tmap)
+                if (portal is not None and abs(portal["coord"][0] - obs.player.x)
+                        + abs(portal["coord"][1] - obs.player.y) <= 8):
+                    self._note_blocked_portal(obs.player, portal["coord"], why)
             if self._directive.quest_id is not None:
-                self._mark_step(self._directive.quest_id, "wedged", reason=self._directive.reason)
+                self._mark_step(self._directive.quest_id, "wedged", reason=why)
             self._blocked_for_n = 0
             self._servo_fail = 0
             self._l1_event = True     # L1 replaces just this step at the next gate (below)
@@ -814,6 +871,8 @@ class ReasoningLoop:
         not in RAM) is judged by the calibrated verifier over assembled game-state evidence —
         this is the "when it thinks it's done, check the criteria" step."""
         success = directive.success or {}
+        if directive.intent == Intent.EXPLORE:
+            return self._explore_found(directive)
         if "verify" in success:
             judge = getattr(self.reasoner, "judge", None)
             # throttle the model check (it's an LLM/Jev call): only every few steps of the step
@@ -831,6 +890,8 @@ class ReasoningLoop:
         return predicates.evaluate(success, self.controller.emu, memory=self.memory)
 
     def _commit_directive(self, note: str) -> None:
+        self._wedge_maps = []         # maps entered while THIS directive runs (a wedge reports a bounce)
+        self._explore_base = None     # an explore step measures discoveries from its own start
         self._servo_fail = 0
         self._blocked_for_n = 0      # a fresh directive starts with a clean block counter
         self.stuck.reset_objective()  # ...and a fresh objective budget measured against ITS target
@@ -864,6 +925,8 @@ class ReasoningLoop:
         tmap = directive.target_map
         if directive.intent in (Intent.TALK_TO, Intent.GRAB_ITEM) and txy is None:
             return {"kind": "approach_npc", "sprite": (directive.target or {}).get("sprite")}
+        if directive.intent == Intent.EXPLORE and (tmap is None or tmap == player.map_id):
+            return {"kind": "explore"}
         if txy is not None and (tmap is None or tmap == player.map_id):
             # NOTE: in production a talk/grab WITH a concrete tile is dispatched to _servo_step (see
             # _dispatch_servo), so this interact=True case is only exercised by the resolver's unit test;
@@ -939,8 +1002,8 @@ class ReasoningLoop:
         # Ground-truth PortalGraph waypoint: for a cross-map hop the graph covers, head straight to
         # the EXACT next portal tile (deterministic) instead of asking the LLM proposer, which
         # oscillated at gates. This is what actually crosses Viridian Forest toward Pewter.
-        if default is not None and default.get("kind") == "grind":
-            return default   # grinding is mechanics, not a destination: never let the proposer override it
+        if default is not None and default.get("kind") in ("grind", "explore"):
+            return default   # mechanics, not a destination: never let the proposer override them
         tmap0 = directive.target_map if directive is not None else None
         portal = self._portal_next(obs.player, tmap0) if (tmap0 is not None and obs.player is not None) else None
         self._cap_det("portal_next", {"map_id": getattr(obs.player, "map_id", None), "target_map": tmap0}, portal)
@@ -954,6 +1017,10 @@ class ReasoningLoop:
             if portal.get("kind") == "ledge":
                 tgt["hop"] = portal.get("hop")   # reach the take-off cell, then hop (K8)
             return tgt
+        if tmap0 is not None and self._no_known_route(obs.player, tmap0):
+            # the ground-truth graph has NO way there from here: don't guess a tile (that wanders) —
+            # stall so the step wedges with the real reason and L1 decides (e.g. explore)
+            return {"kind": "unresolved", "reason": f"no known way to {map_name(tmap0)} from here"}
         prov = getattr(self.planner, "provider", None) if self.planner else None
         if prov is None:
             return default
@@ -1033,6 +1100,8 @@ class ReasoningLoop:
         move = self._resolve_target(target, directive, obs, blocked_dirs, occupied)
         if move is None and target.get("portal") and self._report_blockers(obs, target):
             return None        # the route is blocked by objects/NPCs: L1 now knows exactly what
+        if target.get("kind") == "explore":
+            return move        # the explore executor picks its own next thing; exhaustion ends the step
         if target.get("kind") == "grind":
             if move is None:   # no reachable grass on this map: hand the grind back to L1 right away
                 self._wedge_active(f"grind: no reachable grass on {map_name(player.map_id)}")
@@ -1227,7 +1296,7 @@ class ReasoningLoop:
         if start == goal:
             return None
         walk = set(coll["walkable"]) | {goal}   # the door tile may be off the walkable set
-        blocked = set(occupied) - {goal}
+        blocked = (set(occupied) | self._warp_tiles(player.map_id)) - {goal}   # never through another door
         cuts = (getattr(self.world, "cut_edges", None) or {}).get(getattr(player, "map_id", None), set())
         prev: dict[tuple[int, int], tuple[tuple[int, int], Direction] | None] = {start: None}
         q = deque([start])
@@ -1427,13 +1496,30 @@ class ReasoningLoop:
     def _judge_last_talk(self, target: dict, directive) -> None:
         """F2: after a conversation with the picked NPC ends, if the step's success still doesn't hold,
         count it as unproductive; at 2 (some NPCs must be talked to twice) mark that NPC tried and drop
-        the pick so select_npc moves on. Skipped for verify: criteria (the judge is throttled)."""
+        the pick so select_npc moves on. A verify: criterion (judged by a throttled model) is only judged
+        unproductive when the conversation REPEATS something already heard — twice -> wedge with what
+        they keep saying."""
         tk = target.get("talking_to")
         if not tk or self._last_dialog_step <= target.get("talk_step", 10**9):
             return
+        talk_step = target.pop("talk_step", None) or 0
         target.pop("talking_to", None)
-        target.pop("talk_step", None)
-        if directive is None or "verify" in (directive.success or {}) or self._directive_satisfied(directive):
+        if directive is None or self._directive_satisfied(directive):
+            return
+        # what did they say? the same thing again (heard before) is unproductive whatever the criterion —
+        # runs/explore-live: a verify: step (exempt from rotation) re-talked to a Guard ~8x in 200 steps
+        said = next((m for m in reversed(self.heard.recent) if m["last_step"] >= talk_step), None)
+        repeat = said is not None and said.get("count", 1) >= 2
+        if "verify" in (directive.success or {}):
+            if not repeat:
+                return                        # a new conversation: let the (throttled) verifier judge it
+            reps = target["repeats"] = target.get("repeats", 0) + 1
+            if reps >= 2 and directive.quest_id is not None:
+                self._mark_step(directive.quest_id, "wedged",
+                                reason=f'{said.get("speaker") or "they"} keeps saying the same thing '
+                                       f'(heard {said["count"]}x): "{said["text"][:140]}" — '
+                                       f'"{directive.success["verify"]}" still not true')
+                self._l1_event = True
             return
         talks = target.setdefault("talks", {})
         key = ",".join(str(v) for v in tk)
@@ -1496,6 +1582,8 @@ class ReasoningLoop:
             return self._enter_map(int(target["map"]), obs, blocked_dirs, occupied)
         if kind == "approach_npc":
             return self._approach_npc(target, directive, obs, blocked_dirs, occupied)
+        if kind == "explore":
+            return self._explore_move(directive, obs, blocked_dirs, occupied)
         if kind == "edge":
             return self._cross_edge(target.get("dir"), target.get("next_map"), obs, blocked_dirs, occupied)
         if kind != "exit":
@@ -1564,21 +1652,275 @@ class ReasoningLoop:
             return MoveAction(direction=Direction(goal_dir))
         return None
 
-    def _refresh_gates(self) -> None:
-        """Open story gates whose RAM condition now holds (runs/ss-anne: the trashed-house guard left
-        when Bill gave the S.S. Ticket, but the static gate kept Cerulean -> Vermilion unroutable, so the
-        agent guessed the west edge and bounced off Route 4 for ~500 steps)."""
+    # ---- observed blocked portals (replaces the hand-written story-gate list) -----------------------
+    def _gate_sig(self) -> str:
+        """What can change a gate: badges and the bag. A portal found blocked is retried once either
+        changes (or after BLOCKED_PORTAL_TTL steps)."""
+        from ..games.pokemon_red.game_state import read_badges, read_items
+        emu = self.controller.emu
+        try:
+            items = sorted({str(i.get("item")) for i in (read_items(emu) or [])})
+            return f"{(read_badges(emu) or {}).get('count', 0)}|{','.join(items)}"
+        except Exception:
+            return ""
+
+    def _sync_blocked(self) -> None:
         pg = self.portals
         if pg is None:
             return
+        sig, now = self._gate_sig(), self.session.step
+        bp = self.memory.blocked_portals
+        for pid in [k for k, v in bp.items() if v.get("sig") != sig or now - int(v.get("step", 0)) > BLOCKED_PORTAL_TTL]:
+            bp.pop(pid, None)
+            self.on_event("portal_unblocked", {"step": now, "portal": pid})
+        self._revalidate_blocked()
+        pg.blocked = {k: v.get("why", "") for k, v in bp.items()}
+
+    def _revalidate_blocked(self) -> None:
+        """A belief is testable: a portal on THIS map that we recorded as blocked, but that we can now
+        walk right up to (no sprite in the way), isn't blocked any more — drop it. runs/explore-live:
+        the agent stood ON the tile a stale "blocked by a Guard at (27,12)" named, and still no route."""
+        pg, emu = self.portals, self.controller.emu
+        mine = [(k, pg.portals[k]) for k in self.memory.blocked_portals if k in pg.portals]
+        try:
+            player = read_player(emu)
+        except Exception:
+            return
+        mine = [(k, p) for k, p in mine if p["map"] == player.map_id]
+        if not mine:
+            return
+        try:
+            coll = read_collision_map(emu)
+            from ..games.pokemon_red.game_state import read_npcs
+            occ = {(int(n["x"]), int(n["y"])) for n in read_npcs(emu) if "x" in n}
+        except Exception:
+            return
+        if not coll or coll.get("map_id") != player.map_id:
+            return
+        walk = set(map(tuple, coll["walkable"])) - occ
+        start = (player.x, player.y)
+        seen, q = {start}, deque([start])
+        while q:
+            x, y = q.popleft()
+            for c in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+                if c not in seen and c in walk:
+                    seen.add(c)
+                    q.append(c)
+        for k, p in mine:
+            door = tuple(p["coord"])
+            if door in seen or any(c in seen for c in ((door[0], door[1] + 1), (door[0], door[1] - 1),
+                                                       (door[0] + 1, door[1]), (door[0] - 1, door[1]))):
+                self.memory.blocked_portals.pop(k, None)
+                self.episode.record(self.session.step, "discovery", text=f"{p['label']} is reachable now")
+                self.on_event("portal_unblocked", {"step": self.session.step, "portal": k, "why": "path is clear"})
+
+    def _note_blocked_portal(self, player, xy, why: str) -> None:
+        """The agent couldn't get through the portal at ``xy`` on this map: remember it (with what it
+        saw / heard) so routing tries another way, and so L1 is told."""
+        pg = self.portals
+        if pg is None or player is None:
+            return
+        portal = next((p for p in pg.portals_on(player.map_id)
+                       if tuple(p["coord"]) == tuple(xy) and p["kind"] in ("warp", "edge")), None)
+        if portal is None:
+            return
+        self.memory.blocked_portals[portal["id"]] = {"step": self.session.step, "why": why[:200],
+                                                     "sig": self._gate_sig()}
+        self.episode.record(self.session.step, "portal_blocked", text=f"{portal['label']}: {why[:160]}")
+        self.on_event("portal_blocked", {"step": self.session.step, "portal": portal["id"], "why": why[:200]})
+
+    def _no_known_route(self, player, tmap) -> bool:
+        """The ground-truth graph covers both maps, we know where we stand, and there is NO route —
+        guessing a tile then just wanders (runs/ss-anne bounced off Route 4 for ~500 steps)."""
+        pg = self.portals
+        if pg is None or player is None or tmap is None or player.map_id not in pg.maps or int(tmap) not in pg.maps:
+            return False
+        try:
+            coll = read_collision_map(self.controller.emu)
+        except Exception:
+            return False
+        comp = pg.component_at(player.map_id, player.x, player.y, coll["walkable"] if coll else set())
+        if comp is None:
+            return False
+        self._sync_blocked()
+        return pg.route(player.map_id, comp, int(tmap)) is None
+
+    def _explain_wedge(self, obs, directive) -> str:
+        """WHY the active step can't progress, from what the harness actually knows — not the step's
+        own description (that was all L1 ever got: "why_wedged: quest: go to Vermilion City — ...")."""
+        player, parts = obs.player, []
+        tmap = directive.target_map
+        if player is not None and directive.intent in (Intent.TRAVEL, Intent.EXPLORE) and tmap is not None \
+                and tmap != player.map_id:
+            route = self._portal_route(player, tmap)
+            if route is None:
+                parts.append(f"no known way from this part of {map_name(player.map_id)} to {map_name(tmap)}")
+                if self.memory.blocked_portals:
+                    parts.append("blocked earlier: " + "; ".join(
+                        f"{k.split(':')[0]} ({v.get('why', '')[:80]})" for k, v in list(self.memory.blocked_portals.items())[:3]))
+            elif route:
+                p0 = route[0]
+                parts.append(f"was heading for {p0['label']} at ({p0['coord'][0]},{p0['coord'][1]}) "
+                             f"and didn't get through")
+        elif directive.intent in (Intent.TALK_TO, Intent.GRAB_ITEM):
+            parts.append(f"couldn't reach or talk to {(directive.target or {}).get('sprite') or 'the target'}")
+        if len(self._wedge_maps) >= 4:
+            counts: dict[str, int] = {}
+            for m in self._wedge_maps:
+                counts[m] = counts.get(m, 0) + 1
+            parts.append("kept moving between " + ", ".join(f"{m} ({c}x)" for m, c in counts.items()))
+        if player is not None:
+            last = [m for m in self.heard.recent if m["map"] == player.map_id
+                    and m["last_step"] >= self.session.step - 60]
+            if last:
+                parts.append(f'last heard here: {last[-1].get("speaker") or "?"}: "{last[-1]["text"][:100]}"')
+        return "; ".join(parts) or (directive.reason or "no progress")
+
+    # ---- hearing / progress / critic ---------------------------------------------------------------
+    def _observe_heard(self, obs) -> None:
+        gs = obs.game_state or {}
+        player = obs.player
         emu = self.controller.emu
-        opened = pg.refresh_gates(lambda cond: predicates.evaluate(cond, emu))
-        if opened:
-            self.on_event("gate_opened", {"step": self.session.step, "portals": sorted(opened)})
+        try:
+            battling = emu.read_memory(0xD057) != 0
+        except Exception:
+            battling = False
+        speaker = xy = None
+        facing = gs.get("facing") or {}
+        fs = facing.get("facing_sprite")
+        if fs:
+            speaker, xy = fs.get("sprite"), (fs.get("x"), fs.get("y"))
+        elif player is not None and facing.get("front_tile"):
+            fx, fy = facing["front_tile"]
+            o = next((o for o in objects_on(player.map_id) if (o["x"], o["y"]) == (fx, fy)), None)
+            if o is not None:
+                speaker, xy = o["name"], (fx, fy)
+        mid = player.map_id if player else None
+        self.heard.observe(self.session.step, map_id=mid, map_name=map_name(mid) if mid is not None else None,
+                           active=bool(gs.get("dialog_active")), lines=gs.get("dialog_lines") or [],
+                           speaker=speaker, speaker_xy=xy, in_battle=battling)
+
+    def _observe_progress(self, obs) -> None:
+        gs, player = obs.game_state or {}, obs.player
+        party = gs.get("party") or []
+        sig = (len(set(self._map_history)), self.heard.distinct_count(),
+               tuple(sorted((str(i.get("item")), i.get("qty")) for i in (gs.get("items") or []))),
+               (gs.get("badges") or {}).get("count"), sum(int(m.get("level") or 0) for m in party),
+               sum(1 for s in self._plan_steps if s.status == "done"),
+               tuple(sorted(self._goal_prev_status.items())))
+        pos = (player.map_id, player.x, player.y) if player else None
+        self.stall.observe(self.session.step, pos=pos, signature=sig)
+        if self._plan is not None and self.critic.due(self.session.step, self.stall.stalled(self.session.step)):
+            state = {"stalled_for": self.stall.stalled_for(self.session.step),
+                     "goals": self._plan.goals.model_dump(),
+                     "plan": [{"id": s.id, "what": step_desc(s), "status": s.status} for s in self._plan_steps
+                              if s.status != "done"][-8:],
+                     "attempts": self.episode.attempts_view(),
+                     "recent": self.episode.since(self.session.step - 300, now=self.session.step),
+                     "heard": {"recent": self.heard.since(self.session.step - 300), "digest": self.heard.digest},
+                     "unexplored_here": [c["label"] for c in self._unexplored(obs)][:12],
+                     "notepad": self._plan.notepad}
+            if self.critic.review(self.session.step, state) is not None:
+                self._l1_event = True          # L1 reviews with the critique next gate
+
+    def _unexplored(self, obs) -> list[dict]:
+        player = obs.player
+        if player is None:
+            return []
+        comp = None
+        pg = self.portals
+        if pg is not None and player.map_id in pg.maps:
+            try:
+                coll = read_collision_map(self.controller.emu)
+                comp = pg.component_at(player.map_id, player.x, player.y, coll["walkable"] if coll else set())
+            except Exception:
+                comp = None
+        used = set(self.interactions.talked) | set(self.interactions.empty_tiles)
+        return unexplored(pg, player.map_id, comp, visited_maps=set(self._map_history),
+                          npcs=(obs.game_state or {}).get("npcs") or [], used_tiles=used, skip=self._explore_skip)
+
+    def _social_memory(self) -> dict:
+        """The per-step reasoner's interaction view + what was said lately (complete messages)."""
+        return {**self.interactions.summary(), "recent_dialog": self.heard.since(self.session.step - 100, limit=8)}
+
+    def _memory_context(self, obs) -> dict:
+        """What L1 needs to know it has already tried and heard (spec 2026-09-24)."""
+        now = self.session.step
+        since = self.episode.since(now=now)
+        heard_new = self.heard.since(self.episode.last_review_step)
+        if heard_new:
+            since["heard"] = heard_new
+        mid = obs.player.map_id if obs.player else None
+        stall = {"steps_without_progress": self.stall.stalled_for(now)}
+        c = self.critic.latest
+        if c and now - c["step"] <= 300:
+            stall["critique"] = {"diagnosis": c["diagnosis"], "suggestion": c["suggestion"], "step": c["step"]}
+        return {"since_last_review": since,
+                "attempts": self.episode.attempts_view(),
+                "heard": {"digest": self.heard.digest, "here": self.heard.here(mid) if mid is not None else {}},
+                "unexplored_here": [c["label"] for c in self._unexplored(obs)][:12],
+                "stall": stall}
+
+    # ---- explore executor ---------------------------------------------------------------------------
+    def _explore_found(self, directive) -> bool:
+        """An explore step is done when something NEW turned up since it started: a map never visited,
+        a message never heard — or when nothing reachable is left unexplored."""
+        base = self._explore_base
+        if base is None or base.get("qid") != directive.quest_id:
+            self._explore_base = {"qid": directive.quest_id, "maps": set(self._map_history),
+                                  "heard": self.heard.distinct_count()}
+            self._explore_skip, self._explore_pick, self._explore_exhausted = set(), None, None
+            return False
+        cur = self._map_history[-1] if self._map_history else None
+        note = None
+        if cur is not None and cur not in base["maps"]:
+            note = f"found a new place: {map_name(cur)}"
+        elif self.heard.distinct_count() > base["heard"]:
+            m = self.heard.recent[-1] if self.heard.recent else None
+            note = f'heard something new: {m.get("speaker") or "?"}: "{m["text"][:120]}"' if m else "heard something new"
+        elif self._explore_exhausted:
+            note = self._explore_exhausted
+        if note is None:
+            return False
+        self.episode.record(self.session.step, "explore_end", text=note)
+        self.on_event("explore_end", {"step": self.session.step, "note": note})
+        self._explore_base = None
+        self._l1_event = True
+        return True
+
+    def _explore_move(self, directive, obs, blocked_dirs, occupied):
+        player = obs.player
+        prefer = (directive.target or {}).get("prefer") if directive is not None else None
+        for _ in range(4):
+            cands = self._unexplored(obs)
+            if not cands:
+                self._explore_exhausted = f"nothing reachable left unexplored on {map_name(player.map_id)}"
+                return None
+            pick = next((c for c in cands if c["key"] == self._explore_pick), None) \
+                or pick_target(cands, (player.x, player.y), prefer, choose=self._choose)
+            if pick["key"] != self._explore_pick:
+                self.on_event("explore_target", {"step": self.session.step, "target": pick["label"]})
+            self._explore_pick = pick["key"]
+            if pick["kind"] == "portal":
+                mv = self._resolve_target({"kind": "tile", "x": pick["x"], "y": pick["y"], "portal": True},
+                                          directive, obs, blocked_dirs, occupied)
+            elif pick["kind"] == "npc":
+                mv = self._approach_npc({"kind": "approach_npc", "sprite": pick.get("sprite"),
+                                         "picked": [pick["x"], pick["y"], player.map_id]},
+                                        directive, obs, blocked_dirs, occupied)
+            else:
+                mv = self._face_and_interact({"x": pick["x"], "y": pick["y"], "sprite": pick.get("name")}, {},
+                                             obs, blocked_dirs, occupied, face=pick.get("face"))
+            if mv is None or isinstance(mv, InteractAction):
+                self._explore_skip.add(pick["key"])      # tried it (or can't reach it): move on next time
+                self._explore_pick = None
+            if mv is not None:
+                return mv
+        return None
 
     def _portal_route(self, player, tmap) -> list[dict] | None:
         """The full ground-truth portal route from the player to map ``tmap`` (None if off-graph)."""
-        self._refresh_gates()
+        self._sync_blocked()
         pg = self.portals
         if pg is None or player is None or player.map_id not in pg.maps or int(tmap) not in pg.maps:
             return None
@@ -1606,7 +1948,7 @@ class ReasoningLoop:
         """The next PORTAL to head toward on the way to map ``tmap``, from the ground-truth
         PortalGraph (or None if it doesn't cover this leg). Locates the player's walkable component
         from the LIVE collision map so it stays correct even if map state changed."""
-        self._refresh_gates()
+        self._sync_blocked()
         pg = self.portals
         if pg is None or player is None or player.map_id not in pg.maps or int(tmap) not in pg.maps:
             return None
@@ -1770,6 +2112,9 @@ class ReasoningLoop:
         you just step onto)."""
         if xy is None:
             return None
+        # never walk THROUGH a door on the way somewhere else: stepping on a warp tile leaves the map
+        # (runs/bill-live: the path to Bill crossed Bill's House's doorway and dropped us on Route 25)
+        occupied = set(occupied or ()) | (self._warp_tiles(getattr(player, "map_id", None)) - {(int(xy[0]), int(xy[1]))})
         nav = Navigator(self.world)
         prim, arrived = nav.step_toward(player, {"x": int(xy[0]), "y": int(xy[1]), "interact": interact},
                                         occupied)
@@ -1782,6 +2127,13 @@ class ReasoningLoop:
                           {"direction": prim.direction.value})
             return prim
         return None
+
+    def _warp_tiles(self, map_id) -> set[tuple[int, int]]:
+        """Door (warp) tiles on this map, from the ground-truth graph."""
+        pg = self.portals
+        if pg is None or map_id is None:
+            return set()
+        return {tuple(p["coord"]) for p in pg.portals_on(map_id) if p["kind"] in ("warp", "elevator")}
 
     def _warp_back_map(self, cur_map: int) -> int | None:
         """Where a 0xFF ("LAST_MAP") warp leads: the game's own wLastMap (the last OUTDOOR map — so a
@@ -2163,6 +2515,7 @@ class ReasoningLoop:
         if not blockers:
             return False
         who = ", ".join(f"{name} at ({x},{y})" for name, (x, y) in blockers)
+        self._note_blocked_portal(player, (int(target["x"]), int(target["y"])), f"blocked by {who}")
         self._wedge_active(f"the route {target.get('note') or 'to the target'} on {map_name(player.map_id)} is "
                            f"blocked by {who} — deal with them (pick up / talk / battle) or go around")
         self.on_event("route_blocked", {"step": self.session.step, "blockers": [list(c) + [n] for n, c in blockers]})

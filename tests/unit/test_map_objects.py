@@ -94,3 +94,34 @@ def test_using_the_object_twice_without_success_wedges():
     target = {"kind": "approach_npc", "sprite": "the PC", "tried": [["obj", BILLS, 1, 4]]}
     assert loop._approach_npc(target, d, _obs(1, 5), set(), set()) is None
     assert loop._plan_steps[0].status == "wedged" and "used Bill's PC" in loop._plan_steps[0].wedge_reason
+
+
+def test_in_map_paths_never_cross_another_door():
+    """runs/bill-live: the path to Bill (4,4) went along the bottom row over Bill's House's doorway
+    (2,7)/(3,7) and the warp dropped the agent on Route 25. Door tiles are obstacles unless they ARE the
+    destination."""
+    loop, d = _setup("Bill")
+    assert {(2, 7), (3, 7)} <= loop._warp_tiles(BILLS)
+    walk = {(x, y) for x in range(0, 8) for y in range(4, 8)} - {(2, 4), (3, 4), (2, 5), (3, 5), (2, 6), (3, 6)}
+    loop.world.ingest_collision(BILLS, 8, 8, walk, None, None)
+    p = SimpleNamespace(x=1, y=5, map_id=BILLS, facing="south")
+    seen = {(1, 5)}
+    for _ in range(12):
+        mv = loop._bfs_move(p, (4, 5), interact=False, blocked_dirs=set())
+        if mv is None:
+            break
+        dx, dy = {"north": (0, -1), "south": (0, 1), "east": (1, 0), "west": (-1, 0)}[mv.direction.value]
+        p = SimpleNamespace(x=p.x + dx, y=p.y + dy, map_id=BILLS, facing=mv.direction.value)
+        seen.add((p.x, p.y))
+    assert not ({(2, 7), (3, 7)} & seen)              # the only way round is over the doors: refused
+    walk |= {(2, 4), (3, 4)}                          # open a door-free way along the top
+    loop.world.ingest_collision(BILLS, 8, 8, walk, None, None)
+    p = SimpleNamespace(x=1, y=5, map_id=BILLS, facing="south")
+    for _ in range(12):
+        mv = loop._bfs_move(p, (4, 5), interact=False, blocked_dirs=set())
+        if mv is None:
+            break
+        dx, dy = {"north": (0, -1), "south": (0, 1), "east": (1, 0), "west": (-1, 0)}[mv.direction.value]
+        p = SimpleNamespace(x=p.x + dx, y=p.y + dy, map_id=BILLS, facing=mv.direction.value)
+        seen.add((p.x, p.y))
+    assert (p.x, p.y) == (4, 5) and not ({(2, 7), (3, 7)} & seen)

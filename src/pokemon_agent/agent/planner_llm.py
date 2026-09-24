@@ -225,6 +225,10 @@ plan). A goal that already shows met is not by itself a reason to change; say ch
 only if a goal is clearly wrong or impossible. A battle LOST recently (SIGNALS.recent_battles) is a reason to change — the
 plan needs to adapt, not repeat. A standing catch goal that SIGNALS.catch says is not ready
 (e.g. no Poké Balls) IS a reason to change — the plan needs a step to fix it or the goal dropped.
+MEMORY: SINCE_LAST_REVIEW is what happened since the last review (maps entered, plan changes and why,
+what people said). ATTEMPTS lists steps that failed before, with counts. STALL.steps_without_progress
+counts steps with nothing new; STALL.critique is a reviewer's diagnosis. The same step failing again
+(ATTEMPTS), maps entered over and over, or a critique ARE reasons to change.
 
 Return ONLY JSON: {"change": <true|false>, "why": "<one short sentence>"}"""
 
@@ -240,6 +244,19 @@ GOALS are the agent's own horizons (primary = the long-term why, secondary = the
 tertiary = the immediate focus, possibly a diversion; GOAL_STATUS says whether a criterion holds now;
 INTERRUPTED is a paused focus); NOTEPAD is the agent's own notes. Say if a goal should change.
 ITEMS and SIGNALS.money are ground truth — where the NOTEPAD disagrees, trust ITEMS.
+
+MEMORY — what you have already tried and been told (harness-written ground truth):
+  - SINCE_LAST_REVIEW: what happened since you last reviewed — maps entered (entered_repeatedly = a
+    bounce), plan changes with the REAL reason each step failed, and HEARD (what people, signs and
+    objects said, with who and where; "heard Nx" = said more than once — hints often point the way).
+  - ATTEMPTS: every step that failed before and how often. Do NOT retry the same thing the same way;
+    if it failed repeatedly, something you believe is wrong — change the approach.
+  - HEARD: digest = long-term notes of what you've been told; here = what was said on this map.
+  - UNEXPLORED_HERE: on this map, doors to places you've never been, people you haven't talked to,
+    objects you haven't checked.
+  - STALL: steps without progress, plus a reviewer's CRITIQUE when you've been stuck a while.
+When you're stuck and don't know the way, do what a player does: explore — go through the doors you
+haven't tried, talk to the people you haven't talked to (an explore step, see DECIDE).
 
 TEAM — the agent owns a TEAM, not just its starter. A single Pokémon is fragile: when the lead
 faints the run is over for that fight, and later gyms punish a one-type team (e.g. Misty's Water types,
@@ -296,7 +313,9 @@ heal step) — you don't have to rewrite a goal for it.
     Balls in ITEMS; buying needs enough money.
 
 You are given: CURRENT_MAP, PARTY, ITEMS, BADGES, PLAN (existing steps), SIGNALS, GOALS,
-GOAL_STATUS, INTERRUPTED, NOTEPAD, BRAINSTORM (the prior assessment), and MAPS (an id->name table —
+GOAL_STATUS, INTERRUPTED, NOTEPAD, SINCE_LAST_REVIEW, ATTEMPTS, HEARD, UNEXPLORED_HERE, STALL (see
+BRAINSTORM's MEMORY notes: what happened, what failed, what you were told, what you haven't tried),
+BRAINSTORM (the prior assessment), and MAPS (an id->name table —
 you MUST use these exact ids for any "map" field).
 
 EVERY step you add MUST include an explicit "kind" — this is a HARD requirement; a step with no
@@ -305,6 +324,7 @@ kind silently breaks execution downstream:
    "done_when": "on_map", "why": "<short>", "after": null}
   {"kind": "action", "map": <int>, "talk": <true|false>, "who": "<npc name, if talk, else null>",
    "done_when": "<criterion>", "why": "<short>", "after": null}
+  {"kind": "explore", "map": <int>, "who": "<optional: an UNEXPLORED_HERE entry to try first>", "why": "<short>", "after": null}
 
 The kind rule:
   - "travel" is ONLY for moving to a map with no other objective on arrival; its done_when is
@@ -362,6 +382,15 @@ WORKED EXAMPLES (one per objective class — copy the SHAPE, adapt the specifics
                       per map you pass through: "go to Route 4" is already true at the cave entrance.
   story beat not  -> {"kind":"action","map":12,"talk":true,"who":"the guard",
   RAM-trackable        "done_when":"verify:did the guard let us pass?","why":"..."}
+  explore         -> {"kind":"explore","map":3,"who":"door to Cerulean Trashed House (never visited) at (27,11)",
+                       "why":"find the way south"}
+                      "who" (optional) = what to try first: COPY one entry from UNEXPLORED_HERE (or give
+                      its coordinates, e.g. "(27,11)").
+                      Visits what's unexplored on that map — doors to places never visited, people not
+                      talked to, objects not checked (UNEXPLORED_HERE), your "who" first if given — until
+                      something NEW turns up (a new place or something new heard); then you review again.
+                      Use it when stuck, when you don't know the way, or when ATTEMPTS show the same step
+                      failing — instead of re-adding the failed step. No done_when needed.
 
 PLACEMENT — "after" says where a new step goes. Leave it null (the default) for something to do
 NEXT, before the rest of the plan — emergency heals and replacements for a wedged step are always
@@ -378,7 +407,9 @@ until after shopping ->
 RULES:
   - Emit MINIMAL steps: only what's missing from the existing PLAN, anchored to it — don't repeat
     steps already present and on track.
-  - EVERY step MUST include "kind" ("travel" or "action"); never omit it.
+  - EVERY step MUST include "kind" ("travel", "action" or "explore"); never omit it.
+  - Never re-add a step that ATTEMPTS shows failing the same way; change the approach (often: explore).
+  - Put lessons in the NOTEPAD (what failed and why, hints you heard) so later reviews keep them.
   - Use the correct map id from MAPS for every "map" field.
   - Prefer a RAM-checkable done_when (has_item/no_item/level/badges/hp_frac/on_map) over
     "verify:" whenever one applies.
@@ -626,6 +657,13 @@ class Planner:
             out["notepad_truncated"] = bool(context.get("notepad_truncated"))
         return out
 
+    @staticmethod
+    def _memory_fields(context: dict, *, full: bool = True) -> dict:
+        """What happened since the last review, what was tried / heard / not explored, and stall state
+        (spec 2026-09-24). Absent keys are simply omitted (old captured contexts, evals)."""
+        keys = ("since_last_review", "attempts", "stall") + (("heard", "unexplored_here") if full else ())
+        return {k: context[k] for k in keys if context.get(k) not in (None, [], {}, "")}
+
     def l1_triage(self, context: dict) -> dict:
         """L1 pipeline step 1 (TRIAGE): a cheap, fast, NO-search check of whether the standing
         plan needs to change at all, given the plan + signals. Gates the expensive
@@ -641,6 +679,7 @@ class Planner:
                 "signals": context.get("signals"),
                 **self._goal_fields(context, notepad=False),
                 "current_map": context.get("current_map"),
+                **self._memory_fields(context, full=False),
             }
             content, _lat, _usage = self.provider.chat_json(TRIAGE_SYSTEM, state)
             data = json.loads(strip_fences(content))
@@ -667,7 +706,9 @@ class Planner:
                 "items": context.get("items"),
                 "badges": context.get("badges"),
                 "signals": context.get("signals"),
+                "plan": context.get("plan"),
                 **self._goal_fields(context),
+                **self._memory_fields(context),
             }
             data = self._llm_with_search(prov, BRAINSTORM_SYSTEM, state, final_key="assessment",
                                          capture_layer="l1_brainstorm")
@@ -697,6 +738,7 @@ class Planner:
                 "plan": context.get("plan"),
                 "signals": context.get("signals"),
                 **self._goal_fields(context),
+                **self._memory_fields(context),
                 "brainstorm": brainstorm.get("assessment", ""),
                 "maps": {str(mid): name for mid, name in MAP_NAMES_RAW.items()},
             }
@@ -808,6 +850,8 @@ class Planner:
             return {"on_map": map_id}
         if low == "talked":
             return {"talked_on_map": map_id}
+        if low == "explored":                              # an explore step: done on a discovery
+            return {"explored": map_id}
         if low.startswith("level:") and ">=" in s:        # one party member: level:Sophie>=16
             name, _, num = s[len("level:"):].rpartition(">=")
             num = num.strip()

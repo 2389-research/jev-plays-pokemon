@@ -41,6 +41,7 @@ class Intent(str, Enum):
     GRIND = "grind"          # raise party level (no fixed tile target)
     SHOP = "shop"            # buy at a Mart
     BATTLE = "battle"        # in-battle; the battle controller owns the turn
+    EXPLORE = "explore"      # visit what's unexplored on a map until something new turns up
 
 
 # Intents whose directive carries a concrete `target` the deterministic servo (BFS/graph)
@@ -48,7 +49,8 @@ class Intent(str, Enum):
 # (grass is en route, so grinding happens as you walk the route); BATTLE is owned by the
 # mode controller and never target-bearing (spec §3/§5).
 TARGET_BEARING: frozenset[Intent] = frozenset(
-    {Intent.TRAVEL, Intent.TALK_TO, Intent.GRAB_ITEM, Intent.ENTER, Intent.HEAL, Intent.SHOP, Intent.GRIND}
+    {Intent.TRAVEL, Intent.TALK_TO, Intent.GRAB_ITEM, Intent.ENTER, Intent.HEAL, Intent.SHOP, Intent.GRIND,
+     Intent.EXPLORE}
 )
 
 

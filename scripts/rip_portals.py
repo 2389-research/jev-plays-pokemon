@@ -549,35 +549,14 @@ def build_portal_graph(map_names: list[str]) -> dict:
     # ---- LAST_MAP like the game (K6): wLastMap is only set when leaving an OUTSIDE map ----
     fix_last_map(maps, portals, consts, const_to_name, id_to_const)
 
-    # ---- gated portals (K5): story gates the static geometry can't see ----
-    for p in portals.values():
-        src = maps[p["map"]].name
-        dst = maps[p["dest_map"]].name if p.get("dest_map") in maps else None
-        gate = GATED.get(src) or (GATED.get(dst) if p["kind"] in ("warp", "elevator") else None)
-        if gate:
-            p["gated"] = gate[0]
-            if gate[1]:
-                p["open_when"] = gate[1]    # RAM predicate: the live router opens the gate once it holds
-
     return {"maps": maps, "portals": portals}
 
 
 OUTSIDE_TILESETS = {"OVERWORLD", "PLATEAU"}
 
-# K5 — story gates the static geometry can't see (extend per incident). Warps on/into these maps are
-# marked `gated` and skipped by routing by default.
-GATED = {   # map -> (why, RAM predicate that opens it | None = stays closed)
-    "Route5Gate": ("Saffron guard wants a drink", None),
-    "Route6Gate": ("Saffron guard wants a drink", None),
-    "Route7Gate": ("Saffron guard wants a drink", None),
-    "Route8Gate": ("Saffron guard wants a drink", None),
-    # the guard at the door (CERULEANCITY_GUARD2) is hidden by Bill's script as it gives the S.S. Ticket
-    "CeruleanTrashedHouse": ("a police officer blocks the door until you have Bill's S.S. Ticket",
-                             {"has_item": 63}),
-    "Route22Gate": ("badge check (Boulder Badge) for Route 23", {"badges": ">=1"}),
-    "Route16Gate1F": ("Cycling Road: bicycle required", {"has_item": 6}),
-    "Route18Gate1F": ("Cycling Road: bicycle required", {"has_item": 6}),
-}
+# K5 (removed 2026-09-24): no story gates in the map data. A hand-written gate list was wrong and
+# silently vetoed the only route south of Cerulean; the agent now learns blocked portals by observing
+# them (PortalGraph.blocked, filled at runtime).
 
 
 def cross_cell(md: MapData, direction: str, offset: int, dst: MapData, cell: tuple[int, int]) -> tuple[int, int]:
@@ -744,7 +723,7 @@ def route(portals: dict, from_map: int, from_component: int, to_map: int) -> lis
     other map. Success = arriving on ``to_map``. Returns the ordered list of portal
     ids traversed, or None."""
     # start frontier: portals on from_map reachable on foot from from_component
-    usable = {k: v for k, v in portals.items() if not v.get("gated") and v["kind"] != "elevator"}
+    usable = {k: v for k, v in portals.items() if v["kind"] != "elevator"}
     portals = usable
     start = [p["id"] for p in portals.values()
              if p["map"] == from_map and p["component"] == from_component]
@@ -781,16 +760,29 @@ def route(portals: dict, from_map: int, from_component: int, to_map: int) -> lis
 # --------------------------------------------------------------------------- #
 # 6. Validation checks
 # --------------------------------------------------------------------------- #
-def find_states(per_map: int = 6) -> dict[int, list[Path]]:
+def find_states(per_map: int = 25) -> dict[int, list[Path]]:
     """Newest ``runs/*/states/map<ID>_*.state`` files per map id (a few candidates each: the recorder
-    names a state by the map at step START, so a map-crossing step's file holds the NEXT map)."""
+    names a state by the map at step START, so a map-crossing step's file holds the NEXT map — a run that
+    bounced across an edge can fill the newest few with crossing frames; the first real match wins)."""
     cands: dict[int, list[tuple[float, Path]]] = {}
     for p in (REPO / "runs").glob("*/states/map*_*.state"):
         m = re.match(r"map(\d+)_", p.name)
         if not m:
             continue
         cands.setdefault(int(m.group(1)), []).append((p.stat().st_mtime, p))
-    return {k: [p for _, p in sorted(v, reverse=True)[:per_map]] for k, v in cands.items()}
+    out: dict[int, list[Path]] = {}
+    for k, v in cands.items():                 # newest first, at most 3 per run (spread across runs)
+        per_run: dict[str, int] = {}
+        pick = []
+        for _, p in sorted(v, reverse=True):
+            run = p.parent.parent.name
+            if per_run.get(run, 0) < 3:
+                per_run[run] = per_run.get(run, 0) + 1
+                pick.append(p)
+            if len(pick) >= per_map:
+                break
+        out[k] = pick
+    return out
 
 
 def validate_collision(graph: dict) -> dict[int, dict]:
@@ -920,8 +912,7 @@ def main() -> int:
     kinds: dict[str, int] = {}
     for p in portals.values():
         kinds[p["kind"]] = kinds.get(p["kind"], 0) + 1
-    print(f"\nRipped {len(maps)} maps, {len(portals)} portals {kinds}; "
-          f"gated {sum(1 for p in portals.values() if p.get('gated'))}")
+    print(f"\nRipped {len(maps)} maps, {len(portals)} portals {kinds}")
     for nm, note in LOAD_NOTES.items():
         print(f"  load note: {nm}: {note}")
 
@@ -976,11 +967,11 @@ def main() -> int:
         ("Cerulean (main) -> Pewter is unreachable",
          first_route("CeruleanCity", "PewterCity", comp_of_warp("CeruleanCity", "POKECENTER")),
          lambda r: r is None),
-        # from Cerulean's SOUTH side (its main area reaches the south only through the trashed house,
-        # which is gated early on — so main -> Vermilion is correctly unreachable at first)
-        ("Cerulean (south side) -> Vermilion via the Underground Path, not Saffron",
-         first_route("CeruleanCity", "VermilionCity", comp_of_warp("CeruleanCity", "south edge")),
-         lambda r: r and any("undergroundpath" in x for x in r) and not any("saffron" in x for x in r)),
+        # main Cerulean reaches its south exit only THROUGH the trashed house (the direct path is a Cut
+        # tree); Saffron's gates are open in the static data (guards are learned by observation)
+        ("Cerulean (main) -> Vermilion through the trashed house",
+         first_route("CeruleanCity", "VermilionCity", comp_of_warp("CeruleanCity", "POKECENTER")),
+         lambda r: r and r[0].startswith("ceruleancity:warp") and "ceruleantrashedhouse:warp3" in r),
     ]
     for label, r, test in goldens:
         passed = bool(test(r))

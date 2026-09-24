@@ -137,3 +137,27 @@ def test_a_travel_step_is_never_wedged_or_rotated_by_npc_talks():
     for _ in range(3):
         _talk_once(loop, d, target2, _p(7, 11, "north"))
     assert not target2.get("tried")
+
+
+def test_a_verify_step_wedges_when_the_same_thing_is_heard_again_and_again():
+    """runs/explore-live: "talk to the Guard" with verify:"did he step aside?" re-talked ~8x in 200
+    steps (verify steps were exempt from rotation). A conversation that REPEATS what was already heard is
+    unproductive; twice -> wedge with what they keep saying."""
+    loop, d, events = _setup(success={"verify": "did the Guard step aside?"})
+    target = {"kind": "approach_npc", "sprite": "Brock", "picked": [7, 10, GYM]}
+    at_guide = _p(7, 11, "north")
+
+    def talk_and_hear(step):
+        loop._approach_npc(target, d, _obs(at_guide, [GUIDE, TRAINER, BROCK]), set(), set())
+        loop.heard.observe(loop.session.step, map_id=GYM, map_name="Pewter Gym", active=True,
+                           lines=["Team Rocket robbed this house!", ""], speaker="Gym Guide")
+        loop.session.step += 1
+        loop._note_dialogue_step()
+        loop.heard.observe(loop.session.step, map_id=GYM, map_name="Pewter Gym", active=False, lines=[])
+        loop.session.step += 1
+    for k in range(4):
+        talk_and_hear(k)
+    loop._approach_npc(target, d, _obs(at_guide, [GUIDE, TRAINER, BROCK]), set(), set())
+    step = loop._plan_steps[0]
+    assert step.status == "wedged" and "keeps saying the same thing" in step.wedge_reason
+    assert "Team Rocket robbed this house!" in step.wedge_reason

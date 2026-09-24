@@ -38,7 +38,9 @@ class PortalGraph:
         self.portals = portals  # id -> portal dict
         self.version = version
         self._grids: dict[int, dict[tuple[int, int], int]] = {}
-        self.open_gates: set[str] = set()   # story gates opened at runtime (refresh_gates)
+        # portals the agent OBSERVED it couldn't get through (a sprite in the way, pushed back) ->
+        # {portal_id: why}. Set by the loop from memory; never story knowledge baked into the data.
+        self.blocked: dict[str, str] = {}
         self._by_map: dict[int, list[dict]] = {}
         for p in portals.values():
             self._by_map.setdefault(p["map"], []).append(p)
@@ -56,30 +58,12 @@ class PortalGraph:
     def portals_on(self, map_id: int) -> list[dict]:
         return self._by_map.get(int(map_id), [])
 
-    def exits_from(self, map_id: int, comp: int, *, allow_gated: bool = False) -> list[dict]:
-        """Portals in this component that lead somewhere (a walk-reachable exit set). Story-gated
-        portals and elevators (dynamic destinations) are not routed unless ``allow_gated``."""
+    def exits_from(self, map_id: int, comp: int, *, allow_blocked: bool = False) -> list[dict]:
+        """Portals in this component that lead somewhere (a walk-reachable exit set). Portals observed
+        to be blocked and elevators (dynamic destinations) are not routed unless ``allow_blocked``."""
         return [p for p in self.portals_on(map_id)
                 if p["component"] == comp and p["dest_map"] is not None and p["kind"] != "elevator"
-                and (allow_gated or not self.is_gated(p))]
-
-    def is_gated(self, p: dict) -> bool:
-        return bool(p.get("gated")) and p["id"] not in self.open_gates
-
-    def refresh_gates(self, holds) -> set[str]:
-        """Open every story gate whose ``open_when`` RAM predicate holds (``holds(pred) -> bool``); a
-        gate with no predicate stays closed. Returns the newly opened portal ids."""
-        opened = set()
-        for p in self.portals.values():
-            if p.get("gated") and p.get("open_when") and p["id"] not in self.open_gates:
-                try:
-                    ok = bool(holds(p["open_when"]))
-                except Exception:
-                    ok = False
-                if ok:
-                    self.open_gates.add(p["id"])
-                    opened.add(p["id"])
-        return opened
+                and (allow_blocked or p["id"] not in self.blocked)]
 
     # --- static routing over (map, component) nodes ----------------------
     def _comps_of(self, mid: int) -> set[int]:
@@ -234,7 +218,7 @@ class PortalGraph:
                     continue
                 links = {}
                 for p in self.portals_on(m):
-                    if p["kind"] == "ledge" or self.is_gated(p):
+                    if p["kind"] == "ledge" or p["id"] in self.blocked:
                         continue
                     if p["dest_map"] is not None and p.get("direction") in _CARDINAL:
                         links[(p["direction"], p["dest_map"])] = None

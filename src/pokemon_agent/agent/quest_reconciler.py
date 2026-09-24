@@ -16,12 +16,15 @@ class QuestStep:
     provisional: bool = False        # a synthesized bootstrap default; superseded once L1 adds real steps
     wedge_reason: str = ""           # why the executive wedged it (shown to L1 as why_wedged)
     kind: str = "action"             # "travel" = reach a map (on_map completion ok);
-                                      # "action" = done by a state change (needs a real criterion)
+                                      # "action" = done by a state change (needs a real criterion);
+                                      # "explore" = visit what's unexplored there until a discovery
 
 
 def _criterion(done_when: str | None, map_id: int, kind: str) -> dict:
     from .planner_llm import Planner
     parsed = Planner._parse_done_when(done_when, map_id)
+    if kind == "explore":
+        return {"explored": map_id}
     if kind == "travel":
         # a travel leg completes on ARRIVAL by definition — always on_map, ignoring any (bogus)
         # criterion a directly-constructed step might carry (validate_step gates L1-emitted ones).
@@ -42,7 +45,16 @@ def compile_steps_to_directives(steps: list[QuestStep]) -> list[Directive]:
     for s in steps:
         crit = _criterion(s.done_when, s.map, s.kind)
         nm = map_name(s.map)
-        if s.talk:
+        if s.kind == "explore":
+            out.append(Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": s.map},
+                                 success={"on_map": s.map}, quest_id=s.id,
+                                 reason=f"quest: go to {nm} to explore — {s.why}"[:120]))
+            out.append(Directive(intent=Intent.EXPLORE,
+                                 target={"kind": "explore", "map": s.map, "prefer": s.who},
+                                 success=crit, quest_id=s.id,
+                                 reason=(f"quest: explore {nm}" + (f" (try {s.who} first)" if s.who else "")
+                                         + f" — {s.why}")[:120]))
+        elif s.talk:
             out.append(Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": s.map},
                                  success={"on_map": s.map}, quest_id=s.id,
                                  reason=f"quest: go to {nm} — {s.why}"[:120]))
@@ -108,16 +120,17 @@ def reconcile_quests(current, proposal, *, next_id, on_event=None):
             mp = int(a["map"])
         except (KeyError, TypeError, ValueError):
             continue
-        dw = a.get("done_when")
+        kind = str(a.get("kind") or "action")
+        dw = "explored" if kind == "explore" else a.get("done_when")
         key = (mp, dw or "on_map")
         if key in have:
             if on_event is not None:
                 on_event("l1_add_deduped", {"map": mp, "done_when": dw, "against": have[key]})
             continue
         have[key] = "(new)"
-        step = QuestStep(id=next_id(), map=mp, talk=bool(a.get("talk")),
+        step = QuestStep(id=next_id(), map=mp, talk=bool(a.get("talk")) and kind != "explore",
                          who=(a.get("who") or None), done_when=dw, why=str(a.get("why") or "")[:80],
-                         kind=str(a.get("kind") or "action"))
+                         kind=kind)
         placed.append((step, anchor_of(a)))
 
     out = done + active + pending

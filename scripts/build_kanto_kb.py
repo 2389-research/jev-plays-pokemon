@@ -118,8 +118,6 @@ def area_lines(pg: PortalGraph, mid: int) -> list[str]:
             desc = "elevator"
         else:
             desc = f"door/entrance to {dest}"
-        if p.get("gated"):
-            desc += f" [BLOCKED: {p['gated']}]"
         if desc not in by_comp[p["component"]]:
             by_comp[p["component"]].append(desc)
     if not by_comp:
@@ -272,7 +270,6 @@ def build_docs() -> dict[str, str]:
 
     # --- story gates / blockers (graph gates + data + well-known blockers)
     drinks = [item_name(c) for c in re.findall(r"db\s+([A-Z_]+)", (POKERED / "data/items/guard_drink_items.asm").read_text())]
-    gated = sorted({(pg.map_name(p["map"]), p["gated"]) for p in pg.portals.values() if p.get("gated")})
     lines = ["Story gates and blockers in Pokémon Red — places you can't pass until something is done:",
              f"- Saffron City gates (Routes 5/6/7/8): the guards are thirsty; give one a drink ({', '.join(drinks)} —"
              " sold in the vending machines on the Celadon Department Store roof). After that all four gates open.",
@@ -292,7 +289,7 @@ def build_docs() -> dict[str, str]:
              "- HM obstacles: small trees need CUT (HM01, S.S. Anne captain); water needs SURF (HM03, Safari Zone);",
              "  boulders need STRENGTH (HM04, Safari Zone warden after returning his Gold Teeth); dark caves are",
              "  easier with FLASH (HM05, Oak's aide on Route 2 once you've caught 10 Pokémon).",
-             "Gated portals in the map data:"] + [f"- {m}: {why}" for m, why in gated]
+             ]
     docs[f"{PREFIX}story gates and blockers"] = "\n".join(lines)
 
     # --- curated story order (NOT derived from data)

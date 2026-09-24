@@ -11,9 +11,12 @@ from .constants import ITEMS, MOVES, SPECIES, SPRITES
 
 # --- Gen-1 text charmap (for names + on-screen dialog) --------------------
 # Kept conservative so non-text tiles decode to nothing (avoids garbage like "PKMN").
-_SPECIAL = {
+_SPECIAL = {   # pokered constants/charmap.asm (tiles as rendered on screen)
     0x7F: " ", 0x4E: " ", 0x9C: ":", 0xE8: ".", 0xE6: "?", 0xE7: "!",
-    0xE3: "-", 0xE0: "'", 0xF4: ",", 0x9A: "(", 0x9B: ")",
+    0xE3: "-", 0xE0: "'", 0xF4: ",", 0x9A: "(", 0x9B: ")", 0x9D: ";", 0x9E: "[", 0x9F: "]",
+    0xBA: "é", 0xBB: "'d", 0xBC: "'l", 0xBD: "'s", 0xBE: "'t", 0xBF: "'v", 0xE4: "'r", 0xE5: "'m",
+    0xE1: "PK", 0xE2: "MN", 0x75: "…", 0xF3: "/", 0xEF: "♂", 0xF5: "♀", 0xF1: "×", 0xF0: "¥",
+    0xF2: ".",
 }
 
 _FACING = {0: "south", 4: "north", 8: "west", 12: "east"}
@@ -256,6 +259,17 @@ def read_screen_text(emu: Emulator) -> tuple[str, bool]:
         return "", False
 
 
+def read_dialog_lines(emu: Emulator) -> list[str]:
+    """The two text lines of the standard bottom text box (tile rows 14 and 16), in order. The
+    HeardLog stitches these frames into complete messages (typing grows a line; a scroll moves the
+    lower line up)."""
+    try:
+        return [_decode(emu, WTILEMAP + row * 20 + 1, 18, stop_at_terminator=False).strip()
+                for row in (14, 16)]
+    except Exception:
+        return []
+
+
 def _sprite_kind(name: str) -> str:
     """'item' = a pickup you press A to grab (Poké Ball / item on the ground); else 'person'
     (an NPC you talk to). Lets the executor route grab_item vs talk_to correctly."""
@@ -404,4 +418,5 @@ def read_game_state(emu: Emulator) -> dict:
         "rival_name": _decode(emu, WRIVALNAME, 11),
         "dialog_active": dialog_active,
         "screen_text": text,
+        "dialog_lines": read_dialog_lines(emu) if dialog_active else [],
     }

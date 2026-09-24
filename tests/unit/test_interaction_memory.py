@@ -35,15 +35,3 @@ def test_annotate_flags_talked_npc():
     out = mem.annotate_npcs(p, npcs)
     assert out[0]["talked_to"] is True   # the one we conversed with
     assert out[1]["talked_to"] is False  # a different NPC
-
-
-def test_dialog_logged_and_deduped():
-    mem = InteractionMemory()
-    p = player(5, 5, "north")
-    gs = {"dialog_active": True, "screen_text": "OAK: Hello there!"}
-    mem.record_dialog(1, p, gs)
-    mem.record_dialog(2, p, gs)  # same text -> not duplicated
-    assert len(mem.dialog_log) == 1
-    mem.record_dialog(3, p, {"dialog_active": True, "screen_text": "Choose a POKEMON"})
-    assert len(mem.dialog_log) == 2
-    assert "Choose a POKEMON" in mem.summary()["recent_dialog"]

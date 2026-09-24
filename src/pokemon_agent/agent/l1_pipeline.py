@@ -12,6 +12,8 @@ def validate_step(step: dict) -> tuple[bool, str | None]:
     except (TypeError, ValueError):
         return False, f"step map is missing/invalid: {step.get('map')!r}"
     dw = step.get("done_when")
+    if kind == "explore":
+        return True, None                  # done on a discovery; "who" is an optional preference
     if kind == "travel":
         if step.get("talk") or step.get("who"):
             return False, "travel step cannot talk; use kind:action"

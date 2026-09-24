@@ -171,7 +171,7 @@ class WorldMap:
         "  @ = you    . = path (walkable)    # = obstacle: tree/rock/building/fence (NOT walkable)\n"
         "  G = tall grass (walkable; wild Pokemon appear here)    ~ = water (NOT walkable without Surf)\n"
         "  D = door/exit (step onto it to change area)    C = counter (talk to an NPC across it)\n"
-        "  N = a person/NPC (walking into them talks, doesn't move you)\n"
+        "  N = a person/NPC (NOT walkable; walking into them talks, doesn't move you)\n"
         "  v/</> = LEDGE, one-way: 'v' you may hop SOUTH, '<' hop WEST, '>' hop EAST; you can NEVER "
         "go back up a ledge, so treat them as walls except in the hop direction.\n"
         "  x = COLUMN (two header rows: tens then units), y = ROW (labeled at left, increases south)."

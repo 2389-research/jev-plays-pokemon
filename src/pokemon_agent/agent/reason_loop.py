@@ -2842,14 +2842,23 @@ class ReasoningLoop:
             out.append({"x": x, "y": y, "kind": "door",
                         "dest_map": e.get("dest_map"), "dest": e.get("dest_name")})
         dims = getattr(obs, "map_dims", None)
-        if dims and reachable:
+        # a boundary tile is only an exit where the map actually CONNECTS in that direction: an indoor map
+        # has none (the captured Cerulean Gym request listed 32 fake "edges" along its walls)
+        player = getattr(obs, "player", None)
+        pg, mid = self.portals, getattr(player, "map_id", None)
+        if pg is not None and mid in pg.maps:
+            conn = {{"north": "N", "south": "S", "west": "W", "east": "E"}.get(p.get("direction"))
+                    for p in pg.portals_on(mid) if p["kind"] == "edge"}
+        else:
+            conn = {"N", "S", "W", "E"} if getattr(player, "is_outdoor", True) else set()
+        if dims and reachable and conn:
             w, h = dims
             for (x, y) in reachable:
                 if (x, y) in doors:
                     continue
                 d = ("N" if y <= 0 else "S" if y >= h - 1 else
                      "W" if x <= 0 else "E" if x >= w - 1 else None)
-                if d is not None:
+                if d is not None and d in conn:
                     out.append({"x": x, "y": y, "kind": "edge", "dir": d})
         return out
 

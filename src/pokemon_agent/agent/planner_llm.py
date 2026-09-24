@@ -122,8 +122,9 @@ way. IGNORE candidates that lead BACKWARD (e.g. a door back into a building you 
 dest is where you came from). If no candidate helps yet, walk toward the goal side of the map and
 you'll be asked again. You may also pick any other walkable tile — candidates are hints, not a menu.
 
-Pick a tile that is in REACHABLE and a real step toward the goal, not one in RECENT_TARGETS you keep
-revisiting. WHY is one short sentence of your reasoning (it becomes the agent's visible short-term
+Pick a walkable tile you can actually get to (not a wall, water or a person) that is a real step toward
+the goal, not one in RECENT_TARGETS you keep revisiting. If REJECTED is present, your previous answer was
+refused for the reason given — pick again with that in mind. WHY is one short sentence of your reasoning (it becomes the agent's visible short-term
 objective and helps debugging — always include it)."""
 
 
@@ -1006,7 +1007,9 @@ class Planner:
         reason = "no response"
         last_raw = None
         content, _lat, _usage = None, 0, {}   # bound for the unresolved-after-failure record
-        for _ in range(2):  # one retry on an invalid pick
+        for attempt in range(2):  # one retry on an invalid pick — told WHY the first answer was refused
+            if attempt and reason:
+                state = {**state, "rejected": reason}
             try:
                 content, _lat, _usage = self.provider.chat_json(PROPOSER_SYSTEM, state)
                 last_raw = content
@@ -1028,7 +1031,11 @@ class Planner:
                 progresses = (px is None) or (x, y) != (px, py)
                 if progresses and (is_exit or reachable is None or (x, y) in reachable):
                     return self._cap_target(state, content, {"kind": "tile", "x": x, "y": y, "note": note}, _lat, _usage)
-                reason = f"tile ({x},{y}) unreachable / no-op"
+                who = next((n.get("sprite") for n in (context.get("npcs") or [])
+                            if (n.get("x"), n.get("y")) == (x, y)), None)
+                reason = (f"({x},{y}) is where you already are" if not progresses else
+                          f"({x},{y}) is occupied by {who} — a person's tile can't be stood on" if who else
+                          f"({x},{y}) can't be reached from where you are (a wall, water, or cut off)")
                 continue
             if kind == "enter":
                 try:

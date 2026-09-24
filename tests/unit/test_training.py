@@ -236,3 +236,15 @@ def test_evolution_docs_are_per_family_and_skip_placeholders():
     assert weedle.startswith("Weedle -> Kakuna (level 7) -> Beedrill (level 10)")
     assert any("Fire Stone" in v for k, v in docs.items() if "Eevee" in k)
     assert "Onix" in docs["Pokemon that do not evolve"] and "Fossil" not in docs["Pokemon that do not evolve"]
+
+
+def test_party_members_carry_what_they_become():
+    """runs/sleeves-mtmoon: L1 benched a Magikarp as 'dead weight' without knowing about Gyarados — a
+    player knows what their Pokémon become, so the party view carries it (information, not a rule)."""
+    from pokemon_agent.games.pokemon_red.evolution import evolution_line
+    assert evolution_line("Magikarp") == "Gyarados at L20"
+    assert evolution_line("Weedle") == "Kakuna at L7 -> Beedrill at L10"
+    assert evolution_line("Nidoran M") == "Nidorino at L16 -> Nidoking with a Moon Stone"
+    assert evolution_line("Abra") == "Kadabra at L16 -> Alakazam by trade"
+    assert "Jolteon with a Thunder Stone" in evolution_line("Eevee")
+    assert evolution_line("Onix") is None and evolution_line("Blastoise") is None

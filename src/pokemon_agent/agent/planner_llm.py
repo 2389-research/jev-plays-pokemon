@@ -444,7 +444,8 @@ TRAINING — only Pokémon that take part in a battle earn EXP, and the LEAD (fi
 every battle, so a bench that never leads stays weak. Training a member is your call: set "lead":
 "<nickname>" (the harness moves it to the front of the party), then grind with a step whose done_when is
 "level:<nickname>>=N" — somewhere its level can handle (weak wild Pokémon, heal often). Set the lead
-back (e.g. "lead": "Dylan") before a gym battle. PARTY shows each member's nickname, level and HP.
+back (e.g. "lead": "Dylan") before a gym battle. PARTY shows each member's nickname, level, HP and — in
+"evolves" — what it will become (e.g. "Gyarados at L20"): weigh a Pokémon by its future, not just its level now.
 SWITCH-TRAINING is another option, if you want it: "train": ["<nickname>", ...] puts that member first
 and, when a battle starts, the battle layer sends it out and immediately switches to your strongest
 healthy member — Gen 1 splits the EXP among every member that took part, so it grows without doing the

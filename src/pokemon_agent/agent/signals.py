@@ -30,7 +30,12 @@ def game_signals(emu) -> dict:
     """RAM-derived signals fed INTO L1 each cycle (the loop adds blocked_for_n). Includes the party
     list so the emergency reflex can reuse it without a second read."""
     from ..games.pokemon_red.game_state import read_party, read_items, read_badges, read_money
+    from ..games.pokemon_red.evolution import evolution_line
     party = read_party(emu)
+    for m in party:                       # player knowledge: what each member becomes
+        line = evolution_line(m.get("species"))
+        if line:
+            m["evolves"] = line
     return {"party": party, "hp_frac": party_hp_frac(party), "min_level": min_level(party),
             "money": read_money(emu),
             "badges": (read_badges(emu) or {}).get("count", 0),

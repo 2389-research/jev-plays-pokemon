@@ -244,6 +244,11 @@ class ReasoningLoop:
         # battle record for L1 (SIGNALS.recent_battles): the live battle's tracking + the last few results
         self._battle_track: dict | None = None
         self._battle_log: deque = deque(maxlen=6)
+        # the screen unsticker: a fast model takes a multi-step episode when a text/menu screen loops
+        from .unsticker import Unsticker
+        self.unsticker = Unsticker(getattr(self.planner, "provider", None) if self.planner else None,
+                                   on_event=lambda k, p: self.on_event(k, p), press=self._held_press,
+                                   capture=getattr(self, "capture", None))
         # conversation/script gate (F5): last step routed to dialogue, consecutive forced waits, and
         # whether forced waiting is armed (a timeout disarms it until the script flag clears)
         self._last_dialog_step = -(10**9)
@@ -335,6 +340,13 @@ class ReasoningLoop:
         # keep the compact battle-goals (catch list + level_target) in sync with L1's plan each
         # step, so the battle layer sees the CURRENT goals on the next battle-start edge (§7.1).
         self._sync_battle_goals()
+
+        # --- the screen unsticker: a text/menu screen that keeps coming back means the normal path is
+        # looping on something it doesn't understand -> a model takes a multi-step episode, first ---
+        progress, screen, text_screen = self._stuck_signature(obs)
+        self.unsticker.observe(progress, screen, text_screen=text_screen)
+        if self.unsticker.active or self.unsticker.should_start(step=self.session.step):
+            return self._unstick_step(obs, shot)
 
         # --- nickname prompt / name keyboard: always decline deterministically (an A-spam would type
         # "AAAAAAAAAA" as the Pokemon's name) ---
@@ -1981,6 +1993,72 @@ class ReasoningLoop:
         self._prev = rstep
         self._emit_reason(rstep, 0)
         return self._finish(obs, rstep, result, 0, {}, shot)
+
+    def _held_press(self, button: str) -> None:
+        """A held press of any button (1-frame taps can be dropped by the game's joypad sampling)."""
+        from ..emulator.interface import GameButton
+        b = {"A": GameButton.A, "B": GameButton.B, "UP": GameButton.UP, "DOWN": GameButton.DOWN,
+             "LEFT": GameButton.LEFT, "RIGHT": GameButton.RIGHT, "START": GameButton.START,
+             "SELECT": GameButton.SELECT}[button]
+        emu = self.controller.emu
+        emu.hold(b)
+        emu.tick(8)
+        emu.release(b)
+        emu.tick(30)
+
+    def _stuck_signature(self, obs) -> tuple[tuple, str, bool]:
+        """(progress, screen, text_screen). Progress = what changes when play advances: map/position,
+        battle state, HP on both sides, party levels + moves, bag size, money. Screen = the text + menu
+        cursor. Only text/menu screens (not a script-owned cutscene) count toward being stuck."""
+        from ..games.pokemon_red import menus as _m
+        emu = self.controller.emu
+        try:
+            text = _m.screen_text(emu)
+            menu = _m.menu_open(emu)
+            party = read_party(emu)
+            progress = (getattr(obs.player, "map_id", None), getattr(obs.player, "x", None),
+                        getattr(obs.player, "y", None), emu.read_memory(0xD057),
+                        emu.read_memory(0xCFE6) << 8 | emu.read_memory(0xCFE7),
+                        tuple((m.get("hp"), m.get("level"), tuple(m.get("moves") or ())) for m in party),
+                        tuple(emu.read_memory(0xD01C + i) for i in range(4)), emu.read_memory(0xD31D),
+                        emu.read_memory(0xD347) << 16 | emu.read_memory(0xD348) << 8 | emu.read_memory(0xD349))
+        except Exception:
+            return (), "", False
+        screen = " ".join(text.split()) + f" |menu={menu} cur={emu.read_memory(0xCC26)}"
+        # a script owning the controls (cutscene) with static text is waiting, not looping
+        return progress, screen, (bool(text.strip()) or menu) and not self._script_active()
+
+    def _unstick_step(self, obs, shot):
+        """Run one unsticker turn (starting the episode if needed) and finish the step with it."""
+        from ..core.models import WaitAction
+        from ..games.pokemon_red import battle as _b, menus as _m
+        emu = self.controller.emu
+        text = _m.screen_text(emu)
+        if not self.unsticker.active:
+            self.unsticker.start(step=self.session.step, screen=" ".join(text.split()))
+        in_battle = _b.in_battle(emu)
+        from .unsticker import looks_normal
+        normal = looks_normal(in_battle=in_battle, text=text, menu_open=_m.menu_open(emu),
+                              fight_menu=_b.fight_menu_showing(emu))
+        menu = _m.read_menu(emu)
+        state = {"screen": [r for r in text.splitlines() if r.strip()],
+                 "menu": {k: menu.get(k) for k in ("open", "cursor_index", "num_options")},
+                 "in_battle": in_battle,
+                 "objective": self._directive.reason if self._directive else None,
+                 "party": [f"{m.get('nickname') or m.get('species')} ({m.get('species')}) L{m.get('level')} "
+                           f"{m.get('hp')}/{m.get('max_hp')}" for m in read_party(emu)]}
+        button = self.unsticker.turn(state, normal=normal, step=self.session.step)
+        rstep = ReasonStep(location="unstick", objective="get past a screen the agent doesn't understand",
+                           reasoning=(f"unstick: pressed {button}" if button else
+                                      f"unstick ended ({self.unsticker.last_end})"),
+                           action=WaitAction(frames=1))
+        self._prev = rstep
+        self._emit_reason(rstep, 0)
+        return self._finish(obs, rstep, ActionResult(success=True, result="completed",
+                                                     mode_before=detect_mode(emu), mode_after=detect_mode(emu),
+                                                     detail=(f"unstick: pressed {button}" if button else
+                                                             f"unstick ended ({self.unsticker.last_end})")),
+                            0, {}, shot)
 
     def _maybe_apply_lead(self) -> bool:
         """If L1 set a lead that isn't first in the party, move it there (party_menu.swap_to_front).

@@ -50,6 +50,7 @@ from .reasoner import Reasoner, ReasonStep
 from .session import Session
 from .signals import game_signals, needs_emergency_heal
 from ..games.pokemon_red.game_state import read_party
+from ..games.pokemon_red.map_objects import match_objects, objects_on
 from .targets import build_targets, name_matches, npc_key, select_npc
 from .world_map import DELTA, WALL
 
@@ -572,7 +573,13 @@ class ReasoningLoop:
             cur_mid = obs.player.map_id if obs.player else None
             context = {
                 "current_map": {"id": cur_mid,
-                                "name": map_name(cur_mid) if cur_mid is not None else None},
+                                "name": map_name(cur_mid) if cur_mid is not None else None,
+                                # who and what is here to talk to / use ("who" may name an object)
+                                "people": [f"{n.get('sprite')} at ({n['x']},{n['y']})"
+                                           for n in ((obs.game_state or {}).get("npcs") or [])
+                                           if "x" in n and n.get("kind") != "item"][:8],
+                                "objects": [f"{o['name']} at ({o['x']},{o['y']})"
+                                            for o in objects_on(cur_mid) if o.get("kind") != "sign"][:12]},
                 "party": signals["party"],
                 "items": signals["items"],
                 "badges": signals["badges"],
@@ -1287,12 +1294,42 @@ class ReasoningLoop:
         and a pick cached on another map (e.g. a torn warp frame) can never drag us onto the wrong sprite."""
         player = obs.player
         npcs = [n for n in ((obs.game_state or {}).get("npcs") or []) if "x" in n and "y" in n]
-        if not npcs:
-            return self._leave_via_nearest_exit(player, obs, blocked_dirs, occupied)
         sprite = target.get("sprite") if isinstance(target, dict) else target
+        named = bool(name_matches(npcs, sprite))
+        talk_step = directive is not None and directive.intent in (Intent.TALK_TO, Intent.GRAB_ITEM)
+        mid = getattr(player, "map_id", None)
+        # a THING, not a person (Bill's PC, a sign, a trash can): RAM has no sprite for it, so aim at its
+        # tile from the ripped object table (runs/vermilion-team: "use the PC" re-talked to Bill forever)
+        obj = None if named else next(iter(match_objects(objects_on(mid), sprite)), None)
+        if obj is not None:
+            key = ["obj", mid, int(obj["x"]), int(obj["y"])]
+            if isinstance(target, dict) and talk_step:
+                self._judge_last_talk(target, directive)
+                if key in (target.get("tried") or []):   # used it twice and the step still isn't met
+                    if directive.quest_id is not None:
+                        self._mark_step(directive.quest_id, "wedged",
+                                        reason=f"used {obj['name']} twice; {directive.success} still not "
+                                               f"met — whatever it does has happened, do the next thing here")
+                        self._l1_event = True
+                    return None
+            self._talk_npc = tuple(key)
+            return self._face_and_interact({"x": obj["x"], "y": obj["y"], "sprite": obj["name"]}, target,
+                                           obs, blocked_dirs, occupied, face=obj.get("face"))
+        if not npcs:
+            # nobody here. When THIS is the step's map, don't walk out: leaving can reset a scripted event
+            # (Bill steps into his teleporter; re-entering Route 25 turns him back into a Pokémon) — hand
+            # it to L1 with what IS here instead.
+            if talk_step and directive.target_map in (None, mid):
+                if directive.quest_id is not None:
+                    things = ", ".join(o["name"] for o in objects_on(mid)) or "none listed"
+                    self._mark_step(directive.quest_id, "wedged",
+                                    reason=f"nobody to talk to here now (they left or went somewhere); "
+                                           f"objects here: {things}")
+                    self._l1_event = True
+                return None
+            return self._leave_via_nearest_exit(player, obs, blocked_dirs, occupied)
         picked = target.get("picked") if isinstance(target, dict) else None
         want_kind = "item" if (directive is not None and directive.intent == Intent.GRAB_ITEM) else "person"
-        named = bool(name_matches(npcs, sprite))
         if sprite and not named and picked is None:   # once per target (before a pick is cached)
             self.on_event("approach_npc_miss", {"step": self.session.step, "sprite": sprite,
                                                 "seen": [n.get("sprite") for n in npcs]})
@@ -1312,7 +1349,6 @@ class ReasoningLoop:
 
         # rotation (F2) is for steps that are ABOUT an NPC (talk / grab); a travel step that the
         # proposer happened to aim at an NPC must never be judged or wedged by conversations
-        talk_step = directive is not None and directive.intent in (Intent.TALK_TO, Intent.GRAB_ITEM)
         if isinstance(target, dict) and talk_step:
             self._judge_last_talk(target, directive)
             picked = target.get("picked")
@@ -1331,10 +1367,17 @@ class ReasoningLoop:
         if isinstance(target, dict):   # cache BY POSITION + MAP (works for spriteless/moving npcs)
             target["picked"] = [int(npc["x"]), int(npc["y"]), getattr(player, "map_id", None)]
         self._talk_npc = npc_key(npc, getattr(player, "map_id", None))
+        return self._face_and_interact(npc, target, obs, blocked_dirs, occupied)
 
+    def _face_and_interact(self, npc, target, obs, blocked_dirs, occupied, face: str | None = None):
+        """Reach a tile beside ``npc`` (a person, or an object from the map table), face it, press A.
+        ``face`` limits the approach to the one side the game accepts (Bill's PC: facing north)."""
+        player = obs.player
         nx, ny = int(npc["x"]), int(npc["y"])
         adj = {Direction.NORTH: (nx, ny + 1), Direction.SOUTH: (nx, ny - 1),
                Direction.EAST: (nx - 1, ny), Direction.WEST: (nx + 1, ny)}  # tile you stand on to face npc
+        if face:
+            adj = {d: c for d, c in adj.items() if d.value == face}
         # COUNTER TALK: an NPC behind a real COUNTER tile (nurse, Mart clerk) can't be stood next to —
         # the adjacent tile IS the counter. You talk to them from 2 tiles away in a straight line,
         # over the counter. When the intervening cell is an actual counter (RAM's per-tileset talk-over

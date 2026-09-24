@@ -342,6 +342,10 @@ WORKED EXAMPLES (one per objective class — copy the SHAPE, adapt the specifics
                        "done_when":"no_item:Oak's Parcel","why":"hand the parcel to Oak"}
                       CANONICAL: deliver -> no_item:<item>. The item LEAVING the bag proves
                       delivery. Do NOT model a delivery as has_item:<something else>.
+  use an object   -> {"kind":"action","map":88,"talk":true,"who":"Bill's PC",
+                       "done_when":"verify:did the machine run?","why":"run the Cell Separator"}
+                      "who" can name a THING you press A on (a PC, machine, trash can, statue) —
+                      current_map.objects lists them; current_map.people lists who is here now.
   heal            -> {"kind":"action","map":41,"talk":true,"who":"the Nurse",
                        "done_when":"hp_frac>=1.0","why":"heal the party at the Poké Center"}
                       Add a step like this ONLY when SIGNALS shows low HP / emergency_heal — don't

@@ -81,11 +81,12 @@ def run_l1_pipeline(emu, context: dict, planner, *, hard_event: bool, on_trace=N
     # and a DECIDE that carries one of them WITHOUT a step edit is returned too — the loop's
     # goals.detect_change decides whether it really changes anything (a reworded echo does not).
     extras = {k: d[k] for k in ("goals", "notepad", "interrupted", "mission", "milestone", "lead",
-                                "interrupt_active") if k in d}
+                                "interrupt_active", "train") if k in d}
     carries = (isinstance(d.get("goals"), dict) and bool(d.get("goals"))
                or isinstance(d.get("notepad"), str)
                or d.get("interrupted") == ""
                or (isinstance(d.get("lead"), str) and bool(d.get("lead").strip()))
+               or bool(d.get("train"))
                or d.get("catch") == "clear"
                or (isinstance(d.get("catch"), list) and bool(d.get("catch"))))
     # NO-OP DECIDE == NO CHANGE. If decide neither added nor removed a step and carries no goals/

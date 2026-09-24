@@ -154,3 +154,85 @@ def test_a_lost_battle_is_recorded_for_l1_and_triggers_a_review():
     rec = loop._battle_log[-1]
     assert rec["result"] == "lost" and rec["opponents"] == ["Staryu", "Starmie"] and rec["where"] == "Cerulean Gym"
     assert loop._l1_event is True and any(k == "battle_lost" for k, _ in events)
+
+
+# ---- switch-training (an OPTION L1 may choose): trainee is sent out, then swapped for the strongest ----
+def test_train_goal_parses_changes_and_clears():
+    import json
+    p = AgentPlan()
+    ch = G.detect_change(p, {"train": ["WEEDLE"]}, step_edit=False)
+    assert ch is not None and ch.train == ["WEEDLE"]
+    G.apply_change(p, ch, pre_status={})
+    assert p.battle_goals["train"] == ["WEEDLE"]
+    assert G.detect_change(p, {"train": ["weedle"]}, step_edit=False) is None          # echo
+    G.apply_change(p, G.detect_change(p, {"train": "clear"}, step_edit=False), pre_status={})
+    assert "train" not in p.battle_goals
+
+    class FP:
+        def chat_json(self, s, st, image=None):
+            return json.dumps({"add": [], "remove": [], "train": ["WEEDLE"]}), 0, {}
+    assert Planner(strategist=FP()).l1_decide({"plan": []}, {"assessment": "x"})["train"] == ["WEEDLE"]
+
+
+def _train_loop(monkeypatch, party, active):
+    from pokemon_agent.actions.controller import ActionController
+    from pokemon_agent.agent.plan import ReflectionPlan
+    from pokemon_agent.agent.reason_loop import ReasoningLoop
+    from pokemon_agent.agent.reasoner import ReasonStep
+    from pokemon_agent.agent.session import Session
+    from pokemon_agent.core.models import GoalState, WaitAction
+    from pokemon_agent.emulator.fake_emulator import FakeEmulator
+    from pokemon_agent.games.pokemon_red import battle_actions
+    import pokemon_agent.agent.reason_loop as rl
+    from pokemon_agent.observations.builder import ObservationBuilder
+
+    class Stub:
+        def reflect(self, **kw):
+            return ReflectionPlan(next_objective="go"), 0, {}
+
+        def step(self, **kw):
+            return ReasonStep(location="", objective="", reasoning="", action=WaitAction(frames=1)), 0, {}
+    emu = FakeEmulator(map_id=14)
+    loop = ReasoningLoop(builder=ObservationBuilder(emu), controller=ActionController(emu), reasoner=Stub(),
+                         session=Session(GoalState(primary="g", current="g")), vision=False, reflect_every=100,
+                         autonomous=True)
+    loop._plan = AgentPlan(battle_goals={"train": ["WEEDLE"], "lead": "SQUIRTLE"})
+    monkeypatch.setattr(rl, "read_party", lambda e: party)
+    calls = []
+    monkeypatch.setattr(battle_actions, "active_party_index", lambda e: active)
+    monkeypatch.setattr(battle_actions, "switch_to", lambda e, slot: calls.append(slot) or {"ok": True})
+    return loop, emu, calls
+
+
+def test_the_trainee_leads_and_is_switched_for_the_strongest_once_per_battle(monkeypatch):
+    party = [{"nickname": "WEEDLE", "species": "Weedle", "level": 3, "hp": 16},
+             {"nickname": "PIDGEY", "species": "Pidgey", "level": 8, "hp": 20},
+             {"nickname": "SQUIRTLE", "species": "Squirtle", "level": 14, "hp": 37}]
+    loop, emu, calls = _train_loop(monkeypatch, party, active=0)
+    assert loop._effective_lead() == "weedle"                       # the trainee must be the one sent out
+    assert loop._maybe_switch_train(emu, "GRIND-EXP") is True and calls == [2]   # -> the strongest
+    assert loop._maybe_switch_train(emu, "GRIND-EXP") is False and calls == [2]  # once per battle
+
+
+def test_no_switch_when_fleeing_or_the_trainee_is_not_out_or_has_fainted(monkeypatch):
+    party = [{"nickname": "WEEDLE", "species": "Weedle", "level": 3, "hp": 0},
+             {"nickname": "SQUIRTLE", "species": "Squirtle", "level": 14, "hp": 37}]
+    loop, emu, calls = _train_loop(monkeypatch, party, active=1)
+    assert loop._effective_lead() == "squirtle"                     # a fainted trainee falls back to lead
+    assert loop._maybe_switch_train(emu, "GRIND-EXP") is False       # the trainee isn't the one out
+    loop._train_switched = False
+    assert loop._maybe_switch_train(emu, "ESCAPE") is False and calls == []
+
+
+def test_evolution_docs_are_per_family_and_skip_placeholders():
+    import sys
+    from pathlib import Path as P
+    if not P("/tmp/pokered/data/pokemon/evos_moves.asm").exists():
+        pytest.skip("pokered checkout not present")
+    sys.path.insert(0, "scripts")
+    import build_kanto_kb
+    docs = build_kanto_kb.evolution_docs()
+    weedle = next(v for k, v in docs.items() if k.startswith("Pokemon evolution: Weedle"))
+    assert weedle.startswith("Weedle -> Kakuna (level 7) -> Beedrill (level 10)")
+    assert any("Fire Stone" in v for k, v in docs.items() if "Eevee" in k)
+    assert "Onix" in docs["Pokemon that do not evolve"] and "Fossil" not in docs["Pokemon that do not evolve"]

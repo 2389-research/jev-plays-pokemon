@@ -138,6 +138,58 @@ def group_key(map_name_: str) -> str:
     return FLOOR.sub("", map_name_)
 
 
+def evolution_docs() -> dict[str, str]:
+    """Evolution chains for every species, from pokered (level / stone / trade), chunked A-Z."""
+    from pokemon_agent.games.pokemon_red.constants import SPECIES
+    def key(n):
+        return re.sub(r"[^A-Z0-9]", "", n.upper().replace("♀", "F").replace("♂", "M"))
+    disp = {key(n): n for n in SPECIES.values() if n and not str(n).startswith("MISSINGNO")}
+    def name(const):
+        return disp.get(re.sub(r"[^A-Z0-9]", "", const.replace("NIDORAN_F", "NIDORANF").replace("NIDORAN_M", "NIDORANM")),
+                        const.title().replace("_", " "))
+    text = (POKERED / "data/pokemon/evos_moves.asm").read_text()
+    evos: dict[str, list[tuple[str, str]]] = {}
+    for m in re.finditer(r"^(\w+)EvosMoves:\n(.*?)\n\s*db 0", text, re.M | re.S):
+        src = m.group(1).upper()
+        for line in m.group(2).splitlines():
+            ev = re.match(r"\s*db EVOLVE_LEVEL, (\d+), (\w+)", line)
+            it = re.match(r"\s*db EVOLVE_ITEM, (\w+), \d+, (\w+)", line)
+            tr = re.match(r"\s*db EVOLVE_TRADE, \d+, (\w+)", line)
+            if ev:
+                evos.setdefault(src, []).append((ev.group(2), f"level {ev.group(1)}"))
+            elif it:
+                evos.setdefault(src, []).append((it.group(2), it.group(1).replace("_", " ").title()))
+            elif tr:
+                evos.setdefault(src, []).append((tr.group(1), "trade"))
+    all_species = {l.upper() for l in re.findall(r"^(\w+)EvosMoves:", text, re.M)
+                   if not re.match(r"(?i)(Fossil|MonGhost|MissingNo)", l)}   # placeholders, not Pokémon
+    targets = {t for v in evos.values() for t, _ in v}
+
+    def chain(sp):
+        nxt = evos.get(sp) or []
+        if not nxt:
+            return name(sp)
+        return name(sp) + " -> " + " / ".join(f"{chain(t)} ({how})" if not evos.get(t) else
+                                              f"{name(t)} ({how}) -> " + chain(t).split(" -> ", 1)[1]
+                                              for t, how in nxt)
+    def members(sp):
+        out = [name(sp)]
+        for t, _how in evos.get(sp) or []:
+            out += members(t)
+        return out
+    docs = {}
+    for sp in sorted(all_species - targets, key=name):
+        if sp in evos:
+            fam = members(sp)
+            docs[f"Pokemon evolution: {', '.join(dict.fromkeys(fam))}"] = (
+                f"{chain(sp)}.\n(Pokémon Red evolution: 'A -> B (level N)' = A becomes B at level N; a stone "
+                f"name = use that item on it; 'trade' = trade it. Evolved forms are much stronger.)")
+    static = sorted(name(sp) for sp in all_species - targets - set(evos))
+    docs["Pokemon that do not evolve"] = ("Pokémon in Pokémon Red that do not evolve (their strength is what it "
+                                          "is): " + ", ".join(static) + ".")
+    return docs
+
+
 def build_docs() -> dict[str, str]:
     pg = PortalGraph.load()
     wild = wild_tables()
@@ -291,6 +343,10 @@ def build_docs() -> dict[str, str]:
              "  easier with FLASH (HM05, Oak's aide on Route 2 once you've caught 10 Pokémon).",
              ]
     docs[f"{PREFIX}story gates and blockers"] = "\n".join(lines)
+
+    # --- evolutions (ripped from data/pokemon/evos_moves.asm): what each Pokémon becomes, and how
+    for title, text in evolution_docs().items():
+        docs[f"{PREFIX}{title}"] = text
 
     # --- curated story order (NOT derived from data)
     docs[f"{PREFIX}story order and main path (curated overview)"] = CURATED_STORY

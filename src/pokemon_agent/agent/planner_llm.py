@@ -445,6 +445,12 @@ every battle, so a bench that never leads stays weak. Training a member is your 
 "<nickname>" (the harness moves it to the front of the party), then grind with a step whose done_when is
 "level:<nickname>>=N" — somewhere its level can handle (weak wild Pokémon, heal often). Set the lead
 back (e.g. "lead": "Dylan") before a gym battle. PARTY shows each member's nickname, level and HP.
+SWITCH-TRAINING is another option, if you want it: "train": ["<nickname>", ...] puts that member first
+and, when a battle starts, the battle layer sends it out and immediately switches to your strongest
+healthy member — Gen 1 splits the EXP among every member that took part, so it grows without doing the
+fighting. The cost: the incoming member takes one free enemy hit per battle. "train": "clear" stops it.
+Whether and whom to train is your call (SIGNALS.train shows the current setting); a member's future
+evolutions are in the knowledge base (e.g. search "<species> evolution").
 To set or change the CATCH goal add "catch": ["<species>", ...] (or ["any"]); the battle layer then
 catches a matching wild Pokémon when it can (weakened into the catch band, then a ball). A goal that
 SIGNALS.catch says isn't ready does nothing until you fix the reason (e.g. add a step to buy Poké Balls:
@@ -460,8 +466,9 @@ Return ONLY JSON:
  "notepad": "<full rewritten notepad>",
  "catch": [ <species or "any"> ],
  "lead": "<party nickname to put first>",
+ "train": ["<party nickname>", ...],
  "interrupt_active": {"why": "<only when replacing the ACTIVE step — the concrete reason it can't wait>"}}
-Omit "goals", "notepad", "catch", "lead" and "interrupt_active" entirely when not needed (the common case). To drop the
+Omit "goals", "notepad", "catch", "lead", "train" and "interrupt_active" entirely when not needed (the common case). To drop the
 paused focus, add "interrupted": "" (see GOALS above); otherwise never include "interrupted"."""
 
 
@@ -785,6 +792,11 @@ class Planner:
                 out["interrupted"] = data["interrupted"]
             if isinstance(data.get("lead"), str) and data["lead"].strip():
                 out["lead"] = data["lead"].strip()
+            tr = data.get("train")
+            if isinstance(tr, list) and tr:
+                out["train"] = [str(t) for t in tr if str(t).strip()]
+            elif isinstance(tr, str) and tr.strip().lower() == "clear":
+                out["train"] = "clear"
             ia = data.get("interrupt_active")
             if isinstance(ia, dict) and str(ia.get("why") or "").strip():
                 out["interrupt_active"] = {"why": str(ia["why"]).strip()[:300]}

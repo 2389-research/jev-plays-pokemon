@@ -110,6 +110,7 @@ class GoalsChange:
     drop_interrupted: bool = False
     catch: list[str] | str | None = None                   # list = set it; "clear"; None = unchanged
     lead: str | None = None                                # a party nickname to put first; "clear" removes
+    train: list[str] | str | None = None                   # switch-train these members; "clear" removes
 
 
 def _crit(dw: str | None) -> dict | None:
@@ -170,7 +171,16 @@ def detect_change(plan: AgentPlan, prop: dict, *, step_edit: bool) -> GoalsChang
                 ch.lead = "clear"
         elif norm(lead) != cur_lead:
             ch.lead = lead.strip()
-    if not (ch.goals or ch.notepad is not None or ch.catch is not None or ch.lead is not None
+    train = prop.get("train")
+    cur_train = [norm(t) for t in ((plan.battle_goals or {}).get("train") or [])]
+    if isinstance(train, str) and norm(train) == "clear":
+        if cur_train:
+            ch.train = "clear"
+    elif isinstance(train, list):
+        names = [str(t).strip() for t in train if str(t).strip()]
+        if names and [norm(t) for t in names] != cur_train:
+            ch.train = names
+    if not (ch.goals or ch.notepad is not None or ch.catch is not None or ch.lead is not None or ch.train is not None
             or (ch.drop_interrupted and plan.interrupted.text)):
         return None
     return ch
@@ -196,6 +206,13 @@ def apply_change(plan: AgentPlan, ch: GoalsChange, *, pre_status: dict[str, str]
         plan.notepad, plan.notepad_truncated = ch.notepad, ch.notepad_truncated
     if ch.catch is not None:
         plan.battle_goals = {**(plan.battle_goals or {}), "catch": [] if ch.catch == "clear" else list(ch.catch)}
+    if ch.train is not None:
+        bg = dict(plan.battle_goals or {})
+        if ch.train == "clear":
+            bg.pop("train", None)
+        else:
+            bg["train"] = list(ch.train)
+        plan.battle_goals = bg
     if ch.lead is not None:
         bg = dict(plan.battle_goals or {})
         if ch.lead == "clear":

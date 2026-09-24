@@ -262,6 +262,7 @@ class ReasoningLoop:
         self._battle_wild = False
         self._talk_npc = None                    # npc_key of the NPC we're about to talk to (F2 rotation)
         self._lead_retry_at = 0                  # training: next step a failed lead swap may be retried
+        self._train_switched = False             # switch-training: already switched this battle
         # battle record for L1 (SIGNALS.recent_battles): the live battle's tracking + the last few results
         self._battle_track: dict | None = None
         self._battle_log: deque = deque(maxlen=6)
@@ -616,6 +617,7 @@ class ReasoningLoop:
             from .signals import catch_status
             signals["catch"] = catch_status(self._plan.battle_goals, read_items(emu), signals["party"])
             signals["lead"] = (self._plan.battle_goals or {}).get("lead")
+            signals["train"] = (self._plan.battle_goals or {}).get("train") or []
             signals["recent_battles"] = list(self._battle_log)[-4:]
             cur_mid = obs.player.map_id if obs.player else None
             context = {
@@ -2569,10 +2571,57 @@ class ReasoningLoop:
                                                              f"unstick ended ({self.unsticker.last_end})")),
                             0, {}, shot)
 
+    def _trainees(self) -> list[str]:
+        return [str(t).strip().lower() for t in (((self._plan.battle_goals if self._plan else None) or {})
+                                                 .get("train") or []) if str(t).strip()]
+
+    def _effective_lead(self) -> str:
+        """Who should be first: a switch-training member that can still fight (it must be the one sent
+        out), else L1's lead."""
+        bg = (self._plan.battle_goals if self._plan else None) or {}
+        tr = self._trainees()
+        if tr:
+            try:
+                party = read_party(self.controller.emu)
+            except Exception:
+                party = []
+            for m in party:
+                names = (str(m.get("nickname") or "").strip().lower(), str(m.get("species") or "").lower())
+                if int(m.get("hp") or 0) > 0 and any(t in names for t in tr):
+                    return names[0] or names[1]
+        return str(bg.get("lead") or "").strip().lower()
+
+    def _maybe_switch_train(self, emu, objective) -> bool:
+        """Switch-training: the trainee was sent out (it's first); at the first FIGHT menu of the battle
+        switch to the strongest healthy member so the trainee shares the EXP without fighting. Once per
+        battle; not when fleeing."""
+        from ..games.pokemon_red import battle_actions, battle_l2
+        tr = self._trainees()
+        if not tr or self._train_switched or objective == battle_l2.ESCAPE:
+            return False
+        self._train_switched = True
+        party = read_party(emu)
+        active = battle_actions.active_party_index(emu)
+        if not (0 <= active < len(party)):
+            return False
+        cur = party[active]
+        if not any(t in (str(cur.get("nickname") or "").lower(), str(cur.get("species") or "").lower()) for t in tr):
+            return False
+        best = max((i for i, m in enumerate(party) if i != active and int(m.get("hp") or 0) > 0
+                    and not any(t in (str(m.get("nickname") or "").lower(), str(m.get("species") or "").lower())
+                                for t in tr)),
+                   key=lambda i: (int(party[i].get("level") or 0), int(party[i].get("hp") or 0)), default=None)
+        if best is None:
+            return False
+        res = battle_actions.switch_to(emu, best)
+        self.on_event("train_switch", {"step": self.session.step, "trainee": cur.get("nickname") or cur.get("species"),
+                                       "to": party[best].get("nickname") or party[best].get("species"), "result": res})
+        return True
+
     def _maybe_apply_lead(self) -> bool:
         """If L1 set a lead that isn't first in the party, move it there (party_menu.swap_to_front).
         True when a swap was attempted this step; failed swaps are retried at most every 20 steps."""
-        lead = str(((self._plan.battle_goals if self._plan else None) or {}).get("lead") or "").strip().lower()
+        lead = self._effective_lead()
         if not lead or self.session.step < self._lead_retry_at:
             return False
         party = read_party(self.controller.emu)
@@ -2946,6 +2995,7 @@ class ReasoningLoop:
         # --- battle-start edge (ABOVE the intro-text return): set the cached objective now,
         # during intro text, so a very short intro can't skip battle_L2.
         if battle.in_battle(emu) and not self._last_in_battle:
+            self._train_switched = False          # switch-training: once per battle
             state = battle_l2.build_state(emu, self._battle_goals)
             self._battle_objective = battle_l2.choose_objective(state, self._battle_goals)
             self._cap_det("battle_l2_objective", {"state": state, "goals": self._battle_goals},
@@ -3005,6 +3055,12 @@ class ReasoningLoop:
             self.on_event("battle_safety_override", {
                 "step": self.session.step, "from": cached, "to": objective,
                 "hp_frac": round(battle_l2.hp_frac(state.get("active")), 3)})
+        if self._maybe_switch_train(emu, objective):
+            rstep = ReasonStep(location="battle", objective="switch-train",
+                               reasoning="trainee sent out; switching to the strongest member so it shares EXP",
+                               action=WaitAction(frames=1))
+            return rstep, 0, {}, ActionResult(success=True, result="completed", mode_before=mode_before,
+                                              mode_after=detect_mode(emu), detail="battle: switch-train")
         action = battle_agent.choose_action(objective, state)
         self._cap_det("battle_choose_action", {"objective": objective, "state": state}, action)
         kind = action.get("kind")

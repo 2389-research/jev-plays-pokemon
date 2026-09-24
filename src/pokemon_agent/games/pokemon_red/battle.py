@@ -91,6 +91,52 @@ def move_analysis(emu: Emulator) -> list[dict]:
     return out
 
 
+PARTY1_MOVES = 0xD173      # wPartyMon1Moves (learning outside battle)
+
+
+def _move_power(move_id: int) -> int:
+    from .battle_data import MOVE_DATA
+    return (MOVE_DATA.get(move_id) or ("", "", 0))[2]
+
+
+def move_to_forget(move_ids: list[int]) -> int:
+    """The slot to give up for a new move: a status move (no damage) first, else the lowest power."""
+    ids = [m for m in move_ids if m]
+    return min(range(len(ids)), key=lambda i: (_move_power(ids[i]), i))
+
+
+def worth_learning(new_move: str, move_ids: list[int]) -> bool:
+    """Learn when the new move out-hits the weakest known move (status moves count as 0)."""
+    from .battle_data import MOVE_DATA
+    key = new_move.strip().upper().replace(" ", "_")
+    power = next((v[2] for v in MOVE_DATA.values() if v[0] == key), 0)
+    ids = [m for m in move_ids if m]
+    return power > min(_move_power(m) for m in ids) if ids else True
+
+
+def handle_learn_move(emu: Emulator) -> bool:
+    """The 'learn a new move' flow when 4 moves are known: learn it if it beats the weakest move
+    (forgetting that one), otherwise decline. The default A / move-list back-out otherwise loops or
+    cancels it. True if it acted."""
+    from . import menus
+    s = _screen(emu)
+    ids = active_move_ids(emu) if in_battle(emu) else [emu.read_memory(PARTY1_MOVES + i) for i in range(4)]
+    if not menus.menu_open(emu):
+        return False
+    if "make room for" in s.replace("\n", " "):
+        flat = " ".join(s.split())
+        new = flat.split("make room for", 1)[1].split("?", 1)[0].strip()
+        menus.answer_yesno(emu, worth_learning(new, ids))
+        return True
+    if "Abandon learning" in " ".join(s.split()):
+        menus.answer_yesno(emu, True)                  # we chose not to learn it
+        return True
+    if "should be forgotten" in " ".join(s.split()) or "Which move should" in s:
+        menus.select_option(emu, move_to_forget(ids), max_options=4)
+        return True
+    return False
+
+
 def usable_slot(pp: list[int], slot: int) -> int:
     """``slot`` if it still has PP; otherwise the move with the most PP left. With every move at 0
     PP the choice doesn't matter — the game uses Struggle."""

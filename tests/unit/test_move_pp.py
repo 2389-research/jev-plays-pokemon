@@ -174,3 +174,31 @@ def test_choose_move_shows_the_numbers_to_jev(monkeypatch):
     battle_agent.choose_move(Client(), emu)
     assert "0.5x" in seen["criteria"]["1"] and "expected" in seen["criteria"]["1"]
     assert seen["state"]["move_analysis"][0]["move"] == "Tackle"
+
+
+# ---- verify-train2: 'Delete an older move to make room for BITE?' — the move-list back-out cancelled it ----
+LEARN = Path("runs/verify-train2-20260923/states/map65_step8.state")
+
+
+def test_forget_choice_is_the_weakest_move():
+    # Tackle 35, Tail Whip (status), Bubble 20, Water Gun 40 -> forget Tail Whip for Bite (60)
+    assert battle.move_to_forget([33, 39, 145, 55]) == 1
+    assert battle.worth_learning("BITE", [33, 39, 145, 55]) is True
+    assert battle.worth_learning("TAIL WHIP", [33, 145, 55, 44]) is False
+
+
+@pytest.mark.skipif(not (ROM.exists() and LEARN.exists()), reason="ROM / learn-move state not present")
+def test_learns_bite_by_forgetting_the_weakest_move():
+    from pokemon_agent.emulator.pyboy_adapter import PyBoyEmulator
+    from pokemon_agent.emulator.interface import GameButton
+    emu = PyBoyEmulator(str(ROM), window="null")
+    emu.load_state(LEARN)
+    emu.tick(2)
+    for _ in range(30):
+        if "Bite" in battle.active_moves(emu):
+            break
+        if not battle.handle_learn_move(emu):
+            emu.press(GameButton.A)
+            emu.tick(30)
+    assert "Bite" in battle.active_moves(emu) and "Tail Whip" not in battle.active_moves(emu)
+    emu.close()

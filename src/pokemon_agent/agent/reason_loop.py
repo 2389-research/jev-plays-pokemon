@@ -339,6 +339,17 @@ class ReasoningLoop:
         # --- nickname prompt / name keyboard: always decline deterministically (an A-spam would type
         # "AAAAAAAAAA" as the Pokemon's name) ---
         from ..games.pokemon_red import menus as _menus
+        from ..games.pokemon_red import battle as _battle
+        if not ctx.get("in_battle") and _battle.handle_learn_move(self.controller.emu):
+            from ..core.models import WaitAction
+            rstep = ReasonStep(location="learn-move", objective="learn the new move",
+                               reasoning="learn-move prompt outside battle", action=WaitAction(frames=1))
+            self._prev = rstep
+            self._emit_reason(rstep, 0)
+            return self._finish(obs, rstep, ActionResult(success=True, result="completed",
+                                                         mode_before=detect_mode(self.controller.emu),
+                                                         mode_after=detect_mode(self.controller.emu),
+                                                         detail="learn-move choice"), 0, {}, shot)
         if _menus.handle_nickname(self.controller.emu):
             from ..core.models import WaitAction
             rstep = ReasonStep(location="nickname", objective="decline the nickname",
@@ -2341,6 +2352,15 @@ class ReasoningLoop:
                 "trainer": state.get("is_trainer")})
         self._track_battle(emu)
         self._last_in_battle = battle.in_battle(emu)
+
+        # learning a new move with 4 known ('Delete an older move to make room for X?'): learn it over the
+        # weakest move (the move-list back-out below would cancel it and the prompt repeats forever)
+        if battle.handle_learn_move(emu):
+            rstep = ReasonStep(location="battle", objective="learn the new move",
+                               reasoning="learn-move prompt: keep the stronger moves",
+                               action=WaitAction(frames=1))
+            return rstep, 0, {}, ActionResult(success=True, result="completed", mode_before=mode_before,
+                                              mode_after=detect_mode(emu), detail="battle: learn-move choice")
 
         # the party-SWITCH flow ('change POKEMON?' / 'Bring out which?' / 'already out!'): the default A
         # re-picks the active mon forever — decline / back out, or send a healthy mon after a faint

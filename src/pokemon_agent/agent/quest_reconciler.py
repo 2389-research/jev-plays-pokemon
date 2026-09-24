@@ -69,9 +69,10 @@ def compile_steps_to_directives(steps: list[QuestStep]) -> list[Directive]:
     return out
 
 
-def reconcile_quests(current, proposal, *, next_id, on_event=None):
+def reconcile_quests(current, proposal, *, next_id, on_event=None, allow_active_removal: bool = False):
     """Deterministically merge L1's proposal into the canonical plan, preserving progress.
-    Keeps done + active steps; removes only named pending steps; ALWAYS drops wedged steps (they are
+    Keeps done + active steps (the active one is removable only with ``allow_active_removal`` — an
+    interrupt whose reason was reviewed); removes only named pending steps; ALWAYS drops wedged steps (they are
     replaced by adds); dedups adds by (map, done_when) against LIVE (active/pending) steps only.
 
     PLACEMENT: an add may carry ``"after"``: the id of a step that survives into the result as active
@@ -83,7 +84,8 @@ def reconcile_quests(current, proposal, *, next_id, on_event=None):
     add = proposal.get("add") or []
     remove = set(proposal.get("remove") or [])
     done = [s for s in current if s.status == "done"]
-    active = [s for s in current if s.status == "active"]
+    # the ACTIVE step survives a remove unless the loop approved an interrupt (reviewed reason)
+    active = [s for s in current if s.status == "active" and not (allow_active_removal and s.id in remove)]
     pending = [s for s in current if s.status == "pending" and s.id not in remove]
     # dedup only against LIVE steps: a done step never blocks a repeat errand (heal again, return to
     # a map, shop again) — brock-goals4: ~60 emergency heals were dropped against an old done heal

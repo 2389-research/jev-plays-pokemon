@@ -257,6 +257,11 @@ MEMORY — what you have already tried and been told (harness-written ground tru
   - UNEXPLORED_HERE: on this map, doors to places you've never been, people you haven't talked to,
     objects you haven't checked.
   - STALL: steps without progress, plus a reviewer's CRITIQUE when you've been stuck a while.
+  - INTERRUPTING the ACTIVE step: a plain "remove" of the active step is ignored. When it truly can't
+    wait or has become wrong (e.g. HP critically low before walking through grass, the step became
+    impossible), put its id in "remove", add the replacement, AND set "interrupt_active": {"why":
+    "<the concrete reason it can't wait>"}. A reviewer checks the reason first; reordering for its
+    own sake, or an active step that is merely still travelling, will be rejected.
   - SINCE_LAST_REVIEW.your_last_edits: what happened to YOUR previous edits (e.g. a remove that was
     ignored because the step is active, an add that duplicated an existing step). Don't repeat an edit
     that was ignored — it will be ignored again.
@@ -451,8 +456,9 @@ Return ONLY JSON:
  "goals": { <ONLY the tier(s) that changed, e.g. "tertiary": {"text": "<short>", "done_when": "<criterion or null>"}> },
  "notepad": "<full rewritten notepad>",
  "catch": [ <species or "any"> ],
- "lead": "<party nickname to put first>"}
-Omit "goals", "notepad", "catch" and "lead" entirely when they did not change (the common case). To drop the
+ "lead": "<party nickname to put first>",
+ "interrupt_active": {"why": "<only when replacing the ACTIVE step — the concrete reason it can't wait>"}}
+Omit "goals", "notepad", "catch", "lead" and "interrupt_active" entirely when not needed (the common case). To drop the
 paused focus, add "interrupted": "" (see GOALS above); otherwise never include "interrupted"."""
 
 
@@ -776,6 +782,9 @@ class Planner:
                 out["interrupted"] = data["interrupted"]
             if isinstance(data.get("lead"), str) and data["lead"].strip():
                 out["lead"] = data["lead"].strip()
+            ia = data.get("interrupt_active")
+            if isinstance(ia, dict) and str(ia.get("why") or "").strip():
+                out["interrupt_active"] = {"why": str(ia["why"]).strip()[:300]}
             # legacy keys only if the model still emits them (honored alongside a step edit only)
             for k in ("mission", "milestone"):
                 if isinstance(data.get(k), str) and data[k].strip():

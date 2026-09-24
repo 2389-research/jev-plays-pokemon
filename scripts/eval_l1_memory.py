@@ -176,8 +176,53 @@ def travel_phase():
     return ctx, False, grade
 
 
+REVIEWER = None          # set in main(): the critic that reviews interrupts (fast model, like the loop)
+
+
+def review(ctx, prop):
+    """What the loop does with an interrupt request: ask the reviewer. Returns (requested, approved, why)."""
+    active = [s for s in ctx["plan"] if s["status"] == "active"]
+    aid = active[0]["id"] if active else None
+    if not prop or aid not in (prop.get("remove") or []):
+        return False, False, "no interrupt"
+    why = ((prop.get("interrupt_active") or {}).get("why") or "").strip()
+    if not why:
+        return True, False, "removed the active step with no interrupt reason (ignored)"
+    state = {"active": f"{active[0].get('who')} on map {active[0].get('map')} until {active[0].get('done_when')}",
+             "doing": active[0].get("doing"), "reason": why,
+             "proposed": [{k: a.get(k) for k in ("kind", "map", "who", "done_when", "why")} for a in prop.get("add") or []],
+             "party": ctx.get("party"), "current_map": (ctx.get("current_map") or {}).get("name"), "recent_feedback": []}
+    ok, verdict = REVIEWER.judge_interrupt(0, state)
+    return True, ok, f"reason={why[:90]!r} -> {'APPROVED' if ok else 'REJECTED'}: {verdict[:110]}"
+
+
+def urgent_interrupt():
+    """runs/fresh-squirtle2 step 147: Squirtle 4/23 HP on Route 1, the active step is still travelling to
+    the Viridian Mart. PASS = L1 interrupts the active step for a heal AND the reviewer approves."""
+    ctx = captured("fresh-squirtle2-20260924", 147)
+    ctx.update({"since_last_review": {"steps": 5}, "stall": {"steps_without_progress": 2}})
+
+    def grade(prop):
+        req, ok, detail = review(ctx, prop)
+        removed = set((prop or {}).get("remove") or [])
+        heal = any("hp_frac" in str(a.get("done_when")) for a in (prop or {}).get("add") or []) or any(
+            s["status"] == "pending" and "hp_frac" in str(s.get("done_when")) and s["id"] not in removed
+            for s in ctx["plan"])                    # an existing pending heal step becomes next
+        return req and ok and heal, detail
+    return ctx, True, grade
+
+
+def _travel_phase_graded():
+    ctx, hard, _ = travel_phase()
+
+    def grade(prop):
+        req, ok, detail = review(ctx, prop)
+        return (not req) or (not ok), detail if req else "left the active step alone"
+    return ctx, hard, grade
+
+
 SCENARIOS = {"stuck-retry": stuck_retry, "heard-hint": heard_hint, "no-overreact": no_overreact,
-             "travel-phase": travel_phase}
+             "travel-phase": _travel_phase_graded, "urgent-interrupt": urgent_interrupt}
 
 
 def main() -> int:
@@ -194,6 +239,9 @@ def main() -> int:
     kb = KnowledgeBase.from_env() if a.kb else None
     planner = Planner(goal_map=2, level_target=12, provider=LunaRouteProvider(model=a.fast_model),
                       strategist=LunaRouteProvider(model=a.model, max_tokens=900), knowledge=kb)
+    global REVIEWER
+    from pokemon_agent.agent.critic import Critic
+    REVIEWER = Critic(LunaRouteProvider(model=a.fast_model))
     ok_all = True
     for name in a.only.split(","):
         build = SCENARIOS[name]

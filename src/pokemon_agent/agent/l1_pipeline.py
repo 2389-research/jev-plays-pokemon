@@ -80,7 +80,8 @@ def run_l1_pipeline(emu, context: dict, planner, *, hard_event: bool, on_trace=N
     # tiered goals (spec §3.3): goals / notepad / interrupted / catch ride along with a step edit,
     # and a DECIDE that carries one of them WITHOUT a step edit is returned too — the loop's
     # goals.detect_change decides whether it really changes anything (a reworded echo does not).
-    extras = {k: d[k] for k in ("goals", "notepad", "interrupted", "mission", "milestone", "lead") if k in d}
+    extras = {k: d[k] for k in ("goals", "notepad", "interrupted", "mission", "milestone", "lead",
+                                "interrupt_active") if k in d}
     carries = (isinstance(d.get("goals"), dict) and bool(d.get("goals"))
                or isinstance(d.get("notepad"), str)
                or d.get("interrupted") == ""

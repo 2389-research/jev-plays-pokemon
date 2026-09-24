@@ -661,10 +661,13 @@ class ReasoningLoop:
                         feedback.append(f"after={payload.get('after')} not usable ({payload.get('reason')}); "
                                         f"placed next instead")
                     self.on_event(kind, {"step": self.session.step, **payload})
+                allow_active = self._review_interrupt(obs, prop, status_before, feedback)
+                if allow_active:     # an approved interrupt: the "ignored" note no longer applies
+                    feedback[:] = [f for f in feedback if "IGNORED: it is the ACTIVE step" not in f]
                 self._plan_steps = reconcile_quests(
                     self._plan_steps,
                     {"add": prop.get("add", []), "remove": prop.get("remove", [])},
-                    next_id=self._next_qid, on_event=_on_reconcile)
+                    next_id=self._next_qid, on_event=_on_reconcile, allow_active_removal=allow_active)
                 self._l1_feedback = feedback
                 # a provisional bootstrap default (generic goal-travel) is SUPERSEDED the moment L1
                 # supplies a real step — otherwise reconcile keeps it first (adds go after the active
@@ -812,8 +815,10 @@ class ReasoningLoop:
             if (self._directive.intent == Intent.TRAVEL and obs.player is not None and tmap is not None
                     and tmap != obs.player.map_id):
                 portal = self._portal_next(obs.player, tmap)
+                # only an OBSERVED blockage counts: no walkable path to the portal right now
                 if (portal is not None and abs(portal["coord"][0] - obs.player.x)
-                        + abs(portal["coord"][1] - obs.player.y) <= 8):
+                        + abs(portal["coord"][1] - obs.player.y) <= 8
+                        and self._path_len(obs.player, tuple(portal["coord"])) is None):
                     self._note_blocked_portal(obs.player, portal["coord"], why)
             if self._directive.quest_id is not None:
                 self._mark_step(self._directive.quest_id, "wedged", reason=why)
@@ -1780,8 +1785,10 @@ class ReasoningLoop:
                         f"{k.split(':')[0]} ({v.get('why', '')[:80]})" for k, v in list(self.memory.blocked_portals.items())[:3]))
             elif route:
                 p0 = route[0]
-                parts.append(f"was heading for {p0['label']} at ({p0['coord'][0]},{p0['coord'][1]}) "
-                             f"and didn't get through")
+                gap = self._path_len(player, tuple(p0["coord"]))
+                where = (f"no walkable path to it from here" if gap is None
+                         else f"{gap} steps away, no progress toward it lately")
+                parts.append(f"heading for {p0['label']} at ({p0['coord'][0]},{p0['coord'][1]}): {where}")
         elif directive.intent in (Intent.TALK_TO, Intent.GRAB_ITEM):
             parts.append(f"couldn't reach or talk to {(directive.target or {}).get('sprite') or 'the target'}")
         if len(self._wedge_maps) >= 4:
@@ -1858,6 +1865,34 @@ class ReasoningLoop:
         used = set(self.interactions.talked) | set(self.interactions.empty_tiles)
         return unexplored(pg, player.map_id, comp, visited_maps=set(self._map_history),
                           npcs=(obs.game_state or {}).get("npcs") or [], used_tiles=used, skip=self._explore_skip)
+
+    def _review_interrupt(self, obs, prop: dict, status_before: dict, feedback: list[str]) -> bool:
+        """L1 may replace the ACTIVE step only with a reason (``interrupt_active.why``) that the critic
+        approves (runs/fresh-squirtle2: at 17% HP L1 rightly wanted to heal before the Mart trip and
+        asked 8 times; a bare remove of the active step is ignored by design, to stop churn)."""
+        active = [str(r) for r in prop.get("remove") or [] if status_before.get(str(r)) == "active"]
+        if not active:
+            return False
+        ia = prop.get("interrupt_active") or {}
+        why = str(ia.get("why") or "").strip()
+        if not why:
+            feedback.append(f"to replace the ACTIVE step {active[0]}, add \"interrupt_active\": {{\"why\": ...}} "
+                            f"with the concrete reason it can't wait (a reviewer checks it)")
+            return False
+        step = self._step_by_qid(active[0])
+        state = {"active": step_desc(step) if step else active[0], "doing": self._active_doing(obs),
+                 "reason": why,
+                 "proposed": [{k: a.get(k) for k in ("kind", "map", "who", "done_when", "why")}
+                              for a in prop.get("add") or [] if isinstance(a, dict)],
+                 "party": [{k: m.get(k) for k in ("nickname", "species", "level", "hp", "max_hp")}
+                           for m in game_signals(self.controller.emu)["party"]],
+                 "current_map": map_name(obs.player.map_id) if obs.player else None,
+                 "recent_feedback": list(getattr(self, "_l1_feedback", []) or [])[-4:]}
+        ok, verdict = self.critic.judge_interrupt(self.session.step, state)
+        self.episode.record(self.session.step, "interrupt", text=f"{'approved' if ok else 'REJECTED'}: "
+                                                                 f"{why[:120]} — {verdict[:120]}")
+        feedback.append(f"interrupt of {active[0]} {'APPROVED' if ok else 'REJECTED'} by the reviewer: {verdict}")
+        return ok
 
     def _active_doing(self, obs) -> str:
         """What the active step is doing RIGHT NOW (an action step first travels to its map)."""
@@ -3012,13 +3047,45 @@ class ReasoningLoop:
         return self._battle_kb.get(enemy) or None
 
     def _objective_distance(self, player) -> int | None:
-        """Graph-distance (map hops) from the player's map to the active directive's target
-        map, if any — feeds the stuck detector's objective-progress signal."""
+        """How far the active directive's goal is — map hops on the ground-truth portal graph, then the
+        WALKING distance to the next portal — for the stuck detector's objective-progress signal.
+        runs/fresh-squirtle2: map hops alone were constant down all of Route 1, and walking back over
+        already-known tiles isn't "new ground", so steady progress south read as stuck after 40 steps."""
         d = self._directive
         if not (player and d and d.target_map is not None):
             return None
-        route = self.memory.graph.route(player.map_id, d.target_map)
-        return (len(route) - 1) if route else None
+        route = self._portal_route(player, d.target_map)
+        if route:
+            walk = self._path_len(player, tuple(route[0]["coord"]))
+            return len(route) * 1000 + (walk if walk is not None else 999)
+        if route == []:
+            return 0
+        legacy = self.memory.graph.route(player.map_id, d.target_map)
+        return (len(legacy) - 1) * 1000 if legacy else None
+
+    def _path_len(self, player, goal) -> int | None:
+        """Steps to walk from the player to ``goal`` on this map (RAM collision, sprites as obstacles)."""
+        try:
+            coll = read_collision_map(self.controller.emu)
+            from ..games.pokemon_red.game_state import read_npcs
+            occ = {(int(n["x"]), int(n["y"])) for n in read_npcs(self.controller.emu) if "x" in n}
+        except Exception:
+            return None
+        if not coll or coll.get("map_id") != player.map_id:
+            return None
+        walk = (set(map(tuple, coll["walkable"])) - occ) | {tuple(goal)}
+        start = (player.x, player.y)
+        dist, q = {start: 0}, deque([start])
+        while q:
+            c = q.popleft()
+            if c == tuple(goal):
+                return dist[c]
+            x, y = c
+            for n in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+                if n in walk and n not in dist:
+                    dist[n] = dist[c] + 1
+                    q.append(n)
+        return None
 
     def _write_resume(self, dest: Path) -> None:
         """Write a resumable checkpoint pair to `dest`: latest.state (full PyBoy save) + latest.mem.json

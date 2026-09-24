@@ -166,3 +166,80 @@ def test_l1_is_told_what_happened_to_its_edits_and_what_the_active_step_is_doing
     fb = loop._memory_context(obs)["since_last_review"]["your_last_edits"]
     assert any("remove q2 IGNORED" in f and "travelling to Viridian Mart" in f for f in fb)
     assert any("IGNORED: step q2 already covers it" in f for f in fb)
+
+
+def _run_l1_with(loop, prop, obs):
+    import pokemon_agent.agent.reason_loop as rl
+
+    class P:
+        strategist = provider = object()
+    loop.planner = P()
+    loop._plan = rl.AgentPlan()
+    orig = rl.run_l1_pipeline
+    rl.run_l1_pipeline = lambda *a, **k: prop
+    try:
+        loop._run_l1(obs, hard_event=True)
+    finally:
+        rl.run_l1_pipeline = orig
+
+
+HEAL = {"kind": "action", "map": 41, "talk": True, "who": "the Nurse", "done_when": "hp_frac>=1.0", "after": None}
+
+
+def _mart_active(loop):
+    loop._plan_steps = [QuestStep(id="q3", map=42, kind="action", talk=True, who="the Mart clerk",
+                                  done_when="has_item:Oak's Parcel", status="active")]
+    loop._directive = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 42},
+                                success={"on_map": 42}, quest_id="q3")
+    return SimpleNamespace(player=SimpleNamespace(map_id=1, x=20, y=20), game_state={})
+
+
+def test_an_interrupt_with_an_approved_reason_replaces_the_active_step():
+    """runs/fresh-squirtle2: at 17% HP L1 wanted to heal before the Mart trip and asked 8 times; a bare
+    remove of the active step is ignored. With a reason the critic approves, it goes through."""
+    loop, events = _loop(map_id=1)
+    obs = _mart_active(loop)
+    seen = []
+    loop.critic.judge_interrupt = lambda step, state: (seen.append(state) or (True, "17% HP; heal first"))
+    _run_l1_with(loop, {"assessment": "heal first", "remove": ["q3"], "add": [HEAL],
+                        "interrupt_active": {"why": "Squirtle is at 17% HP and the Mart trip crosses grass"}}, obs)
+    assert [s.id for s in loop._plan_steps if s.status != "done"] and "q3" not in [s.id for s in loop._plan_steps]
+    assert seen[0]["reason"].startswith("Squirtle is at 17% HP") and seen[0]["doing"] == "travelling to Viridian Mart"
+    fb = loop._memory_context(obs)["since_last_review"]["your_last_edits"]
+    assert any("APPROVED" in f for f in fb) and not any("IGNORED: it is the ACTIVE" in f for f in fb)
+
+
+def test_a_rejected_or_reasonless_interrupt_keeps_the_active_step_and_says_why():
+    loop, events = _loop(map_id=1)
+    obs = _mart_active(loop)
+    loop.critic.judge_interrupt = lambda step, state: (False, "the step is just travelling; nothing urgent")
+    _run_l1_with(loop, {"assessment": "reorder", "remove": ["q3"], "add": [HEAL],
+                        "interrupt_active": {"why": "reorder"}}, obs)
+    assert any(s.id == "q3" and s.status == "active" for s in loop._plan_steps)
+    fb = loop._memory_context(obs)["since_last_review"]["your_last_edits"]
+    assert any("REJECTED by the reviewer: the step is just travelling" in f for f in fb)
+    loop2, _ = _loop(map_id=1)
+    obs2 = _mart_active(loop2)
+    _run_l1_with(loop2, {"assessment": "x", "remove": ["q3"], "add": [HEAL]}, obs2)
+    fb2 = loop2._memory_context(obs2)["since_last_review"]["your_last_edits"]
+    assert any('add "interrupt_active"' in f for f in fb2)
+
+
+def test_walking_back_over_known_ground_counts_as_progress(monkeypatch):
+    """runs/fresh-squirtle2: map hops stayed 1 down all of Route 1 and the tiles were already known, so
+    walking steadily toward Pallet read as 'no objective progress' and wedged the step 5 tiles short."""
+    import pokemon_agent.agent.reason_loop as rl
+    loop, _ = _loop(map_id=12)
+    walk = [(10, y) for y in range(0, 36)]
+    monkeypatch.setattr(rl, "read_collision_map", lambda emu: {"map_id": 12, "walkable": walk, "width": 20, "height": 36})
+    import pokemon_agent.games.pokemon_red.game_state as gs
+    monkeypatch.setattr(gs, "read_npcs", lambda emu: [])
+    loop._directive = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 0}, success={"on_map": 0}, quest_id="q1")
+    route = [{"coord": [10, 35], "dest_map": 0, "label": "Route1 south edge -> PalletTown"}]
+    monkeypatch.setattr(loop, "_portal_route", lambda player, tmap: route)
+    far = loop._objective_distance(SimpleNamespace(map_id=12, x=10, y=20))
+    near = loop._objective_distance(SimpleNamespace(map_id=12, x=10, y=30))
+    assert near < far and far - near == 10
+    d = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 0}, success={"on_map": 0})
+    why = loop._explain_wedge(SimpleNamespace(player=SimpleNamespace(map_id=12, x=10, y=30)), d)
+    assert "5 steps away" in why and "didn't get through" not in why

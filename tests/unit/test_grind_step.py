@@ -79,3 +79,18 @@ def test_the_no_encounter_window_follows_the_map_encounter_rate():
     assert grind_grass_window(51) >= 140                        # Viridian Forest (8/256)
     assert grind_grass_window(13) == GRIND_ENCOUNTER_WINDOW     # Route 2 (25/256): the floor
     assert grind_grass_window(99999) == GRIND_ENCOUNTER_WINDOW  # unknown map
+
+
+def test_caves_roll_encounters_on_every_tile_so_grinding_paces_anywhere():
+    """Gen 1 (TryDoWildEncounter): indoor maps with wild data roll on every step unless they use the
+    FOREST tileset. Mt. Moon has no grass tiles, so a grass-only grind would wedge 'no reachable grass'."""
+    from pokemon_agent.agent.routing import grind_step
+    from pokemon_agent.agent.world_map import WorldMap
+    from pokemon_agent.games.pokemon_red.wild import encounters_anywhere, grass_rate
+    assert encounters_anywhere(59) and grass_rate(59)                 # Mt. Moon 1F
+    assert not encounters_anywhere(51) and grass_rate(51) == 8        # Viridian Forest: grass only
+    assert not encounters_anywhere(12)                                # Route 1 (outdoor)
+    w = WorldMap()
+    w.ingest_collision(59, 6, 3, {(x, 1) for x in range(6)}, None, {})   # a cave corridor, no grass
+    assert grind_step(w, 59, (2, 1), None) is None                        # grass-only: nothing to do
+    assert grind_step(w, 59, (2, 1), None, anywhere=True) is not None     # cave: pace the corridor

@@ -92,7 +92,7 @@ def test_no_reachable_grass_wedges_at_once_with_the_reason():
     loop, d, _ = _setup(["#####", "#...#", "#####"])
     assert loop._navigate_leg(d, _obs(1, 1), set()) is None
     step = loop._plan_steps[0]
-    assert step.status == "wedged" and "no reachable grass" in step.wedge_reason and loop._l1_event
+    assert step.status == "wedged" and "no reachable tiles with wild encounters" in step.wedge_reason and loop._l1_event
 
 
 def test_stuck_verdicts_inside_the_encounter_window_do_not_count():
@@ -106,10 +106,22 @@ def test_stuck_verdicts_inside_the_encounter_window_do_not_count():
 
 
 def _grass_steps(loop, n, *, on=(1, 1)):
-    loop.controller.emu.x, loop.controller.emu.y = on
-    for _ in range(n):
+    """n real steps back and forth between two tiles of the same kind (a move onto a new tile)."""
+    x, y = on
+    for i in range(n):
+        loop.controller.emu.x, loop.controller.emu.y = (x + (i % 2), y)
         loop.session.step += 1
         loop._apply_stuck_to_budget(SimpleNamespace(stuck=False, kind=None), frozen=False)
+
+
+def test_bumps_and_waits_on_the_same_tile_do_not_count():
+    loop, d, _ = _setup(GRASSY)
+    loop._navigate_leg(d, _obs(1, 1), set())
+    loop.controller.emu.x, loop.controller.emu.y = (1, 1)
+    for _ in range(GRIND_ENCOUNTER_WINDOW + 10):            # standing still on grass (bumping a wall)
+        loop.session.step += 1
+        loop._apply_stuck_to_budget(SimpleNamespace(stuck=False, kind=None), frozen=False)
+    assert loop._plan_steps[0].status == "active" and loop._grass_steps <= 1
 
 
 def test_no_wild_encounter_for_the_window_wedges_with_the_reason():
@@ -119,7 +131,7 @@ def test_no_wild_encounter_for_the_window_wedges_with_the_reason():
     loop._navigate_leg(d, _obs(1, 1), set())
     _grass_steps(loop, GRIND_ENCOUNTER_WINDOW + 2)
     step = loop._plan_steps[0]
-    assert step.status == "wedged" and "no wild encounter in" in step.wedge_reason and "grass steps" in step.wedge_reason
+    assert step.status == "wedged" and "no wild encounter in" in step.wedge_reason and "encounter-tile steps" in step.wedge_reason
     assert loop._l1_event
 
 
@@ -127,7 +139,7 @@ def test_steps_off_the_grass_only_count_toward_the_hard_cap():
     from pokemon_agent.agent.reason_loop import GRIND_HARD_CAP
     loop, d, _ = _setup(GRASSY)
     loop._navigate_leg(d, _obs(1, 1), set())
-    _grass_steps(loop, GRIND_ENCOUNTER_WINDOW + 5, on=(4, 3))          # a floor tile: no encounter rolls
+    _grass_steps(loop, GRIND_ENCOUNTER_WINDOW + 5, on=(4, 3))          # floor tiles: no encounter rolls
     assert loop._plan_steps[0].status == "active"
     _grass_steps(loop, GRIND_HARD_CAP, on=(4, 3))
     assert loop._plan_steps[0].status == "wedged"

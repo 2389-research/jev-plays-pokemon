@@ -78,22 +78,12 @@ def grind_grass_window(map_id) -> int:
     """Grass steps to allow without a wild encounter before giving up on a grind: ~4.6x the expected
     steps per encounter (256/rate) for this map's real rate -> under 1% false give-ups. Viridian
     Forest's rate is 8/256 (~32 steps/encounter): the old flat 60 gave up ~15% of the time."""
-    import json as _json
-    from pathlib import Path as _P
-    global _WILD_RATES
-    if _WILD_RATES is None:
-        try:
-            p = _P(__file__).resolve().parents[1] / "games" / "pokemon_red" / "wild_rates.json"
-            _WILD_RATES = {int(k): int(v) for k, v in _json.loads(p.read_text()).items()}
-        except Exception:
-            _WILD_RATES = {}
-    rate = _WILD_RATES.get(map_id)
+    from ..games.pokemon_red.wild import grass_rate
+    rate = grass_rate(map_id)
     if not rate:
         return GRIND_ENCOUNTER_WINDOW
     return max(GRIND_ENCOUNTER_WINDOW, min(GRIND_HARD_CAP, int(4.6 * 256 / rate + 0.5)))
 
-
-_WILD_RATES: dict | None = None
 WLASTMAP = 0xD365          # wLastMap: where a LAST_MAP (0xFF) warp returns to (the last OUTDOOR map)
 CONVO_GRACE_STEPS = 2      # steps after a dialogue step still treated as the same conversation
 FORCED_WAIT_MAX_STEPS = 40  # consecutive forced waits before giving up on the gate (never stall forever)
@@ -1160,7 +1150,7 @@ class ReasoningLoop:
             return move        # the explore executor picks its own next thing; exhaustion ends the step
         if target.get("kind") == "grind":
             if move is None:   # no reachable grass on this map: hand the grind back to L1 right away
-                self._wedge_active(f"grind: no reachable grass on {map_name(player.map_id)}")
+                self._wedge_active(f"grind: no reachable tiles with wild encounters on {map_name(player.map_id)}")
             return move        # (never re-propose a grind target)
         if move is not None:
             self._target_stuck = 0
@@ -1598,8 +1588,9 @@ class ReasoningLoop:
             from .routing import grind_step
             if directive is not None and self._grind_qid != directive.quest_id:
                 self._grind_qid, self._grind_start, self._grind_last = directive.quest_id, self.session.step, None
+            from ..games.pokemon_red.wild import encounters_anywhere
             d = grind_step(self.world, player.map_id, (player.x, player.y), self._grind_last,
-                           avoid=occupied, blocked=blocked_dirs)
+                           avoid=occupied, blocked=blocked_dirs, anywhere=encounters_anywhere(player.map_id))
             self._grind_last = d
             return MoveAction(direction=d) if d is not None else None
         if kind == "tile":
@@ -2711,14 +2702,19 @@ class ReasoningLoop:
             emu = self.controller.emu
             mid = emu.read_memory(0xD35E)
             try:
+                from ..games.pokemon_red.wild import encounters_anywhere
                 here = read_player(emu)
-                if (self.world.terrain.get(mid) or {}).get((here.x, here.y)) == "grass":
-                    self._grass_steps += 1                  # only grass steps roll an encounter
+                pos = (mid, here.x, here.y)
+                moved = pos != getattr(self, "_grass_last_pos", None)   # a bump / wait / dialogue rolls nothing
+                self._grass_last_pos = pos
+                if moved and (encounters_anywhere(mid)
+                              or (self.world.terrain.get(mid) or {}).get((here.x, here.y)) == "grass"):
+                    self._grass_steps += 1                  # only a step ONTO an encounter tile rolls
             except Exception:
                 pass
             window = grind_grass_window(mid)
             if self._grass_steps > window or self.session.step - since > GRIND_HARD_CAP:
-                self._wedge_active(f"grind: no wild encounter in {self._grass_steps} grass steps "
+                self._wedge_active(f"grind: no wild encounter in {self._grass_steps} encounter-tile steps "
                                    f"({self.session.step - since} steps) on {map_name(mid)}")
             self._blocked_for_n = 0
             return

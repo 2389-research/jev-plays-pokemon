@@ -91,17 +91,21 @@ _ORDER = (Direction.NORTH, Direction.EAST, Direction.SOUTH, Direction.WEST)
 
 
 def grind_step(world, map_id: int, pos: tuple[int, int], last_dir: Direction | None,
-               avoid: set | None = None, blocked: set | None = None) -> Direction | None:
+               avoid: set | None = None, blocked: set | None = None, anywhere: bool = False) -> Direction | None:
     """Grind in place: the next step that keeps us walking through grass (every grass step rolls a
     wild encounter). On grass: keep going straight while the next tile is grass, else turn onto a
     grass neighbor (not back where we came from), else reverse — so we sweep the patch instead of
     ping-ponging two tiles. Off grass: the first step toward the nearest reachable grass tile.
     None when the map has no reachable grass (the caller wedges the step so L1 grinds elsewhere).
-    ``blocked`` = direction values the executor forbids from ``pos`` (ledges — never hop one)."""
+    ``blocked`` = direction values the executor forbids from ``pos`` (ledges — never hop one).
+    ``anywhere`` = this map rolls encounters on every walkable tile (caves, towers): pace in place."""
     tiles = world.tiles.get(map_id, {})
     terr = world.terrain.get(map_id, {})
     avoid = avoid or set()
-    grass = {c for c, cls in terr.items() if cls == "grass" and tiles.get(c) != WALL and c not in avoid}
+    if anywhere:   # a cave / tower: every walkable tile rolls an encounter, so pace wherever we are
+        grass = {c for c, v in tiles.items() if v != WALL and c not in avoid}
+    else:
+        grass = {c for c, cls in terr.items() if cls == "grass" and tiles.get(c) != WALL and c not in avoid}
     if not grass:
         return None
 

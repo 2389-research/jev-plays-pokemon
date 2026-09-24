@@ -316,6 +316,7 @@ done_when MUST be exactly one of (this is the full grammar — nothing else pars
   "on_map"                    — arrived on the map (travel steps only).
   "has_item:<name>"           — that item is now in the bag.
   "has_item:<name>>=<N>"      — at least N of that item (buying several: has_item:Poke Ball>=5).
+  "level:<nickname>>=<N>"     — ONE party member reached level N (training: level:Sophie>=16).
   "no_item:<name>"            — that item is gone (used/delivered).
   "level>=<N>"                — party reached level N.
   "badges>=<N>"               — earned N badges.
@@ -384,6 +385,11 @@ it's worth it: catching wild Pokémon is how the team grows. Catching needs Pok�
 at a Poké Mart) and a free party slot; set a standing CATCH goal to have the battle layer catch the
 species you want. SIGNALS.catch shows your current catch goal and whether it can fire right now (ready,
 and why not — e.g. no Poké Balls).
+TRAINING — only Pokémon that take part in a battle earn EXP, and the LEAD (first in the party) starts
+every battle, so a bench that never leads stays weak. Training a member is your call: set "lead":
+"<nickname>" (the harness moves it to the front of the party), then grind with a step whose done_when is
+"level:<nickname>>=N" — somewhere its level can handle (weak wild Pokémon, heal often). Set the lead
+back (e.g. "lead": "Dylan") before a gym battle. PARTY shows each member's nickname, level and HP.
 To set or change the CATCH goal add "catch": ["<species>", ...] (or ["any"]); the battle layer then
 catches a matching wild Pokémon when it can (weakened into the catch band, then a ball). A goal that
 SIGNALS.catch says isn't ready does nothing until you fix the reason (e.g. add a step to buy Poké Balls:
@@ -397,8 +403,9 @@ Return ONLY JSON:
  "remove": [ <ids of existing plan steps to drop> ],
  "goals": { <ONLY the tier(s) that changed, e.g. "tertiary": {"text": "<short>", "done_when": "<criterion or null>"}> },
  "notepad": "<full rewritten notepad>",
- "catch": [ <species or "any"> ]}
-Omit "goals", "notepad" and "catch" entirely when they did not change (the common case). To drop the
+ "catch": [ <species or "any"> ],
+ "lead": "<party nickname to put first>"}
+Omit "goals", "notepad", "catch" and "lead" entirely when they did not change (the common case). To drop the
 paused focus, add "interrupted": "" (see GOALS above); otherwise never include "interrupted"."""
 
 
@@ -709,6 +716,8 @@ class Planner:
                    "notepad": data.get("notepad") if isinstance(data.get("notepad"), str) else None}
             if "interrupted" in data:
                 out["interrupted"] = data["interrupted"]
+            if isinstance(data.get("lead"), str) and data["lead"].strip():
+                out["lead"] = data["lead"].strip()
             # legacy keys only if the model still emits them (honored alongside a step edit only)
             for k in ("mission", "milestone"):
                 if isinstance(data.get(k), str) and data[k].strip():
@@ -791,6 +800,10 @@ class Planner:
             return {"on_map": map_id}
         if low == "talked":
             return {"talked_on_map": map_id}
+        if low.startswith("level:") and ">=" in s:        # one party member: level:Sophie>=16
+            name, _, num = s[len("level:"):].rpartition(">=")
+            num = num.strip()
+            return {"member_level": [name.strip(), int(num)]} if name.strip() and num.isdigit() else None
         if low.startswith("has_item:") and ">=" in s:     # a COUNT: has_item:Poke Ball>=5
             name, _, num = s[len("has_item:"):].rpartition(">=")
             iid = resolve_item_id(name.strip())

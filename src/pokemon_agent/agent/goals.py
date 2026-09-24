@@ -109,6 +109,7 @@ class GoalsChange:
     notepad_truncated: bool = False
     drop_interrupted: bool = False
     catch: list[str] | str | None = None                   # list = set it; "clear"; None = unchanged
+    lead: str | None = None                                # a party nickname to put first; "clear" removes
 
 
 def _crit(dw: str | None) -> dict | None:
@@ -161,7 +162,15 @@ def detect_change(plan: AgentPlan, prop: dict, *, step_edit: bool) -> GoalsChang
             ch.catch = "clear"
     elif isinstance(c, list) and _catch_set(c) and _catch_set(c) != cur:
         ch.catch = [str(x) for x in c if norm(x)]
-    if not (ch.goals or ch.notepad is not None or ch.catch is not None
+    lead = prop.get("lead")
+    cur_lead = norm((plan.battle_goals or {}).get("lead"))
+    if isinstance(lead, str) and lead.strip():
+        if norm(lead) == "clear":
+            if cur_lead:
+                ch.lead = "clear"
+        elif norm(lead) != cur_lead:
+            ch.lead = lead.strip()
+    if not (ch.goals or ch.notepad is not None or ch.catch is not None or ch.lead is not None
             or (ch.drop_interrupted and plan.interrupted.text)):
         return None
     return ch
@@ -187,6 +196,13 @@ def apply_change(plan: AgentPlan, ch: GoalsChange, *, pre_status: dict[str, str]
         plan.notepad, plan.notepad_truncated = ch.notepad, ch.notepad_truncated
     if ch.catch is not None:
         plan.battle_goals = {**(plan.battle_goals or {}), "catch": [] if ch.catch == "clear" else list(ch.catch)}
+    if ch.lead is not None:
+        bg = dict(plan.battle_goals or {})
+        if ch.lead == "clear":
+            bg.pop("lead", None)
+        else:
+            bg["lead"] = ch.lead
+        plan.battle_goals = bg
 
 
 def refresh_interrupted(plan: AgentPlan, emu, memory=None) -> bool:

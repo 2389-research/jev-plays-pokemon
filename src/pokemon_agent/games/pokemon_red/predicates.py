@@ -27,7 +27,7 @@ import operator
 
 from ...emulator.interface import Emulator
 from . import needs
-from .game_state import WNUMBAGITEMS, WBAGITEMS, WPARTYCOUNT, read_badges, read_money
+from .game_state import WNUMBAGITEMS, WBAGITEMS, WPARTYCOUNT, read_badges, read_money, read_party
 from .needs import WCURMAP, WISINBATTLE
 
 WPLAYERX = 0xD362
@@ -114,6 +114,16 @@ def _clause(key: str, spec, emu: Emulator, memory=None) -> bool:
             return int(spec) not in _bag_item_ids(emu)
         except (TypeError, ValueError):
             return False
+    if key == "member_level":
+        # spec = [nickname or species, N]: that party member reached level N (training one Pokemon)
+        try:
+            name, n = str(spec[0]).strip().lower(), int(spec[1])
+        except (TypeError, ValueError, IndexError):
+            return False
+        for m in read_party(emu):
+            if name in (str(m.get("nickname") or "").strip().lower(), str(m.get("species") or "").lower()):
+                return int(m.get("level") or 0) >= n
+        return False
     if key == "item_count":
         # spec = [item id, N]: at least N of that item in the bag (e.g. 5 Poke Balls bought)
         try:

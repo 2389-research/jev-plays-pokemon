@@ -49,6 +49,7 @@ from .quest_reconciler import QuestStep, compile_steps_to_directives, reconcile_
 from .reasoner import Reasoner, ReasonStep
 from .session import Session
 from .signals import game_signals, needs_emergency_heal
+from ..games.pokemon_red.game_state import read_party
 from .targets import build_targets, name_matches, npc_key, select_npc
 from .world_map import DELTA, WALL
 
@@ -239,6 +240,7 @@ class ReasoningLoop:
         self._grind_last = None
         self._battle_wild = False
         self._talk_npc = None                    # npc_key of the NPC we're about to talk to (F2 rotation)
+        self._lead_retry_at = 0                  # training: next step a failed lead swap may be retried
         # conversation/script gate (F5): last step routed to dialogue, consecutive forced waits, and
         # whether forced waiting is armed (a timeout disarms it until the script flag clears)
         self._last_dialog_step = -(10**9)
@@ -390,6 +392,20 @@ class ReasoningLoop:
             self._maybe_reflect(obs, player_desc)
             return self._jev_turn(obs, player_desc, self._blocked_dirs(obs, None), None, shot)
 
+        # training (L1's call): put the chosen LEAD at the front of the party so it starts battles and
+        # earns EXP — done through the in-game menu, on the overworld only
+        if self._maybe_apply_lead():
+            from ..core.models import WaitAction
+            rstep = ReasonStep(location="party", objective="put the lead first",
+                               reasoning=f"lead -> {self._plan.battle_goals.get('lead')}",
+                               action=WaitAction(frames=1))
+            self._prev = rstep
+            self._emit_reason(rstep, 0)
+            return self._finish(obs, rstep, ActionResult(success=True, result="completed",
+                                                         mode_before=detect_mode(self.controller.emu),
+                                                         mode_after=detect_mode(self.controller.emu),
+                                                         detail="party reordered (lead)"), 0, {}, shot)
+
         directive = self._manage_directive(obs)
         blocked_dirs = self._blocked_dirs(obs, self._next_hop_map(obs, directive))
         # NOTE: no separate _maybe_reflect on the planner path — reflection is now folded INTO the
@@ -524,6 +540,7 @@ class ReasoningLoop:
             from ..games.pokemon_red.game_state import read_items
             from .signals import catch_status
             signals["catch"] = catch_status(self._plan.battle_goals, read_items(emu), signals["party"])
+            signals["lead"] = (self._plan.battle_goals or {}).get("lead")
             cur_mid = obs.player.map_id if obs.player else None
             context = {
                 "current_map": {"id": cur_mid,
@@ -1949,6 +1966,31 @@ class ReasoningLoop:
         self._emit_reason(rstep, 0)
         return self._finish(obs, rstep, result, 0, {}, shot)
 
+    def _maybe_apply_lead(self) -> bool:
+        """If L1 set a lead that isn't first in the party, move it there (party_menu.swap_to_front).
+        True when a swap was attempted this step; failed swaps are retried at most every 20 steps."""
+        lead = str(((self._plan.battle_goals if self._plan else None) or {}).get("lead") or "").strip().lower()
+        if not lead or self.session.step < self._lead_retry_at:
+            return False
+        party = read_party(self.controller.emu)
+
+        def name(m):
+            return (str(m.get("nickname") or "").strip().lower(), str(m.get("species") or "").lower())
+        if not party or lead in name(party[0]):
+            return False
+        slot = next((i for i, m in enumerate(party) if lead in name(m)), None)
+        if slot is None:
+            self._lead_retry_at = self.session.step + 20
+            self.on_event("lead_unknown", {"step": self.session.step, "lead": lead,
+                                           "party": [name(m)[0] or name(m)[1] for m in party]})
+            return False
+        from ..games.pokemon_red import party_menu
+        ok = party_menu.swap_to_front(self.controller.emu, slot)
+        if not ok:
+            self._lead_retry_at = self.session.step + 20
+        self.on_event("lead_set", {"step": self.session.step, "lead": lead, "ok": ok})
+        return True
+
     def _report_blockers(self, obs, target) -> bool:
         """A portal route that exists on the map but is closed by objects/NPCs (e.g. the two fossils
         filling Mt. Moon B2F's corridor, a trainer in a doorway): wedge the step at once with the
@@ -1979,7 +2021,8 @@ class ReasoningLoop:
     def _is_grind(directive) -> bool:
         """A TRAVEL whose success is purely a level threshold (a grind step)."""
         s = (directive.success or {}) if directive is not None else {}
-        return directive is not None and directive.intent == Intent.TRAVEL and bool(s) and set(s) == {"level"}
+        return (directive is not None and directive.intent == Intent.TRAVEL and bool(s)
+                and set(s) <= {"level", "member_level"})
 
     def _grinding(self) -> bool:
         d = self._directive

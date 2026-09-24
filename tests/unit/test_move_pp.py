@@ -142,3 +142,35 @@ def test_party_screen_nicknames_are_not_mistaken_for_the_keyboard():
     from pokemon_agent.games.pokemon_red import menus
     party = "WARTORTLE 21 FNT\n 0 58\nAAAAAAAAAA5\n 19 19\nAAAAAAAAAA9\nAAAAAAAAAA6\nBring out which POKEMON?"
     assert menus.nickname_action(party) is None
+
+
+# ---- A: per-move effectiveness for the move chooser (cerulean-team4: Water Gun into Misty's Water types) ----
+class BattleMem(Mem):
+    def __init__(self, moves, pp, my_types, enemy_types):
+        super().__init__(moves, pp)
+        self.m.update({0xD019: my_types[0], 0xD01A: my_types[1], 0xCFEA: enemy_types[0], 0xCFEB: enemy_types[1]})
+
+
+def test_move_analysis_vs_starmie_prefers_tackle_over_resisted_water():
+    WATER, PSYCHIC = 0x15, 0x18
+    emu = BattleMem([33, 39, 145, 55], [35, 30, 30, 25], (WATER, WATER), (WATER, PSYCHIC))
+    a = {m["move"]: m for m in battle.move_analysis(emu)}
+    assert a["Water Gun"]["effectiveness"] == 0.5 and a["Water Gun"]["stab"] is True
+    assert a["Tackle"]["effectiveness"] == 1.0 and a["Tail Whip"]["expected"] == 0
+    best = max(a.values(), key=lambda m: m["expected"])
+    assert best["move"] == "Tackle"
+
+
+def test_choose_move_shows_the_numbers_to_jev(monkeypatch):
+    WATER, PSYCHIC = 0x15, 0x18
+    emu = BattleMem([33, 55], [35, 25], (WATER, WATER), (WATER, PSYCHIC))
+    seen = {}
+
+    class Client:
+        def system_one(self, state, questions):
+            seen.update(state=state, criteria=questions["move"].criteria)
+            return SimpleNamespace(answers={"move": SimpleNamespace(choice="0", confidence=0.9)})
+    monkeypatch.setattr(battle_agent, "battle_state_summary", lambda e: {})
+    battle_agent.choose_move(Client(), emu)
+    assert "0.5x" in seen["criteria"]["1"] and "expected" in seen["criteria"]["1"]
+    assert seen["state"]["move_analysis"][0]["move"] == "Tackle"

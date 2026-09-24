@@ -64,6 +64,33 @@ def active_pp(emu: Emulator) -> list[int]:
     return [emu.read_memory(ACTIVE_PP + i) & 0x3F for i in range(move_count(emu))]
 
 
+ACTIVE_TYPES = 0xD019      # wBattleMonType1/2
+ENEMY_TYPES = 0xCFEA       # wEnemyMonType1/2
+
+
+def move_analysis(emu: Emulator) -> list[dict]:
+    """Per move slot: type, power, PP, the type multiplier against the enemy's types (Gen 1 chart incl.
+    its quirks), same-type bonus, and expected damage = power x multiplier x (1.5 if STAB) x accuracy.
+    Status moves (power 0) score 0 — a decision aid for the move chooser, not a rule."""
+    from .battle_data import MOVE_DATA, TYPE_EFFECTS, TYPE_NAMES
+    mine = {TYPE_NAMES.get(emu.read_memory(ACTIVE_TYPES + i)) for i in range(2)}
+    theirs = [TYPE_NAMES.get(emu.read_memory(ENEMY_TYPES + i)) for i in range(2)]
+    theirs = list(dict.fromkeys(t for t in theirs if t))          # a mono-type mon repeats its type
+    pp = active_pp(emu)
+    out = []
+    for slot, mid in enumerate(m for m in active_move_ids(emu) if m):
+        const, mtype, power, acc, _maxpp = MOVE_DATA.get(mid, ("?", None, 0, 100, 0))
+        mult = 1.0
+        for t in theirs:
+            mult *= TYPE_EFFECTS.get((mtype, t), 1.0)
+        stab = mtype in mine
+        expected = round(power * mult * (1.5 if stab else 1.0) * acc / 100, 1) if power else 0
+        out.append({"slot": slot, "move": MOVES.get(mid, const), "type": mtype, "power": power,
+                    "pp": pp[slot] if slot < len(pp) else None, "effectiveness": mult, "stab": stab,
+                    "expected": expected})
+    return out
+
+
 def usable_slot(pp: list[int], slot: int) -> int:
     """``slot`` if it still has PP; otherwise the move with the most PP left. With every move at 0
     PP the choice doesn't matter — the game uses Struggle."""

@@ -32,7 +32,10 @@ CHOOSE_MOVE_INSTRUCTIONS = (
     "super effective against the opponent). Pick the move that best progresses toward "
     "winning THIS battle: usually the SUPER-EFFECTIVE / highest-damage move for the "
     "type match-up, but consider status/setup moves when they help. Prefer a damaging "
-    "move when the foe is low on HP and you can knock it out."
+    "move when the foe is low on HP and you can knock it out. Each option states its COMPUTED "
+    "effectiveness against this opponent (the game's own Gen 1 type chart), same-type bonus and "
+    "expected damage (also in MOVE_ANALYSIS) — trust those numbers: a resisted move of your own "
+    "type often does less than a neutral one."
 )
 
 
@@ -134,9 +137,22 @@ def choose_move(client, emu: Emulator, *, type_knowledge: list[str] | None = Non
     usable = [i for i in range(len(moves)) if i >= len(pp) or pp[i] > 0]
     if not usable:
         return 0, 0.0          # every move is out of PP: the game uses Struggle
-    # only moves with PP left can be chosen (the game refuses a 0-PP move and the menu loops)
-    criteria = {str(i): f"Use {moves[i]} ({pp[i] if i < len(pp) else '?'} PP left)." for i in usable}
+    # only moves with PP left can be chosen (the game refuses a 0-PP move and the menu loops); each option
+    # carries its computed effectiveness vs this opponent so the choice is informed, not guessed
+    analysis = {m["slot"]: m for m in battle.move_analysis(emu)}
+
+    def label(i):
+        a = analysis.get(i)
+        left = pp[i] if i < len(pp) else "?"
+        if not a:
+            return f"Use {moves[i]} ({left} PP left)."
+        if not a["power"]:
+            return f"Use {moves[i]} (status move, no damage; {left} PP left)."
+        return (f"Use {moves[i]} ({a['type']}, power {a['power']}, {a['effectiveness']:g}x vs the opponent"
+                f"{', same-type bonus' if a['stab'] else ''}; expected ~{a['expected']:g} damage; {left} PP left).")
+    criteria = {str(i): label(i) for i in usable}
     state = battle_state_summary(emu)
+    state["move_analysis"] = [analysis[i] for i in sorted(analysis)]
     if type_knowledge:
         state["type_knowledge"] = type_knowledge
     resp = client.system_one(

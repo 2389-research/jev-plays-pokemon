@@ -99,7 +99,7 @@ def switch_screen_showing(emu: Emulator) -> bool:
     if not in_battle(emu) or fight_menu_showing(emu):
         return False
     s = _screen(emu)
-    return any(k in s for k in ("Bring out which", "already out", "change", "Use next"))
+    return any(k in s for k in ("Bring out which", "already out", "change", "Use next", "no will"))
 
 
 def replacement_slot(party: list[dict]) -> int | None:
@@ -123,17 +123,44 @@ def resolve_switch_screen(emu: Emulator, tries: int = 10) -> bool:
             menus.answer_yesno(emu, True)
         elif "change" in s and menus.menu_open(emu):
             menus.answer_yesno(emu, False)
-        elif "Bring out which" in s and fainted and menus.menu_open(emu):
+        elif fainted and ("Bring out which" in s or "no will" in s):
+            # forced pick after a faint (the party screen isn't a menu to menu_open(): drive the RAM
+            # cursor directly) — dismiss "There's no will to fight!", then send out a healthy mon
             slot = replacement_slot(read_party(emu))
+            if "no will" in s:
+                _press(emu, GameButton.B, 30)
+                continue
             if slot is None:
-                _press(emu, GameButton.A, 30)
-            else:
-                menus.select_option(emu, slot, max_options=6)
-                _press(emu, GameButton.A, 30)     # the party submenu: SWITCH (top) -> send it out
+                return False
+            pick_party_slot(emu, slot)
         else:
             _press(emu, GameButton.B, 30)
         emu.tick(10)
     return not in_battle(emu) or fight_menu_showing(emu)
+
+
+WCURMENUITEM = 0xCC26
+
+
+def _hold_press(emu: Emulator, button: GameButton, hold: int = 10, settle: int = 30) -> None:
+    """A reliable press: 1-frame taps can alias with the game's joypad sampling and be dropped."""
+    emu.hold(button)
+    emu.tick(hold)
+    emu.release(button)
+    emu.tick(settle)
+
+
+def pick_party_slot(emu: Emulator, slot: int) -> None:
+    """On the battle party screen: move the cursor to ``slot`` (RAM wCurrentMenuItem) and send it out
+    (A opens the SWITCH/STATS/CANCEL submenu, A again picks SWITCH)."""
+    for _ in range(7):
+        if emu.read_memory(WCURMENUITEM) == 0:
+            break
+        _hold_press(emu, GameButton.UP, 6, 12)
+    for _ in range(slot):
+        _hold_press(emu, GameButton.DOWN, 6, 12)
+    _hold_press(emu, GameButton.A)
+    _hold_press(emu, GameButton.A)
 
 
 def back_to_fight_menu(emu: Emulator, tries: int = 6) -> bool:

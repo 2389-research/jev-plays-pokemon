@@ -331,6 +331,21 @@ class ReasoningLoop:
         # step, so the battle layer sees the CURRENT goals on the next battle-start edge (§7.1).
         self._sync_battle_goals()
 
+        # --- nickname prompt / name keyboard: always decline deterministically (an A-spam would type
+        # "AAAAAAAAAA" as the Pokemon's name) ---
+        from ..games.pokemon_red import menus as _menus
+        if _menus.handle_nickname(self.controller.emu):
+            from ..core.models import WaitAction
+            rstep = ReasonStep(location="nickname", objective="decline the nickname",
+                               reasoning="nickname prompt: answer NO (keep the species name)",
+                               action=WaitAction(frames=1))
+            self._prev = rstep
+            self._emit_reason(rstep, 0)
+            return self._finish(obs, rstep, ActionResult(success=True, result="completed",
+                                                         mode_before=detect_mode(self.controller.emu),
+                                                         mode_after=detect_mode(self.controller.emu),
+                                                         detail="declined nickname"), 0, {}, shot)
+
         # --- battle owns the step (deterministic RAM bit — a fact, never a classification) ---
         if ctx.get("in_battle"):
             self._battle_wild = self.controller.emu.read_memory(0xD057) == 1   # 1 wild, 2 trainer

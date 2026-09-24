@@ -83,3 +83,62 @@ def test_backs_out_of_a_voluntary_switch_menu():
 def test_switch_screen_picks_a_healthy_mon_when_the_active_one_fainted():
     assert battle.replacement_slot([{"hp": 0}, {"hp": 12}, {"hp": 5}]) == 1
     assert battle.replacement_slot([{"hp": 0}, {"hp": 0}]) is None
+
+
+# ---- cerulean-team3: fainted Wartortle never replaced; every catch nicknamed "AAAAAAAAAA" ----------------
+FAINT = Path("runs/cerulean-team3-20260923/states/map3_step362.state")
+CAPTURE = Path("states/capture_wild.state")
+
+
+@pytest.mark.skipif(not (ROM.exists() and FAINT.exists()), reason="ROM / faint state not present")
+def test_forced_switch_sends_out_a_healthy_mon():
+    """'Bring out which POKEMON?' after a faint: the party screen isn't a menu to menu_open(), so the
+    handler pressed B (can't cancel a forced switch) and the default A re-picked the fainted Wartortle
+    ('There's no will to fight!') for ~2,100 steps."""
+    from pokemon_agent.emulator.pyboy_adapter import PyBoyEmulator
+    emu = PyBoyEmulator(str(ROM), window="null")
+    emu.load_state(FAINT)
+    emu.tick(4)
+    assert battle.switch_screen_showing(emu)
+    battle.resolve_switch_screen(emu)
+    assert battle._u16(emu, battle.ACTIVE_HP) > 0          # a healthy mon is out
+    emu.close()
+
+
+@pytest.mark.skipif(not (ROM.exists() and CAPTURE.exists()), reason="ROM / capture fixture not present")
+def test_a_catch_is_not_nicknamed_aaaa():
+    from pokemon_agent.emulator.pyboy_adapter import PyBoyEmulator
+    from pokemon_agent.games.pokemon_red import battle_actions
+    from pokemon_agent.games.pokemon_red.game_state import read_party
+    for attempt in range(6):
+        emu = PyBoyEmulator(str(ROM), window="null")
+        emu.load_state(CAPTURE)
+        emu.tick(6 + attempt * 3)
+        emu.write_memory(0xCFE6, 0); emu.write_memory(0xCFE7, 1)   # enemy at 1 HP: a near-certain catch
+        r = battle_actions.throw_ball(emu, "Poke Ball", max_advance=150)
+        if r.get("caught"):
+            party = read_party(emu)
+            new = party[-1]
+            assert "AAAA" not in new["nickname"] and new["nickname"].upper() == new["species"].upper()
+            emu.close()
+            return
+        emu.close()
+    pytest.skip("no catch in 6 tries")
+
+
+def test_loop_declines_a_nickname_prompt_it_sees():
+    from pokemon_agent.games.pokemon_red import menus
+
+    class Scr:
+        def __init__(self):
+            self.pressed = []
+    s = Scr()
+    assert menus.nickname_action("Do you want to give a nickname to SPEAROW?") == "B"
+    assert menus.nickname_action("A B C D E F G H I\nJ K L M N O P Q R\nS T U V W X Y Z") == "START"
+    assert menus.nickname_action("Wild ZUBAT appeared!") is None
+
+
+def test_party_screen_nicknames_are_not_mistaken_for_the_keyboard():
+    from pokemon_agent.games.pokemon_red import menus
+    party = "WARTORTLE 21 FNT\n 0 58\nAAAAAAAAAA5\n 19 19\nAAAAAAAAAA9\nAAAAAAAAAA6\nBring out which POKEMON?"
+    assert menus.nickname_action(party) is None

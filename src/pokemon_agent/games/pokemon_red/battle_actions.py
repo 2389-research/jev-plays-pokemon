@@ -125,6 +125,8 @@ def _drain_turn(emu: Emulator, *, max_advance: int, done) -> None:
             return
         if battle.fight_menu_showing(emu) and menus.menu_open(emu):
             return
+        if menus.handle_nickname(emu):      # after a catch: answer NO, never type "AAAAAAAAAA"
+            continue
         _press(emu, GameButton.A, 30)
 
 

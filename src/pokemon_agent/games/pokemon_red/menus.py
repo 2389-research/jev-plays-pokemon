@@ -110,3 +110,35 @@ def advance(emu: Emulator) -> None:
 
 def cancel(emu: Emulator) -> None:
     _press(emu, GameButton.B, 20)
+
+
+def screen_text(emu: Emulator) -> str:
+    return "\n".join(_rows_text(emu))
+
+
+def nickname_action(text: str) -> str | None:
+    """The deterministic answer to the nickname flow: 'Do you want to give a nickname to X?' -> "B"
+    (NO — pressing A says YES and opens the keyboard); the name-entry keyboard itself -> "START"
+    (finish; an empty name keeps the species name). None when neither is on screen."""
+    if "nickname" in (text or "").lower():
+        return "B"
+    # the keyboard is rows of SINGLE letters separated by spaces ("A B C D E F G H I") — not a row of
+    # nicknames like "AAAAAAAAAA5" on the party screen
+    keyrows = sum(1 for r in (text or "").splitlines()
+                  if sum(1 for t in r.split() if len(t) == 1 and t.isalpha()) >= 7)
+    if keyrows >= 2:
+        return "START"
+    return None
+
+
+def handle_nickname(emu: Emulator) -> bool:
+    """Decline a nickname / close the name keyboard if it's up (never let an A-spam type 'AAAAAAAAAA').
+    True if it acted."""
+    act = nickname_action(screen_text(emu))
+    if act == "B":
+        _press(emu, GameButton.B, 30)
+    elif act == "START":
+        for _ in range(10):                       # clear anything typed, then finish
+            _press(emu, GameButton.B, 12)
+        _press(emu, GameButton.START, 30)
+    return act is not None

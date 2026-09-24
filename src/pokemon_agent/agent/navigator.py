@@ -25,6 +25,23 @@ def _dir_between(fx: int, fy: int, tx: int, ty: int) -> Direction | None:
     return _DELTA_TO_DIR.get((tx - fx, ty - fy))
 
 
+_LEDGE_DIR = {"ledge_s": Direction.SOUTH, "ledge_w": Direction.WEST, "ledge_e": Direction.EAST}
+
+
+def ledge_hops(terrain: dict) -> dict[tuple[int, int], list[tuple[Direction, tuple[int, int]]]]:
+    """One-way ledge edges from a map's semantic terrain: {take-off cell: [(hop direction, landing)]}.
+    Stepping onto a ledge tile in its direction hops the player two cells (the ledge tile itself is
+    never stood on); the reverse is impossible."""
+    out: dict[tuple[int, int], list] = {}
+    for (x, y), cls in terrain.items():
+        d = _LEDGE_DIR.get(cls)
+        if d is None:
+            continue
+        dx, dy = DELTA[d]
+        out.setdefault((x - dx, y - dy), []).append((d, (x + dx, y + dy)))
+    return out
+
+
 class Navigator:
     def __init__(self, world: WorldMap):
         self.world = world
@@ -48,24 +65,29 @@ class Navigator:
         self, map_id: int, start: tuple[int, int], goals: set[tuple[int, int]],
         blocked: frozenset | set | None = None, max_nodes: int = 4000,
     ) -> Direction | None:
-        """First move on a shortest path (over passable tiles) from start to any goal."""
+        """First move on a shortest path (over passable tiles, plus one-way LEDGE hops) from start to
+        any goal. Sets ``self.first_is_hop`` when that first move is a planned ledge hop."""
+        self.first_is_hop = False
         if start in goals:
             return None
+        hops = ledge_hops(self.world.terrain.get(map_id) or {})
         seen = {start}
-        q: deque[tuple[tuple[int, int], Direction | None]] = deque([(start, None)])
+        q: deque[tuple[tuple[int, int], Direction | None, bool]] = deque([(start, None, False)])
         while q and len(seen) < max_nodes:
-            (x, y), first = q.popleft()
-            for d, (dx, dy) in DELTA.items():
-                nxt = (x + dx, y + dy)
+            (x, y), first, hop0 = q.popleft()
+            moves = [(d, (x + dx, y + dy), False) for d, (dx, dy) in DELTA.items()]
+            moves += [(d, land, True) for d, land in hops.get((x, y), [])]
+            for d, nxt, is_hop in moves:
                 if nxt in seen or not self._passable(map_id, nxt, blocked):
                     continue
-                if frozenset({(x, y), nxt}) in self._cuts(map_id):
+                if not is_hop and frozenset({(x, y), nxt}) in self._cuts(map_id):
                     continue      # an elevation edge: both cells walkable, the step between them isn't
-                step = first or d
+                step, h = (first, hop0) if first else (d, is_hop)
                 if nxt in goals:
+                    self.first_is_hop = h
                     return step
                 seen.add(nxt)
-                q.append((nxt, step))
+                q.append((nxt, step, h))
         return None
 
     def step_toward(

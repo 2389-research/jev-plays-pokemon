@@ -43,7 +43,7 @@ from ..observations.builder import ObservationBuilder
 from . import goals as goals_mod
 from .l1_pipeline import run_l1_pipeline
 from .memory import AgentMemory
-from .navigator import Navigator
+from .navigator import Navigator, ledge_hops
 from .plan import AgentPlan, Directive, Intent
 from .quest_reconciler import QuestStep, compile_steps_to_directives, reconcile_quests
 from .reasoner import Reasoner, ReasonStep
@@ -1323,7 +1323,8 @@ class ReasoningLoop:
         walk = set(coll["walkable"]) | {goal}   # the door tile may be off the walkable set
         blocked = (set(occupied) | self._warp_tiles(player.map_id)) - {goal}   # never through another door
         cuts = (getattr(self.world, "cut_edges", None) or {}).get(getattr(player, "map_id", None), set())
-        prev: dict[tuple[int, int], tuple[tuple[int, int], Direction] | None] = {start: None}
+        hops = ledge_hops(coll.get("terrain") or {})
+        prev: dict[tuple[int, int], tuple[tuple[int, int], Direction, bool] | None] = {start: None}
         q = deque([start])
         found = False
         while q:
@@ -1332,19 +1333,20 @@ class ReasoningLoop:
                 found = True
                 break
             cx, cy = cur
-            for d, (dx, dy) in DELTA.items():
-                nb = (cx + dx, cy + dy)
+            moves = [(d, (cx + dx, cy + dy), False) for d, (dx, dy) in DELTA.items()]
+            moves += [(d, land, True) for d, land in hops.get(cur, [])]      # one-way ledge hops
+            for d, nb, is_hop in moves:
                 if nb in walk and nb not in prev and nb not in blocked \
-                        and frozenset({cur, nb}) not in cuts:     # elevation edge (tile-pair collision)
-                    prev[nb] = (cur, d)
+                        and (is_hop or frozenset({cur, nb}) not in cuts):  # elevation edge (tile-pair collision)
+                    prev[nb] = (cur, d, is_hop)
                     q.append(nb)
         if not found:
             return None
-        step, first = goal, None
+        step, first, first_hop = goal, None, False
         while prev[step] is not None:
-            first = prev[step][1]
+            first, first_hop = prev[step][1], prev[step][2]
             step = prev[step][0]
-        if first is not None and first.value not in blocked_dirs:
+        if first is not None and (first_hop or first.value not in blocked_dirs):
             return MoveAction(direction=first)
         return None
 
@@ -2193,7 +2195,10 @@ class ReasoningLoop:
                                         occupied)
         if arrived:
             return InteractAction() if interact else None
-        if isinstance(prim, MoveAction) and prim.direction.value not in blocked_dirs:
+        # a PLANNED ledge hop (on the shortest path to the target) is exempt from the blanket
+        # "never hop a ledge" veto in blocked_dirs — that veto is for moves nobody planned
+        planned_hop = isinstance(prim, MoveAction) and getattr(nav, "first_is_hop", False)
+        if isinstance(prim, MoveAction) and (planned_hop or prim.direction.value not in blocked_dirs):
             self._cap_det("servo_move",
                           {"player": {"x": getattr(player, "x", None), "y": getattr(player, "y", None)},
                            "target": [int(xy[0]), int(xy[1])], "interact": interact},
@@ -3074,6 +3079,7 @@ class ReasoningLoop:
         if not coll or coll.get("map_id") != player.map_id:
             return None
         walk = (set(map(tuple, coll["walkable"])) - occ) | {tuple(goal)}
+        hops = ledge_hops(coll.get("terrain") or {})
         start = (player.x, player.y)
         dist, q = {start: 0}, deque([start])
         while q:
@@ -3081,7 +3087,8 @@ class ReasoningLoop:
             if c == tuple(goal):
                 return dist[c]
             x, y = c
-            for n in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+            nxt = [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)] + [land for _d, land in hops.get(c, [])]
+            for n in nxt:
                 if n in walk and n not in dist:
                     dist[n] = dist[c] + 1
                     q.append(n)

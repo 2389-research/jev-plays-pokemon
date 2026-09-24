@@ -322,3 +322,21 @@ def test_route_blockers_reports_only_what_closes_the_route():
     walk = {(x, y) for x in range(7) for y in range(4)} - {(2, 0), (3, 0), (2, 2), (3, 2), (2, 3), (3, 3)}
     occ = {(2, 1): "Fossil", (3, 1): "Fossil", (5, 1): "Super Nerd"}   # nerd on open floor: walk around him
     assert route_blockers(walk, (0, 1), (6, 1), occ) == [("Fossil", (2, 1)), ("Fossil", (3, 1))]
+
+
+def test_story_gate_opens_from_ram_and_unlocks_cerulean_to_vermilion():
+    """runs/ss-anne-20260923: the trashed-house guard is hidden when Bill gives the S.S. Ticket, but the
+    static gate kept main Cerulean -> Vermilion unroutable; L2 guessed the west edge and bounced off
+    Route 4 for ~500 steps. Gates carry a RAM predicate and open at runtime."""
+    from pokemon_agent.agent.portal_graph import PortalGraph
+    g = PortalGraph.load()
+    comp = g._grid(3)[(19, 18)]                              # main Cerulean, outside the Pokécenter
+    assert g.route(3, comp, 5) is None
+    assert not g.refresh_gates(lambda c: False)
+    opened = g.refresh_gates(lambda c: c == {"has_item": 63})
+    assert "ceruleancity:warp1" in opened
+    r = g.route(3, comp, 5)
+    assert r and r[0]["dest_map"] == 62 and any("undergroundpath" in p["id"] for p in r)
+    assert all(not p.get("gated") or p["id"] in g.open_gates for p in r)
+    saffron = [p for p in g.portals.values() if "drink" in (p.get("gated") or "")]
+    assert saffron and not any(p["id"] in g.open_gates for p in saffron)   # no predicate: stays shut

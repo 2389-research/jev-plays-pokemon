@@ -38,6 +38,7 @@ class PortalGraph:
         self.portals = portals  # id -> portal dict
         self.version = version
         self._grids: dict[int, dict[tuple[int, int], int]] = {}
+        self.open_gates: set[str] = set()   # story gates opened at runtime (refresh_gates)
         self._by_map: dict[int, list[dict]] = {}
         for p in portals.values():
             self._by_map.setdefault(p["map"], []).append(p)
@@ -60,7 +61,25 @@ class PortalGraph:
         portals and elevators (dynamic destinations) are not routed unless ``allow_gated``."""
         return [p for p in self.portals_on(map_id)
                 if p["component"] == comp and p["dest_map"] is not None and p["kind"] != "elevator"
-                and (allow_gated or not p.get("gated"))]
+                and (allow_gated or not self.is_gated(p))]
+
+    def is_gated(self, p: dict) -> bool:
+        return bool(p.get("gated")) and p["id"] not in self.open_gates
+
+    def refresh_gates(self, holds) -> set[str]:
+        """Open every story gate whose ``open_when`` RAM predicate holds (``holds(pred) -> bool``); a
+        gate with no predicate stays closed. Returns the newly opened portal ids."""
+        opened = set()
+        for p in self.portals.values():
+            if p.get("gated") and p.get("open_when") and p["id"] not in self.open_gates:
+                try:
+                    ok = bool(holds(p["open_when"]))
+                except Exception:
+                    ok = False
+                if ok:
+                    self.open_gates.add(p["id"])
+                    opened.add(p["id"])
+        return opened
 
     # --- static routing over (map, component) nodes ----------------------
     def _comps_of(self, mid: int) -> set[int]:
@@ -215,7 +234,7 @@ class PortalGraph:
                     continue
                 links = {}
                 for p in self.portals_on(m):
-                    if p["kind"] == "ledge" or p.get("gated"):
+                    if p["kind"] == "ledge" or self.is_gated(p):
                         continue
                     if p["dest_map"] is not None and p.get("direction") in _CARDINAL:
                         links[(p["direction"], p["dest_map"])] = None

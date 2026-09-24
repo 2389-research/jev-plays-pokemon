@@ -119,7 +119,7 @@ def area_lines(pg: PortalGraph, mid: int) -> list[str]:
         else:
             desc = f"door/entrance to {dest}"
         if p.get("gated"):
-            desc += f" [BLOCKED early: {p['gated']}]"
+            desc += f" [BLOCKED: {p['gated']}]"
         if desc not in by_comp[p["component"]]:
             by_comp[p["component"]].append(desc)
     if not by_comp:
@@ -280,8 +280,10 @@ def build_docs() -> dict[str, str]:
              "- Mt. Moon B2F: the Dome Fossil and Helix Fossil sit in the two-wide corridor that leads to the exit",
              "  ladder — walk up to one and press A to take it (you only get one; the Super Nerd takes the other);",
              "  once they're gone the corridor opens toward the Route 4 exit and Cerulean.",
-             "- Cerulean City: the trashed house's back door (the way south to Route 5) is blocked by a police officer early;",
-             "  it opens after you visit Bill on Route 25.",
+             "- Cerulean City: the ONLY way from the city to its south exit (Route 5 -> Vermilion) is THROUGH the",
+             "  trashed house: in its front door, out the hole in its back wall into the backyard (a Team Rocket",
+             "  grunt there gives TM28 Dig), then south. A police officer stands at the front door until Bill gives",
+             "  you the S.S. Ticket. The city's west edge only leads back to Route 4 / Mt. Moon.",
              "- Snorlax sleeps across Route 12 and Route 16: wake it with the Poké Flute (from Mr. Fuji in Lavender after",
              "  clearing Pokémon Tower with the Silph Scope).",
              "- Cycling Road (Route 17, via the Route 16/18 gates): requires a Bicycle (Cerulean Bike Shop, with the",

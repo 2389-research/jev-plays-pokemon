@@ -553,9 +553,11 @@ def build_portal_graph(map_names: list[str]) -> dict:
     for p in portals.values():
         src = maps[p["map"]].name
         dst = maps[p["dest_map"]].name if p.get("dest_map") in maps else None
-        why = GATED.get(src) or (GATED.get(dst) if p["kind"] in ("warp", "elevator") else None)
-        if why:
-            p["gated"] = why
+        gate = GATED.get(src) or (GATED.get(dst) if p["kind"] in ("warp", "elevator") else None)
+        if gate:
+            p["gated"] = gate[0]
+            if gate[1]:
+                p["open_when"] = gate[1]    # RAM predicate: the live router opens the gate once it holds
 
     return {"maps": maps, "portals": portals}
 
@@ -564,15 +566,17 @@ OUTSIDE_TILESETS = {"OVERWORLD", "PLATEAU"}
 
 # K5 — story gates the static geometry can't see (extend per incident). Warps on/into these maps are
 # marked `gated` and skipped by routing by default.
-GATED = {
-    "Route5Gate": "Saffron guard wants a drink",
-    "Route6Gate": "Saffron guard wants a drink",
-    "Route7Gate": "Saffron guard wants a drink",
-    "Route8Gate": "Saffron guard wants a drink",
-    "CeruleanTrashedHouse": "a police officer blocks the back door early on",
-    "Route22Gate": "badge check (Boulder Badge) for Route 23",
-    "Route16Gate1F": "Cycling Road: bicycle required",
-    "Route18Gate1F": "Cycling Road: bicycle required",
+GATED = {   # map -> (why, RAM predicate that opens it | None = stays closed)
+    "Route5Gate": ("Saffron guard wants a drink", None),
+    "Route6Gate": ("Saffron guard wants a drink", None),
+    "Route7Gate": ("Saffron guard wants a drink", None),
+    "Route8Gate": ("Saffron guard wants a drink", None),
+    # the guard at the door (CERULEANCITY_GUARD2) is hidden by Bill's script as it gives the S.S. Ticket
+    "CeruleanTrashedHouse": ("a police officer blocks the door until you have Bill's S.S. Ticket",
+                             {"has_item": 63}),
+    "Route22Gate": ("badge check (Boulder Badge) for Route 23", {"badges": ">=1"}),
+    "Route16Gate1F": ("Cycling Road: bicycle required", {"has_item": 6}),
+    "Route18Gate1F": ("Cycling Road: bicycle required", {"has_item": 6}),
 }
 
 

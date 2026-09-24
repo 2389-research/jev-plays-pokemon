@@ -1564,8 +1564,21 @@ class ReasoningLoop:
             return MoveAction(direction=Direction(goal_dir))
         return None
 
+    def _refresh_gates(self) -> None:
+        """Open story gates whose RAM condition now holds (runs/ss-anne: the trashed-house guard left
+        when Bill gave the S.S. Ticket, but the static gate kept Cerulean -> Vermilion unroutable, so the
+        agent guessed the west edge and bounced off Route 4 for ~500 steps)."""
+        pg = self.portals
+        if pg is None:
+            return
+        emu = self.controller.emu
+        opened = pg.refresh_gates(lambda cond: predicates.evaluate(cond, emu))
+        if opened:
+            self.on_event("gate_opened", {"step": self.session.step, "portals": sorted(opened)})
+
     def _portal_route(self, player, tmap) -> list[dict] | None:
         """The full ground-truth portal route from the player to map ``tmap`` (None if off-graph)."""
+        self._refresh_gates()
         pg = self.portals
         if pg is None or player is None or player.map_id not in pg.maps or int(tmap) not in pg.maps:
             return None
@@ -1593,6 +1606,7 @@ class ReasoningLoop:
         """The next PORTAL to head toward on the way to map ``tmap``, from the ground-truth
         PortalGraph (or None if it doesn't cover this leg). Locates the player's walkable component
         from the LIVE collision map so it stays correct even if map state changed."""
+        self._refresh_gates()
         pg = self.portals
         if pg is None or player is None or player.map_id not in pg.maps or int(tmap) not in pg.maps:
             return None

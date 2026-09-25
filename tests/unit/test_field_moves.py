@@ -170,3 +170,16 @@ def test_used_counts_only_the_named_one_answering():
     assert not loop._directive_satisfied(d)
     press_and_open((1, 11))
     assert loop._directive_satisfied(d)
+
+
+def test_a_can_is_credited_not_the_person_standing_behind_it():
+    """runs/sleeves-surge2: "only trash here" was credited to the Gentleman two tiles behind a can."""
+    loop, _ = _loop()
+    gentleman = {"x": 9, "y": 7, "sprite": "Gentleman", "slot": 3, "kind": "person"}
+    for active, lines in ((True, ["Nope, there's only", "trash here."]), (False, [])):
+        loop.session.step += 1
+        loop._observe_heard(SimpleNamespace(player=SimpleNamespace(x=9, y=10, map_id=92, facing="north"),
+                                            game_state={"dialog_active": active, "dialog_lines": lines,
+                                                        "facing": {"front_tile": [9, 9], "facing_sprite": gentleman}}))
+    m = loop.heard.by_map[92]["messages"][-1]
+    assert (m["speaker"], m["at"]) == ("trash can", [9, 9])

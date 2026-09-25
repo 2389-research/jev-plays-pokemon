@@ -113,13 +113,15 @@ def plan(player: Tile, target: Tile, *, walkable, occupied: dict[Tile, str], war
 
 def report(name: str, target: Tile, player: Tile, planned: list[Side]) -> str:
     """Why no side of the target can be reached, e.g. "Misty (4,2): south (4,3) occupied by
-    Cooltrainer F; east (5,2) open but unreachable from (7,9); north/west wall"."""
+    Cooltrainer F; east (5,2) is walkable but has no path from where you are (7,9) — a separate area;
+    north/west wall"."""
     parts, walls = [], []
     for s in planned:
         if s.status == "occupied":
             parts.append(f"{s.name} ({s.stand[0]},{s.stand[1]}) occupied by {s.by or 'someone'}")
         elif s.status == "open":
-            parts.append(f"{s.name} ({s.stand[0]},{s.stand[1]}) open but unreachable from ({player[0]},{player[1]})")
+            parts.append(f"{s.name} ({s.stand[0]},{s.stand[1]}) is walkable but has no path from where you are "
+                         f"({player[0]},{player[1]}) — a separate area")
         elif s.status == "door":
             parts.append(f"{s.name} ({s.stand[0]},{s.stand[1]}) is a door")
         elif s.status == "cut":

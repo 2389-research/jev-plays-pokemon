@@ -2093,13 +2093,20 @@ class ReasoningLoop:
         speaker = xy = None
         facing = gs.get("facing") or {}
         fs = facing.get("facing_sprite")
-        if fs:
-            speaker, xy = fs.get("sprite"), (fs.get("x"), fs.get("y"))
-        elif player is not None and facing.get("front_tile"):
-            fx, fy = facing["front_tile"]
-            o = next((o for o in objects_on(player.map_id) if (o["x"], o["y"]) == (fx, fy)), None)
-            if o is not None:
-                speaker, xy = o["name"], (fx, fy)
+        front = tuple(facing.get("front_tile") or ())
+        fs_xy = (fs.get("x"), fs.get("y")) if fs else None
+        obj = next((o for o in objects_on(player.map_id) if (o["x"], o["y"]) == front), None) \
+            if (player is not None and front) else None
+        counters = getattr(self.world, "counters", {}).get(getattr(player, "map_id", None), set())
+        # who is talking: the sprite on the facing tile; else the thing on it (a trash can with someone
+        # standing 2 tiles behind it — runs/sleeves-surge2 credited "only trash here" to the Gentleman);
+        # a sprite 2 tiles away only across a counter
+        if fs and fs_xy == front:
+            speaker, xy = fs.get("sprite"), fs_xy
+        elif obj is not None:
+            speaker, xy = obj["name"], front
+        elif fs and len(front) == 2 and front in counters:
+            speaker, xy = fs.get("sprite"), fs_xy
         mid = player.map_id if player else None
         self.heard.observe(self.session.step, map_id=mid, map_name=map_name(mid) if mid is not None else None,
                            active=bool(gs.get("dialog_active")), lines=gs.get("dialog_lines") or [],
@@ -2231,6 +2238,10 @@ class ReasoningLoop:
                 "attempts": self.episode.attempts_view(),
                 "heard": {"digest": self.heard.digest, "here": self.heard.here(mid) if mid is not None else {}},
                 "unexplored_here": [c["label"] for c in self._unexplored(obs)][:12],
+                # everything usable on this map, checked or not (L1 decided checked cans "don't exist"
+                # from the unexplored list alone — runs/sleeves-surge2)
+                "things_here": [o["name"] if "(" in o["name"] else f"{o['name']} at ({o['x']},{o['y']})"
+                                for o in self._objects_here(mid)][:30] if mid is not None else [],
                 "stall": stall}
 
     # ---- explore executor ---------------------------------------------------------------------------

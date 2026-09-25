@@ -87,3 +87,18 @@ def test_a_conversation_reopened_on_the_closing_frame_is_two_messages_not_one():
     msgs = h.by_map[3]["messages"]
     assert len(msgs) == 1 and msgs[0]["count"] == 2
     assert msgs[0]["text"].endswith("this crime!")
+
+
+def test_the_same_words_from_different_places_stay_separate_and_ordered():
+    """runs/sleeves-surge2: 16 trash cans all say "Nope, there's only trash here." — merged into one entry
+    (credited to the first can, heard 81x), L1 couldn't tell which cans it had checked or in what order."""
+    h = HeardLog()
+    nope = [["Nope, there's only", "trash here."]]
+    _say(h, nope, 10, speaker="trash can", at=(1, 9), mid=92)
+    _say(h, [["Hey! There's a switch", "under the trash!"]], 20, speaker="trash can", at=(9, 11), mid=92)
+    _say(h, nope, 30, speaker="trash can", at=(9, 9), mid=92)
+    _say(h, nope, 40, speaker="trash can", at=(1, 9), mid=92)
+    msgs = h.here(92)["messages"]
+    assert len(msgs) == 3
+    assert msgs[0].startswith("step 21: trash can at (9,11)")                # order = last heard
+    assert "trash can at (9,9)" in msgs[1] and "trash can at (1,9)" in msgs[2] and "heard 2x" in msgs[2]

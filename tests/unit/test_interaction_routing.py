@@ -69,7 +69,7 @@ def test_the_report_names_who_stands_where():
     r = report("Misty", (4, 2), (7, 9), p)
     assert r.startswith("Misty (4,2): ")
     assert "south (4,3) occupied by Cooltrainer F" in r
-    assert "east (5,2) open but unreachable from (7,9)" in r
+    assert "east (5,2) is walkable but has no path from where you are (7,9)" in r
     assert "north/west wall" in r
 
 

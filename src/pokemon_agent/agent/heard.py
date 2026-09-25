@@ -71,7 +71,7 @@ def _fmt(m: dict, map_names: bool = True) -> str:
 
 
 class HeardLog:
-    def __init__(self, *, window: int = 400, recent_max: int = 150, per_map: int = 15,
+    def __init__(self, *, window: int = 400, recent_max: int = 150, per_map: int = 25,
                  digest_chars: int = 1500, map_summary_chars: int = 600):
         self.window, self.recent_max, self.per_map = window, recent_max, per_map
         self.digest_chars, self.map_summary_chars = digest_chars, map_summary_chars
@@ -117,8 +117,11 @@ class HeardLog:
             return None
         mid = info["map"]
         bucket = self.by_map.setdefault(mid, {"messages": [], "summary": ""})
+        # the same words from a different place are a different fact (16 trash cans all say "only
+        # trash here": which ones said it is the information — runs/sleeves-surge2 merged them)
         same = next((m for m in bucket["messages"]
-                     if m["text"] == text and m.get("speaker") == info.get("speaker")), None)
+                     if m["text"] == text and m.get("speaker") == info.get("speaker")
+                     and m.get("at") == info.get("at")), None)
         if same is not None:                           # a repeat: count it, surface it again
             same["count"] += 1
             same["last_step"] = step
@@ -179,10 +182,13 @@ class HeardLog:
         """Messages first heard or heard AGAIN after ``step`` (newest last)."""
         return [_fmt(m) for m in self.recent if m["last_step"] > step][-limit:]
 
-    def here(self, map_id, limit: int = 10) -> dict:
+    def here(self, map_id, limit: int = 20) -> dict:
+        """This map's messages in the order they were LAST heard, each with that step — so the order
+        of events (what was said before / after something else) is visible."""
         b = self.by_map.get(map_id) or {}
         msgs = sorted(b.get("messages", []), key=lambda m: m["last_step"])[-limit:]
-        return {"summary": b.get("summary", ""), "messages": [_fmt(m, map_names=False) for m in msgs]}
+        return {"summary": b.get("summary", ""),
+                "messages": [f"step {m['last_step']}: " + _fmt(m, map_names=False) for m in msgs]}
 
     def distinct_count(self) -> int:
         return sum(len(b["messages"]) for b in self.by_map.values())

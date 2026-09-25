@@ -114,3 +114,17 @@ def test_facing_a_tree_nobody_can_cut_wedges_with_the_reason(monkeypatch):
     assert mv is None
     assert loop._approach_block == ("can't cut the tree at (15,18): nobody in the party knows Cut and nobody in "
                                     "the party can learn it")
+
+
+# ---- routing follows the live map (runs/sleeves-vermilion) ------------------------------------------
+def test_a_cut_tree_joins_the_components_the_rip_kept_apart():
+    """After Cut the gym door's static component stayed unreachable: the route was "no known way" and L1
+    recut the tree 4 times believing it had regrown. Routing now floods the LIVE walkable set."""
+    from pokemon_agent.agent.portal_graph import PortalGraph
+    pg = PortalGraph.load()
+    walk = set(pg._grid(5))                                   # Vermilion City with the tree standing
+    assert pg.route(5, pg.components_reachable(5, 15, 17, walk), 92) is None
+    cut = walk | {(15, 18)}
+    route = pg.route(5, pg.components_reachable(5, 15, 17, cut), 92)
+    assert route and route[-1]["dest_map"] == 92
+

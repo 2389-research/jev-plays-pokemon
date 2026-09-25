@@ -72,7 +72,7 @@ WPARTYMON0 = 0xD16B      # first party struct (44 bytes each); moves at +8..+11
 PARTY_STRUCT = 44
 
 
-def _back_out(emu: Emulator, tries: int = 12) -> None:
+def _back_out(emu: Emulator, tries: int = 16) -> None:
     """B until no menu (and no text box) is left on screen — a fixed count leaves the bag open after a
     'learned CUT!' message swallows presses."""
     from .game_state import read_screen_text
@@ -90,7 +90,9 @@ def knows(emu: Emulator, slot: int, move: str) -> bool:
     party = read_party(emu)
     if not (0 <= slot < len(party)):
         return False
-    return any(str(m).split(" (")[0].lower() == move.lower() for m in party[slot].get("moves") or [])
+    def norm(m):
+        return "".join(ch for ch in str(m).split(" (")[0].lower() if ch.isalnum())
+    return any(norm(m) == norm(move) for m in party[slot].get("moves") or [])
 
 
 def _open_start_entry(emu: Emulator, entry: str) -> bool:
@@ -140,6 +142,9 @@ def teach(emu: Emulator, item_index: int, slot: int, move: str, forget: str | No
                     return False, f"that Pokémon can't learn {move} (the game marks it NOT ABLE)"
                 _cursor_to(emu, slot)
                 _hold(emu, GameButton.A)
+            elif ("make room for" in text or "should be forgotten" in text or "Which move should" in text
+                  or ("YES" in text and "NO" in text)) and not menus.menu_open(emu):
+                emu.tick(30)                             # a YES/NO box / move list draws after its text finishes
             elif "make room for" in text:
                 menus.answer_yesno(emu, True)
             elif "should be forgotten" in text or "Which move should" in text:
@@ -150,7 +155,7 @@ def teach(emu: Emulator, item_index: int, slot: int, move: str, forget: str | No
                     keep = [i for i, n in enumerate(names) if n.title() not in HMS]
                     idx = keep[move_to_forget([ids[i] for i in keep])] if keep else 0
                 menus.select_option(emu, idx, max_options=4)
-            elif "not compatible" in text or "can't learn" in text:
+            elif "not compatible" in text:          # NOT "can't learn more than 4 moves" (that's the forget flow)
                 return False, f"that Pokémon can't learn {move}"
             elif "YES" in text and "NO" in text:
                 menus.answer_yesno(emu, True)                  # "Teach CUT to a POKéMON?"

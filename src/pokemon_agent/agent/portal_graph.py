@@ -80,14 +80,16 @@ class PortalGraph:
             return [(dm, dp["component"])]
         return [(dm, c) for c in self._comps_of(dm)]  # unknown landing component -> any
 
-    def route(self, from_map: int, from_comp: int, to_map: int) -> list[dict] | None:
+    def route(self, from_map: int, from_comp, to_map: int) -> list[dict] | None:
         """Ordered list of portals to traverse from (from_map, from_comp) to any component of
-        ``to_map`` — the shortest portal path. ``None`` if unreachable, ``[]`` if already there."""
-        start = (int(from_map), int(from_comp))
-        if start[0] == int(to_map):
+        ``to_map`` — the shortest portal path. ``from_comp`` may be a set: every component the player
+        can walk to right now (see ``components_reachable``). ``None`` if unreachable, ``[]`` if there."""
+        comps = sorted(from_comp) if isinstance(from_comp, (set, frozenset, list, tuple)) else [from_comp]
+        if int(from_map) == int(to_map):
             return []
-        prev: dict[tuple[int, int], tuple[tuple[int, int], dict] | None] = {start: None}
-        q = deque([start])
+        starts = [(int(from_map), int(c)) for c in comps if c is not None]
+        prev: dict[tuple[int, int], tuple[tuple[int, int], dict] | None] = {s: None for s in starts}
+        q = deque(starts)
         goal = None
         while q:
             node = q.popleft()
@@ -131,6 +133,45 @@ class PortalGraph:
         return maps
 
     # --- live: locate the player from the current collision map ----------
+    def components_reachable(self, map_id: int, x: int, y: int, walkable: set[tuple[int, int]]) -> set[int]:
+        """Every static component the player can walk to NOW: flood-fill the LIVE walkable set from
+        (x, y) (elevation cuts respected) and collect the static component of each cell and portal it
+        touches. The rip's components are fixed, but the map isn't — a cut tree joins two of them
+        (runs/sleeves-vermilion: after Cut the gym door's component stayed "unreachable" and L1 recut the
+        tree 4 times believing it had regrown)."""
+        grid = self._grid(map_id)
+        portal_comp: dict[tuple[int, int], int] = {}
+        for p in self.portals_on(map_id):
+            if p["kind"] == "ledge":
+                continue
+            portal_comp[tuple(p["coord"])] = p["component"]
+            if p.get("approach"):
+                portal_comp[tuple(p["approach"])] = p["component"]
+            else:
+                for dx, dy in _DELTA:
+                    portal_comp.setdefault((p["coord"][0] + dx, p["coord"][1] + dy), p["component"])
+        start = (int(x), int(y))
+        found: set[int] = set()
+        for c in (grid.get(start), portal_comp.get(start)):
+            if c is not None:
+                found.add(c)
+        if start not in walkable:
+            return found
+        cuts = self.cut_edges(map_id)
+        seen, q = {start}, deque([start])
+        while q:
+            c = q.popleft()
+            for comp in (grid.get(c), portal_comp.get(c)):
+                if comp is not None:
+                    found.add(comp)
+            cx, cy = c
+            for dx, dy in _DELTA:
+                nb = (cx + dx, cy + dy)
+                if nb in walkable and nb not in seen and frozenset({c, nb}) not in cuts:
+                    seen.add(nb)
+                    q.append(nb)
+        return found
+
     def component_at(self, map_id: int, x: int, y: int, walkable: set[tuple[int, int]]) -> int | None:
         """Which static component the player stands in, found by flood-filling the LIVE walkable set
         from (x, y) until it reaches a known portal tile (or a portal's approach tile). Uses live

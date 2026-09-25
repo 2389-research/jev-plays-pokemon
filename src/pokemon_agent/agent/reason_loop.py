@@ -2008,11 +2008,11 @@ class ReasoningLoop:
             coll = read_collision_map(self.controller.emu)
         except Exception:
             return False
-        comp = pg.component_at(player.map_id, player.x, player.y, coll["walkable"] if coll else set())
-        if comp is None:
+        comps = pg.components_reachable(player.map_id, player.x, player.y, coll["walkable"] if coll else set())
+        if not comps:
             return False
         self._sync_blocked()
-        return pg.route(player.map_id, comp, int(tmap)) is None
+        return pg.route(player.map_id, comps, int(tmap)) is None
 
     def _explain_wedge(self, obs, directive) -> str:
         """WHY the active step can't progress, from what the harness actually knows — not the step's
@@ -2126,7 +2126,8 @@ class ReasoningLoop:
         if pg is not None and player.map_id in pg.maps:
             try:
                 coll = read_collision_map(self.controller.emu)
-                comp = pg.component_at(player.map_id, player.x, player.y, coll["walkable"] if coll else set())
+                comp = pg.components_reachable(player.map_id, player.x, player.y,
+                                               coll["walkable"] if coll else set()) or None
             except Exception:
                 comp = None
         used = set(self.interactions.talked) | set(self.interactions.empty_tiles)
@@ -2268,8 +2269,8 @@ class ReasoningLoop:
             coll = read_collision_map(self.controller.emu)
         except Exception:
             coll = None
-        comp = pg.component_at(player.map_id, player.x, player.y, coll["walkable"] if coll else set())
-        return pg.route(player.map_id, comp, int(tmap)) if comp is not None else None
+        comps = pg.components_reachable(player.map_id, player.x, player.y, coll["walkable"] if coll else set())
+        return pg.route(player.map_id, comps, int(tmap)) if comps else None
 
     def _travel_on_the_way(self, obs) -> bool:
         """The active TRAVEL step's map lies on the ground-truth route to the NEXT travel step's map, so
@@ -2297,10 +2298,10 @@ class ReasoningLoop:
         except Exception:
             coll = None
         walk = coll["walkable"] if coll else set()
-        comp = pg.component_at(player.map_id, player.x, player.y, walk)
-        if comp is None:
+        comps = pg.components_reachable(player.map_id, player.x, player.y, walk)
+        if not comps:
             return None
-        portal = pg.next_portal(player.map_id, comp, int(tmap))
+        portal = pg.next_portal(player.map_id, comps, int(tmap))
         # A warp can sit on a NON-walkable door tile (you cannot step onto it — the move just fails).
         # When the chosen portal's tile isn't walkable, prefer a sibling warp to the same destination
         # whose tile IS walkable (e.g. the south gate has (4,0) unwalkable + (5,0) walkable -> forest).
@@ -2877,8 +2878,9 @@ class ReasoningLoop:
         slot = next((i for i, m in enumerate(party) if who in (str(m.get("nickname") or "").strip().lower(),
                                                                 str(m.get("species") or "").lower())), None)
         items = read_items(emu)
-        idx = next((i for i, it in enumerate(items)
-                    if (machine_move(it.get("item")) or "").lower() == move.lower()), None)
+        def _mv(m) -> str:                       # "Bubblebeam" == "Bubble Beam" == "BUBBLEBEAM"
+            return re.sub(r"[^a-z0-9]", "", str(m or "").lower())
+        idx = next((i for i, it in enumerate(items) if _mv(machine_move(it.get("item"))) == _mv(move)), None)
         mon = (party[slot].get("nickname") or party[slot].get("species")) if slot is not None else who
         if slot is None:
             ok, detail = False, f"no party member called {who!r}"

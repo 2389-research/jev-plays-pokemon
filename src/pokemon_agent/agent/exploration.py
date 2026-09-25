@@ -24,18 +24,19 @@ def unexplored(pg, map_id: int, comp: int | None, *, visited_maps: set[int], npc
     player's walkable component ``comp`` when known (the rest can't be reached on foot from here)."""
     skip = skip or set()
     out: list[dict] = []
-    grid = pg._grid(map_id) if (pg is not None and comp is not None and map_id in pg.maps) else None
+    comps = None if comp is None else (set(comp) if isinstance(comp, (set, frozenset, list, tuple)) else {comp})
+    grid = pg._grid(map_id) if (pg is not None and comps and map_id in pg.maps) else None
 
     def reachable(x: int, y: int) -> bool:
         """Standing next to it (or on it) is inside the player's walkable area."""
         if grid is None:
             return True
-        return any(grid.get(c) == comp for c in ((x, y), (x, y + 1), (x, y - 1), (x - 1, y), (x + 1, y)))
+        return any(grid.get(c) in comps for c in ((x, y), (x, y + 1), (x, y - 1), (x - 1, y), (x + 1, y)))
     if pg is not None and map_id in pg.maps:
         for p in pg.portals_on(map_id):
             if p["kind"] not in ("warp", "edge") or p["dest_map"] is None or p["dest_map"] in visited_maps:
                 continue
-            if comp is not None and p["component"] != comp:
+            if comps and p["component"] not in comps:
                 continue
             key = f"portal:{p['id']}"
             if key in skip:

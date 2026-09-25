@@ -311,3 +311,29 @@ def test_the_tree_standing_between_us_and_a_person_is_found():
     assert first_tree_on_way((0, 5), [(7, 5)], walkable=walk, trees={(3, 5)}) == (3, 5)
     assert first_tree_on_way((0, 5), [(2, 5)], walkable=walk, trees={(3, 5)}) is None       # no tree needed
     assert first_tree_on_way((0, 5), [(9, 9)], walkable=walk, trees={(3, 5)}) is None       # unreachable anyway
+
+
+# ---- naming a tile picks the sprite there (runs/sleeves-hideout: the Lift Key) --------------------------
+def test_a_named_tile_picks_the_sprite_there_not_another_of_the_same_name():
+    from types import SimpleNamespace
+    from pokemon_agent.agent.targets import select_npc
+    npcs = [{"sprite": "Rocket", "x": 23, "y": 12, "kind": "person", "slot": 2},
+            {"sprite": "Rocket", "x": 11, "y": 2, "kind": "person", "slot": 4},
+            {"sprite": "Giovanni", "x": 25, "y": 3, "kind": "person", "slot": 1},
+            {"sprite": "Poke Ball", "x": 10, "y": 2, "kind": "item", "slot": 7}]
+    me = SimpleNamespace(x=11, y=3, map_id=202)
+    r = select_npc(npcs, sprite="Rocket at (11,2)", picked=None, player=me)
+    assert (r["x"], r["y"]) == (11, 2)
+    ball = select_npc(npcs, sprite="Lift Key item ball at (11,2)", picked=None, player=me)
+    assert (ball["x"], ball["y"]) == (10, 2)                    # the item ball nearest the named tile
+
+
+def test_a_trainer_battle_that_paid_prize_money_is_a_win(monkeypatch):
+    """runs/sleeves-hideout: the Lift Key Rocket's defeat read "ended" (last enemy-HP sample not 0)."""
+    loop, _ = _loop()
+    loop._battle_track = {"where": "Rocket Hideout B4F", "trainer": True, "opponents": ["Raticate"],
+                          "party_size": 3, "money": 18000, "alive": 3, "enemy_hp": 5}
+    import pokemon_agent.games.pokemon_red.game_state as gs
+    monkeypatch.setattr(gs, "read_money", lambda emu: 18638)
+    loop._record_battle_end(party_size_now=3)
+    assert loop._battle_log[-1]["result"] == "won"

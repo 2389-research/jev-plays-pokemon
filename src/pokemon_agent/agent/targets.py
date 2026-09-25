@@ -96,6 +96,25 @@ def select_npc(npcs: list[dict], *, sprite: str | None, picked, player, want_kin
     """
     if not npcs:
         return None
+    import re
+    at = re.search(r"\((\d+)\s*,\s*(\d+)\)", str(sprite or ""))
+    if at:
+        # a request naming a TILE ("Rocket at (11,2)", "Lift Key item ball at (11,2)"): the matching sprite
+        # nearest that tile — runs/sleeves-hideout picked the Rocket at (23,12), in another area, for
+        # "Rocket at (11,2)" (right next to the player), and Giovanni for the key ball ~700 steps running
+        ax, ay = int(at.group(1)), int(at.group(2))
+        name = re.sub(r"\s*(at|near|on)?\s*\(\d+\s*,\s*\d+\).*$", "", str(sprite), flags=re.I).strip()
+        pool = name_matches(npcs, name)
+        if not pool:
+            itemish = re.search(r"\b(ball|item|key|pickup)\b", str(sprite), re.I)
+            pool = [n for n in npcs if (n.get("kind") == "item") == bool(itemish)] or list(npcs)
+        if tried:
+            pmap0 = getattr(player, "map_id", None)
+            pool = [n for n in pool if npc_key(n, pmap0) not in {tuple(t) for t in tried}] or []
+            if not pool:
+                return None
+        return min(pool, key=lambda n: (abs(int(n["x"]) - ax) + abs(int(n["y"]) - ay),
+                                        abs(int(n["x"]) - player.x) + abs(int(n["y"]) - player.y)))
     pool = name_matches(npcs, sprite)
     if not pool:
         if want_kind == "item":

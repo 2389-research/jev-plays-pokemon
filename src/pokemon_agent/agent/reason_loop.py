@@ -668,9 +668,15 @@ class ReasoningLoop:
                                 # who and what is here to talk to / use ("who" may name an object)
                                 "people": [f"{n.get('sprite')} at ({n['x']},{n['y']})"
                                            for n in ((obs.game_state or {}).get("npcs") or [])
-                                           if "x" in n and n.get("kind") != "item"][:8],
-                                "objects": [f"{o['name']} at ({o['x']},{o['y']})"
-                                            for o in objects_on(cur_mid) if o.get("kind") != "sign"][:12]},
+                                           if "x" in n and n.get("kind") != "item"][:16],
+                                # item balls lying here (a dropped key is one): runs/sleeves-hideout — the
+                                # Lift Key ball at (10,2) was filtered out and L1 guessed it was at (11,2)
+                                "item_balls": [f"item ball at ({n['x']},{n['y']})"
+                                               for n in ((obs.game_state or {}).get("npcs") or [])
+                                               if "x" in n and n.get("kind") == "item"][:12],
+                                "objects": [o["name"] if "(" in o["name"] else f"{o['name']} at ({o['x']},{o['y']})"
+                                            for o in self._objects_here(cur_mid) if o.get("kind") != "sign"][:20]
+                                           if cur_mid is not None else []},
                 "party": signals["party"],
                 "items": signals["items"],
                 "badges": signals["badges"],
@@ -2384,10 +2390,6 @@ class ReasoningLoop:
                 "attempts": self.episode.attempts_view(),
                 "heard": {"digest": self.heard.digest, "here": self.heard.here(mid) if mid is not None else {}},
                 "unexplored_here": [c["label"] for c in self._unexplored(obs)][:12],
-                # everything usable on this map, checked or not (L1 decided checked cans "don't exist"
-                # from the unexplored list alone — runs/sleeves-surge2)
-                "things_here": [o["name"] if "(" in o["name"] else f"{o['name']} at ({o['x']},{o['y']})"
-                                for o in self._objects_here(mid)][:30] if mid is not None else [],
                 "stall": stall}
 
     # ---- explore executor ---------------------------------------------------------------------------
@@ -3175,9 +3177,10 @@ class ReasoningLoop:
             return
         if self._battle_track is None:
             mid = emu.read_memory(0xD35E)
+            from ..games.pokemon_red.game_state import read_money
             self._battle_track = {"start": self.session.step, "where": map_name(mid),
                                   "trainer": _b.is_trainer_battle(emu), "opponents": [],
-                                  "party_size": len(read_party(emu))}
+                                  "party_size": len(read_party(emu)), "money": read_money(emu)}
         b = read_battle(emu) or {}
         sp = (b.get("enemy") or {}).get("species")
         if sp and sp != "?" and sp not in self._battle_track["opponents"]:
@@ -3192,6 +3195,15 @@ class ReasoningLoop:
             return
         result = self._classify_battle(alive=t.get("alive", 1), enemy_hp=t.get("enemy_hp", 1),
                                      party_grew=party_size_now > t.get("party_size", party_size_now))
+        if t.get("trainer") and result == "ended" and t.get("money") is not None:
+            # a trainer battle always pays prize money on a win (runs/sleeves-hideout: the Lift Key Rocket's
+            # defeat read as "ended" because the last enemy-HP sample wasn't 0, and L1 kept trying to refight)
+            from ..games.pokemon_red.game_state import read_money
+            try:
+                if read_money(self.controller.emu) > t["money"]:
+                    result = "won"
+            except Exception:
+                pass
         rec = {"step": self.session.step, "where": t["where"], "trainer": t["trainer"],
                "opponents": t["opponents"], "result": result}
         self._battle_log.append(rec)

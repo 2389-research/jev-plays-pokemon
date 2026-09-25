@@ -28,7 +28,8 @@ def _dir_between(fx: int, fy: int, tx: int, ty: int) -> Direction | None:
 _LEDGE_DIR = {"ledge_s": Direction.SOUTH, "ledge_w": Direction.WEST, "ledge_e": Direction.EAST}
 
 
-def ledge_hops(terrain: dict, ok: set | None = None) -> dict[tuple[int, int], list[tuple[Direction, tuple[int, int]]]]:
+def ledge_hops(terrain: dict, ok: set | None = None,
+               spins: dict | None = None) -> dict[tuple[int, int], list[tuple[Direction, tuple[int, int]]]]:
     """One-way ledge edges from a map's semantic terrain: {take-off cell: [(hop direction, landing)]}.
     Stepping onto a ledge tile in its direction hops the player two cells (the ledge tile itself is
     never stood on); the reverse is impossible. ``ok`` = the (x, y, direction) take-offs the game
@@ -43,6 +44,10 @@ def ledge_hops(terrain: dict, ok: set | None = None) -> dict[tuple[int, int], li
         if ok is not None and (take[0], take[1], d.value) not in ok:
             continue
         out.setdefault(take, []).append((d, (x + dx, y + dy)))
+    # arrow tiles: stepping onto a trigger from any side lands you at its landing (the game moves you)
+    for (tx, ty), land in (spins or {}).items():
+        for d, (dx, dy) in DELTA.items():
+            out.setdefault((tx - dx, ty - dy), []).append((d, tuple(land)))
     return out
 
 
@@ -74,7 +79,8 @@ class Navigator:
         self.first_is_hop = False
         if start in goals:
             return None
-        hops = ledge_hops(self.world.terrain.get(map_id) or {}, getattr(self.world, "ledge_ok", {}).get(map_id))
+        hops = ledge_hops(self.world.terrain.get(map_id) or {}, getattr(self.world, "ledge_ok", {}).get(map_id),
+                          getattr(self.world, "spins", {}).get(map_id))
         seen = {start}
         q: deque[tuple[tuple[int, int], Direction | None, bool]] = deque([(start, None, False)])
         while q and len(seen) < max_nodes:

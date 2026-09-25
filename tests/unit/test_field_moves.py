@@ -267,3 +267,38 @@ def test_a_disabled_move_is_not_chosen():
         assert battle.disabled_slot(emu) is None
     finally:
         b.move_count = orig
+
+
+# ---- arrow tiles (runs/sleeves-next: Rocket Hideout B3F) ------------------------------------------------
+def test_arrow_tiles_are_ripped_from_the_game():
+    from pokemon_agent.games.pokemon_red.map_reader import spinner_tiles
+    b3f = spinner_tiles(201)
+    assert b3f[(18, 16)] == (18, 15)          # the tile the run was pushed back from ~750 times
+    assert len(spinner_tiles(200)) == 43 and len(spinner_tiles(45)) == 12   # B2F, Viridian Gym
+
+
+def test_stepping_onto_an_arrow_is_an_edge_to_its_landing():
+    from pokemon_agent.agent.navigator import ledge_hops
+    hops = ledge_hops({}, None, {(18, 16): (18, 15)})
+    assert any(land == (18, 15) for _d, land in hops[(18, 17)])     # from below: onto it -> pushed north
+    from pokemon_agent.agent.interaction import distances
+    walk = {(18, 15), (18, 17), (18, 18)}                             # (18,16) itself is not standable
+    d = distances((18, 18), walkable=walk, spins={(18, 16): (18, 15)})
+    assert (18, 15) in d and (18, 16) not in d
+
+
+# ---- resumed memory lives in the past (runs/sleeves-next: stale critic) ---------------------------------
+def test_loaded_memory_step_stamps_are_older_than_the_new_session():
+    from pokemon_agent.agent.memory import AgentMemory
+    m = AgentMemory()
+    m.episode.record(2999, "action", text="old")
+    m.episode.last_review_step = 2995
+    m.episode.attempts["k"] = {"what": "talk to trash can", "tries": 3, "done": 0, "wedged": 1, "removed": 0,
+                               "first_step": 2800, "last_step": 2999, "last_reason": ""}
+    again = AgentMemory.from_dict(m.to_dict())
+    assert again.episode.events[0]["step"] == -1
+    assert again.episode.last_review_step < 0 and again.episode.attempts["k"]["last_step"] == -1
+    again.episode.record(5, "action", text="new")
+    # the unreviewed old event (after the old last review) and the new one both show, in order — before the
+    # rebase the new event (step 5 < 2995) was hidden until the first review of the new session
+    assert again.episode.since(now=10).get("actions") == ["old", "new"]

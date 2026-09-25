@@ -353,7 +353,7 @@ class ReasoningLoop:
                     and (obs.player.x, obs.player.y) in cm["walkable"]):  # reject stale/transition reads
                 self.world.ingest_collision(cm["map_id"], cm["width"], cm["height"],
                                             cm["walkable"], cm.get("counters"), cm.get("terrain"),
-                                            cm.get("ledge_ok"))
+                                            cm.get("ledge_ok"), cm.get("spins"))
         self.world.observe(obs.player, obs.walkability)
         # the SEMANTIC map (grass/water/ledges/doors + legend) is what the agent reasons on; fall
         # back to the plain floor/wall render before any collision has been ingested.
@@ -1423,7 +1423,7 @@ class ReasoningLoop:
         walk = set(coll["walkable"]) | {goal}   # the door tile may be off the walkable set
         blocked = set(occupied) | (self._warp_tiles(player.map_id) - {goal})   # never through another door
         cuts = (getattr(self.world, "cut_edges", None) or {}).get(getattr(player, "map_id", None), set())
-        hops = ledge_hops(coll.get("terrain") or {}, coll.get("ledge_ok"))
+        hops = ledge_hops(coll.get("terrain") or {}, coll.get("ledge_ok"), coll.get("spins"))
         prev: dict[tuple[int, int], tuple[tuple[int, int], Direction, bool] | None] = {start: None}
         q = deque([start])
         found = False
@@ -1728,7 +1728,7 @@ class ReasoningLoop:
         return {"walkable": set(map(tuple, coll["walkable"])), "occupied": occ,
                 "warps": self._warp_tiles(player.map_id),
                 "cuts": (getattr(self.world, "cut_edges", None) or {}).get(player.map_id, set()),
-                "terrain": coll.get("terrain"), "ledge_ok": coll.get("ledge_ok")}
+                "terrain": coll.get("terrain"), "ledge_ok": coll.get("ledge_ok"), "spins": coll.get("spins")}
 
     def _observe_npcs(self, obs) -> None:
         """Remember when each sprite (by slot) last changed tile, so a wanderer can be told apart from a
@@ -2042,9 +2042,9 @@ class ReasoningLoop:
         walk = set(map(tuple, coll["walkable"]))
         dist = distances((player.x, player.y), walkable=walk, blocked=occ,
                          cuts=(getattr(self.world, "cut_edges", None) or {}).get(player.map_id, set()),
-                         terrain=coll.get("terrain"), ledge_ok=coll.get("ledge_ok"))
+                         terrain=coll.get("terrain"), ledge_ok=coll.get("ledge_ok"), spins=coll.get("spins"))
         best = None
-        for take, hops in ledge_hops(coll.get("terrain") or {}, coll.get("ledge_ok")).items():
+        for take, hops in ledge_hops(coll.get("terrain") or {}, coll.get("ledge_ok"), coll.get("spins")).items():
             for d, land in hops:
                 if grid.get(land) != portal.get("dest_component") or take in occ or land in occ or take not in dist:
                     continue
@@ -3633,7 +3633,7 @@ class ReasoningLoop:
         if not coll or coll.get("map_id") != player.map_id:
             return None
         walk = (set(map(tuple, coll["walkable"])) - occ) | {tuple(goal)}
-        hops = ledge_hops(coll.get("terrain") or {}, coll.get("ledge_ok"))
+        hops = ledge_hops(coll.get("terrain") or {}, coll.get("ledge_ok"), coll.get("spins"))
         start = (player.x, player.y)
         dist, q = {start: 0}, deque([start])
         while q:

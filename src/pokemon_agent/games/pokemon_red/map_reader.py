@@ -79,6 +79,23 @@ def _classify(t: int, tileset: int, walkable_ids: set[int], grass_tile: int,
     return "floor" if t in walkable_ids else "wall"
 
 
+def spinner_tiles(map_id: int) -> dict[tuple[int, int], tuple[int, int]]:
+    """Arrow tiles on this map: {trigger: landing} (scripts/gen_spinners.py, from pokered's
+    ...ArrowTilePlayerMovement tables). Standing on a trigger, the game moves you to its landing."""
+    import json
+    from pathlib import Path
+    global _SPINNERS
+    try:
+        _SPINNERS
+    except NameError:
+        try:
+            _SPINNERS = json.loads((Path(__file__).with_name("spinners.json")).read_text())
+        except Exception:
+            _SPINNERS = {}
+    return {tuple(int(v) for v in k.split(",")): tuple(land)
+            for k, land in (_SPINNERS.get(str(int(map_id))) or {}).items()}
+
+
 def read_collision_map(emu) -> dict | None:
     """Decode the full current-map walkability. Returns
     ``{map_id, width, height, walkable: set[(x, y)]}`` in map-local player cells, or None
@@ -144,8 +161,12 @@ def read_collision_map(emu) -> dict | None:
                 take = (x + dx, y + dy)
                 if (tile_ids.get(take), tile_ids[(x, y)]) in _LEDGE_PAIRS[d]:
                     ledge_ok.add((take[0], take[1], d))
+        spins = spinner_tiles(m(WCURMAP))
+        for cell in spins:                       # you never stop on an arrow tile: it moves you on
+            walkable.discard(cell)
+            terrain[cell] = "spinner"
         return {"map_id": m(WCURMAP), "width": wb * 2, "height": hb * 2,
                 "walkable": walkable, "counters": counters, "grass": grass, "terrain": terrain,
-                "ledge_ok": ledge_ok}
+                "ledge_ok": ledge_ok, "spins": spins}
     except Exception:
         return None

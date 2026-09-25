@@ -115,7 +115,40 @@ class AgentMemory:
         m.heard = HeardLog.from_dict(d.get("heard") or {})
         m.episode = EpisodeLog.from_dict(d.get("episode") or {})
         m.blocked_portals = dict(d.get("blocked_portals") or {})
+        m.rebase_steps()
         return m
+
+    def rebase_steps(self) -> int:
+        """A loaded memory starts a NEW session whose step counter begins at 0: shift every step stamp it
+        holds so the newest becomes -1. runs/sleeves-next: the previous run's attempts (steps ~2850-2999)
+        sorted as the most recent failures for the whole resumed run, so the critic blamed the long-solved
+        Vermilion trash cans for 2000 steps; last_review_step 2995 hid new events until the first review.
+        Returns the offset applied."""
+        ep, h = self.episode, self.heard
+        stamps = [e.get("step", 0) for e in ep.events]
+        stamps += [a.get("last_step", 0) for a in ep.attempts.values()] + [ep.last_review_step or 0]
+        for b in h.by_map.values():
+            stamps += [m.get("last_step", 0) for m in b.get("messages", [])]
+        stamps += [n.get("step") or 0 for n in self.notes] + [v.get("step", 0) for v in self.blocked_portals.values()]
+        offset = max([s for s in stamps if isinstance(s, (int, float))] or [0]) + 1
+        if offset <= 1:
+            return 0
+        for e in ep.events:
+            e["step"] = e.get("step", 0) - offset
+        for a in ep.attempts.values():
+            a["first_step"] = a.get("first_step", 0) - offset
+            a["last_step"] = a.get("last_step", 0) - offset
+        ep.last_review_step = (ep.last_review_step or 0) - offset
+        for b in h.by_map.values():
+            for m in b.get("messages", []):
+                m["step"] = (m.get("step") or 0) - offset
+                m["last_step"] = m.get("last_step", 0) - offset
+        for n in self.notes:
+            if n.get("step") is not None:
+                n["step"] -= offset
+        for v in self.blocked_portals.values():
+            v["step"] = v.get("step", 0) - offset
+        return offset
 
     def save(self, path: str | Path) -> None:
         Path(path).write_text(json.dumps(self.to_dict()))

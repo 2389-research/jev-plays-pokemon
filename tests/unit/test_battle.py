@@ -55,7 +55,7 @@ def test_bot_chooses_a_move_slot():
             ans = SimpleNamespace(choice=self.choice, confidence=0.9)
             return SimpleNamespace(answers={"move": ans})
 
-    emu = MemFake({0xD057: 2, 0xD01C: 33, 0xD01D: 39})
+    emu = MemFake({0xD057: 2, 0xD01C: 33, 0xD01D: 39, 0xD02D: 35, 0xD02E: 40})   # both moves have PP
     client = FakeClient("1")
     slot, conf = battle_agent.choose_move(client, emu)
     assert slot == 1 and conf == 0.9

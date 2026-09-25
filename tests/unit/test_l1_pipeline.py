@@ -149,3 +149,43 @@ def test_valid_heal_step_flows_through_unchanged():
     assert result is not None
     assert result["add"] == [heal_step]
     assert "repair" not in planner.calls
+
+
+# ---- L1 step placement (spec 2026-09-22-l1-step-placement-design.md) --------------------------
+def test_repair_keeps_the_original_placement_anchor():
+    """REPAIR re-emits a step from scratch; placement isn't its job — the original `after` wins,
+    even when repair drops it or echoes a different value."""
+    bad = {"kind": "action", "map": 2, "done_when": "on_map", "after": "q2"}   # invalid criterion
+    for repaired in ({"kind": "travel", "map": 2, "done_when": "on_map"},              # after dropped
+                     {"kind": "travel", "map": 2, "done_when": "on_map", "after": "end"}):  # mangled
+        planner = StubPlanner(decide={"add": [bad], "remove": []}, repair=repaired)
+        result = run_l1_pipeline(None, {}, planner, hard_event=True)
+        assert result["add"][0]["after"] == "q2"
+
+
+def test_decide_trace_records_the_anchors():
+    trace = []
+    step = {"kind": "travel", "map": 2, "done_when": "on_map", "after": "q2"}
+    planner = StubPlanner(brainstorm={"assessment": "deliver first, then head north"},
+                          decide={"add": [step, {"kind": "travel", "map": 1, "done_when": "on_map"}],
+                                  "remove": []})
+    run_l1_pipeline(None, {}, planner, hard_event=True, on_trace=trace.append)
+    decide = next(t for t in trace if t.get("stage") == "decide")
+    assert decide["anchors"] == ["q2", None]
+
+
+def test_repair_cannot_invent_an_anchor_the_original_did_not_have():
+    bad = {"kind": "action", "map": 2, "done_when": "on_map"}                     # no after
+    planner = StubPlanner(decide={"add": [bad], "remove": []},
+                          repair={"kind": "travel", "map": 2, "done_when": "on_map", "after": "end"})
+    result = run_l1_pipeline(None, {}, planner, hard_event=True)
+    assert "after" not in result["add"][0]
+
+
+def test_decide_trace_anchors_skip_non_dict_adds():
+    trace = []
+    planner = StubPlanner(brainstorm={"assessment": ""},
+                          decide={"add": ["garbage", {"kind": "travel", "map": 1, "done_when": "on_map",
+                                                      "after": "q2"}], "remove": []})
+    run_l1_pipeline(None, {}, planner, hard_event=True, on_trace=trace.append)
+    assert next(t for t in trace if t.get("stage") == "decide")["anchors"] == ["q2"]

@@ -32,7 +32,10 @@ CHOOSE_MOVE_INSTRUCTIONS = (
     "super effective against the opponent). Pick the move that best progresses toward "
     "winning THIS battle: usually the SUPER-EFFECTIVE / highest-damage move for the "
     "type match-up, but consider status/setup moves when they help. Prefer a damaging "
-    "move when the foe is low on HP and you can knock it out."
+    "move when the foe is low on HP and you can knock it out. Each option states its COMPUTED "
+    "effectiveness against this opponent (the game's own Gen 1 type chart), same-type bonus and "
+    "expected damage (also in MOVE_ANALYSIS) — trust those numbers: a resisted move of your own "
+    "type often does less than a neutral one."
 )
 
 
@@ -119,17 +122,38 @@ def choose_action(objective: str, state: dict) -> dict:
     return {"kind": "move"}
 
 
-def choose_move(client, emu: Emulator, *, type_knowledge: list[str] | None = None) -> tuple[int, float]:
+def choose_move(client, emu: Emulator, *, type_knowledge: list[str] | None = None,
+                capture=None) -> tuple[int, float]:
     """Ask the TypeSafe client which move slot to use. ``type_knowledge`` is optional retrieved
     type-effectiveness guidance (from the knowledge base) injected into Jev's decision state.
-    Returns (slot, confidence)."""
+    ``capture`` is an optional distillation Capture (§3) — recording is best-effort and never
+    changes behavior. Returns (slot, confidence)."""
     from typesafe_sdk import Choice
 
     moves = battle.active_moves(emu)
     if not moves:
         return 0, 0.0
-    criteria = {str(i): f"Use {m}." for i, m in enumerate(moves)}
+    pp = battle.active_pp(emu)
+    can = battle.selectable_pp(emu)            # a Disabled move counts as unusable
+    usable = [i for i in range(len(moves)) if i >= len(can) or can[i] > 0]
+    if not usable:
+        return 0, 0.0          # every move is out of PP: the game uses Struggle
+    # only moves with PP left can be chosen (the game refuses a 0-PP move and the menu loops); each option
+    # carries its computed effectiveness vs this opponent so the choice is informed, not guessed
+    analysis = {m["slot"]: m for m in battle.move_analysis(emu)}
+
+    def label(i):
+        a = analysis.get(i)
+        left = pp[i] if i < len(pp) else "?"
+        if not a:
+            return f"Use {moves[i]} ({left} PP left)."
+        if not a["power"]:
+            return f"Use {moves[i]} (status move, no damage; {left} PP left)."
+        return (f"Use {moves[i]} ({a['type']}, power {a['power']}, {a['effectiveness']:g}x vs the opponent"
+                f"{', same-type bonus' if a['stab'] else ''}; expected ~{a['expected']:g} damage; {left} PP left).")
+    criteria = {str(i): label(i) for i in usable}
     state = battle_state_summary(emu)
+    state["move_analysis"] = [analysis[i] for i in sorted(analysis)]
     if type_knowledge:
         state["type_knowledge"] = type_knowledge
     resp = client.system_one(
@@ -141,4 +165,11 @@ def choose_move(client, emu: Emulator, *, type_knowledge: list[str] | None = Non
     except (TypeError, ValueError):
         slot = 0
     slot = max(0, min(slot, len(moves) - 1))
-    return slot, float(getattr(ans, "confidence", 0.0) or 0.0)
+    if slot not in usable:
+        slot = battle.usable_slot(can, slot)
+    confidence = float(getattr(ans, "confidence", 0.0) or 0.0)
+    if capture is not None:
+        capture.record("battle_move", model=getattr(client, "model", "typesafe"),
+                       input=state, output_raw=str(getattr(ans, "choice", None)),
+                       parsed={"slot": slot}, confidence=confidence)
+    return slot, confidence

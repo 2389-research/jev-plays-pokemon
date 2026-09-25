@@ -4,7 +4,7 @@
 layer above them: a directed graph whose NODES are map ids and whose EDGES are
 warps — "step onto exit tile (x, y) on map A and you arrive on map B". Once the
 agent observes a map's RAM `exits` (each {x, y, dest_map, dest_name}), every warp
-on that map becomes a known edge, so "route to Pewter" collapses to a sequence of
+on that map becomes a known edge, so "route to <a map>" collapses to a sequence of
 maps plus which exit tile to take on each hop.
 
 Edge tiles:
@@ -163,21 +163,6 @@ class WorldGraph:
 # name->id lookup, reverse of the disassembly-generated MAP_NAMES_RAW.
 _NAME_TO_ID = {name: mid for mid, name in MAP_NAMES_RAW.items()}
 
-# The Pallet -> Pewter corridor as ordered name adjacencies. Route 2 is a single
-# map that touches both the south (Viridian) and north (Pewter/forest) ends, so it
-# appears in several pairs. Gate buildings sit between Route 2 and Viridian Forest.
-_KANTO_CORRIDOR: list[tuple[str, str]] = [
-    ("Pallet Town", "Route 1"),
-    ("Route 1", "Viridian City"),
-    ("Viridian City", "Route 2"),
-    ("Route 2", "Viridian Forest South Gate"),
-    ("Viridian Forest South Gate", "Viridian Forest"),
-    ("Viridian Forest", "Viridian Forest North Gate"),
-    ("Viridian Forest North Gate", "Route 2"),
-    ("Route 2", "Pewter City"),
-]
-
-
 def full_kanto_graph() -> WorldGraph:
     """The whole Kanto map-connection graph, ripped from the pokered disassembly
     (map_graph_data.CONNECTIONS): every overworld map-edge connection with its
@@ -187,23 +172,4 @@ def full_kanto_graph() -> WorldGraph:
     g = WorldGraph()
     for from_id, direction, to_id in CONNECTIONS:
         g.add_connection(from_id, direction, to_id)
-    return g
-
-
-def seeded_kanto_graph() -> WorldGraph:
-    """A `WorldGraph` pre-populated with the Pallet Town -> Pewter City map
-    adjacency (exit tiles unknown, to be refined by `observe_exits`).
-
-    Map ids are resolved by name against `MAP_NAMES_RAW`; a name not present in
-    that table is skipped and recorded in ``graph.unresolved`` rather than guessed.
-    """
-    g = WorldGraph()
-    for a_name, b_name in _KANTO_CORRIDOR:
-        a, b = _NAME_TO_ID.get(a_name), _NAME_TO_ID.get(b_name)
-        for name, mid in ((a_name, a), (b_name, b)):
-            if mid is None and name not in g.unresolved:
-                g.unresolved.append(name)
-        if a is None or b is None:
-            continue
-        g.add_adjacency(a, b)
     return g

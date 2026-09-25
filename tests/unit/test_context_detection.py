@@ -72,5 +72,16 @@ def test_context_kinds():
 
 
 def test_forced_movement_flag():
-    assert read_context(MemFake({0xD730: 0x40}))["forced_movement"] is True
-    assert read_context(MemFake({0xD730: 0x25}))["forced_movement"] is False
+    """wStatusFlags5: bit 7 = scripted player movement, bit 0 = scripted NPC movement; bit 6 is only
+    BIT_NO_TEXT_DELAY (the old 0x40 test read the wrong bit)."""
+    assert read_context(MemFake({0xD730: 0x80}))["forced_movement"] is True
+    assert read_context(MemFake({0xD730: 0x01}))["forced_movement"] is True
+    assert read_context(MemFake({0xD730: 0x40}))["forced_movement"] is False
+    assert read_context(MemFake({0xD730: 0x24}))["forced_movement"] is False
+
+
+def test_trainer_engaged_until_the_battle_starts():
+    """wEngagedTrainerClass (0xCD2D) holds a trainer id (>= 200) from being spotted until the battle."""
+    assert read_context(MemFake({0xCD2D: 0xCE}))["trainer_engaged"] is True
+    assert read_context(MemFake({0xCD2D: 0xCE, 0xD057: 2}))["trainer_engaged"] is False   # battle started
+    assert read_context(MemFake({0xCD2D: 0x07}))["trainer_engaged"] is False              # stat-mod reuse

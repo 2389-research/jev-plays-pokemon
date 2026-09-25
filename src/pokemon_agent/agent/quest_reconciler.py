@@ -14,13 +14,17 @@ class QuestStep:
     why: str = ""
     status: str = "pending"          # pending | active | done | wedged
     provisional: bool = False        # a synthesized bootstrap default; superseded once L1 adds real steps
+    wedge_reason: str = ""           # why the executive wedged it (shown to L1 as why_wedged)
     kind: str = "action"             # "travel" = reach a map (on_map completion ok);
-                                      # "action" = done by a state change (needs a real criterion)
+                                      # "action" = done by a state change (needs a real criterion);
+                                      # "explore" = visit what's unexplored there until a discovery
 
 
 def _criterion(done_when: str | None, map_id: int, kind: str) -> dict:
     from .planner_llm import Planner
     parsed = Planner._parse_done_when(done_when, map_id)
+    if kind == "explore":
+        return {"explored": map_id}
     if kind == "travel":
         # a travel leg completes on ARRIVAL by definition — always on_map, ignoring any (bogus)
         # criterion a directly-constructed step might carry (validate_step gates L1-emitted ones).
@@ -41,7 +45,16 @@ def compile_steps_to_directives(steps: list[QuestStep]) -> list[Directive]:
     for s in steps:
         crit = _criterion(s.done_when, s.map, s.kind)
         nm = map_name(s.map)
-        if s.talk:
+        if s.kind == "explore":
+            out.append(Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": s.map},
+                                 success={"on_map": s.map}, quest_id=s.id,
+                                 reason=f"quest: go to {nm} to explore — {s.why}"[:120]))
+            out.append(Directive(intent=Intent.EXPLORE,
+                                 target={"kind": "explore", "map": s.map, "prefer": s.who},
+                                 success=crit, quest_id=s.id,
+                                 reason=(f"quest: explore {nm}" + (f" (try {s.who} first)" if s.who else "")
+                                         + f" — {s.why}")[:120]))
+        elif s.talk:
             out.append(Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": s.map},
                                  success={"on_map": s.map}, quest_id=s.id,
                                  reason=f"quest: go to {nm} — {s.why}"[:120]))
@@ -56,28 +69,92 @@ def compile_steps_to_directives(steps: list[QuestStep]) -> list[Directive]:
     return out
 
 
-def reconcile_quests(current, proposal, *, next_id):
+def reconcile_quests(current, proposal, *, next_id, on_event=None, allow_active_removal: bool = False):
     """Deterministically merge L1's proposal into the canonical plan, preserving progress.
-    Keeps done + active steps; removes only named pending steps; ALWAYS drops wedged steps (they are
-    replaced by adds); inserts adds after the active step, dedup by (map, done_when)."""
+    Keeps done + active steps (the active one is removable only with ``allow_active_removal`` — an
+    interrupt whose reason was reviewed); removes only named pending steps; ALWAYS drops wedged steps (they are
+    replaced by adds); dedups adds by (map, done_when) against LIVE (active/pending) steps only.
+
+    PLACEMENT: an add may carry ``"after"``: the id of a step that survives into the result as active
+    or pending (place it after that step, and after adds already placed there), or ``"end"`` (append at
+    the tail). Omitted/null -> the default slot right after done + active (today's behavior; with no
+    anchors the result is exactly ``done + active + new + pending``). An anchor equal to the active id
+    means "next" (default). Any other anchor falls back to the default slot and reports
+    ``on_event("l1_anchor_fallback", {"after", "reason"})`` — a fallback changes placement, never drops."""
     add = proposal.get("add") or []
     remove = set(proposal.get("remove") or [])
     done = [s for s in current if s.status == "done"]
-    active = [s for s in current if s.status == "active"]
+    # the ACTIVE step survives a remove unless the loop approved an interrupt (reviewed reason)
+    active = [s for s in current if s.status == "active" and not (allow_active_removal and s.id in remove)]
     pending = [s for s in current if s.status == "pending" and s.id not in remove]
-    have = {(s.map, s.done_when or "on_map") for s in done + active + pending}
-    new_steps = []
+    # dedup only against LIVE steps: a done step never blocks a repeat errand (heal again, return to
+    # a map, shop again) — brock-goals4: ~60 emergency heals were dropped against an old done heal
+    def dedup_key(mp, dw, who):
+        # a "used" step IS its who: one per thing checked (runs/sleeves-surge: 11 trash-can steps collapsed
+        # to the first because all were (92, "used"))
+        dw = dw or "on_map"
+        return (mp, dw, (who or "").strip().lower()) if str(dw).strip().lower() == "used" else (mp, dw)
+    have = {dedup_key(s.map, s.done_when, s.who): s.id for s in active + pending}
+    status_of = {s.id: s.status for s in current}
+    live = {s.id for s in active + pending}
+    active_ids = {s.id for s in active}
+
+    def anchor_of(a):
+        after = a.get("after")
+        if after is None or after == "end":
+            return after
+        if not isinstance(after, str):
+            reason = "not_string"
+        elif after in active_ids:
+            return None                      # "after the active step" == next == the default slot
+        elif after in live:
+            return after
+        elif after not in status_of:
+            reason = "unknown"
+        elif status_of[after] == "wedged":
+            reason = "wedged"
+        elif status_of[after] == "done":
+            reason = "done"
+        else:
+            reason = "removed" if after in remove else "not_live"
+        if on_event is not None:
+            on_event("l1_anchor_fallback", {"after": after, "reason": reason})
+        return None
+
+    placed = []                              # (new step, anchor) in emitted order
     for a in add:
         try:
             mp = int(a["map"])
         except (KeyError, TypeError, ValueError):
             continue
-        dw = a.get("done_when")
-        key = (mp, dw or "on_map")
+        kind = str(a.get("kind") or "action")
+        dw = "explored" if kind == "explore" else a.get("done_when")
+        key = dedup_key(mp, dw, a.get("who"))
         if key in have:
+            if on_event is not None:
+                on_event("l1_add_deduped", {"map": mp, "done_when": dw, "against": have[key]})
             continue
-        have.add(key)
-        new_steps.append(QuestStep(id=next_id(), map=mp, talk=bool(a.get("talk")),
-                                   who=(a.get("who") or None), done_when=dw, why=str(a.get("why") or "")[:80],
-                                   kind=str(a.get("kind") or "action")))
-    return done + active + new_steps + pending
+        have[key] = "(new)"
+        step = QuestStep(id=next_id(), map=mp, talk=bool(a.get("talk")) and kind != "explore",
+                         who=(a.get("who") or None), done_when=dw, why=str(a.get("why") or "")[:80],
+                         kind=kind)
+        placed.append((step, anchor_of(a)))
+
+    out = done + active + pending
+    default_slot = len(done) + len(active)   # head of pending (well-defined with no active step)
+    last_on = {}                             # anchor id -> the step last inserted after it
+    for step, anchor in placed:
+        if anchor is None:
+            out.insert(default_slot, step)
+            default_slot += 1
+        elif anchor == "end":
+            out.append(step)
+        else:
+            # resolve among LIVE steps only (never the done region, even if a done step shares the id)
+            ref = last_on.get(anchor, anchor)
+            idx = next(i for i in range(len(done), len(out)) if out[i].id == ref)
+            out.insert(idx + 1, step)
+            last_on[anchor] = step.id
+            if idx < default_slot:   # defensive: anchors are pending steps, at/after the default slot
+                default_slot += 1
+    return out

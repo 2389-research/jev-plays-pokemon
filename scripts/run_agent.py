@@ -98,9 +98,9 @@ def main() -> None:
                     help="continue a previous recorded run: load latest.state + latest.mem.json from "
                          "this record-dir (e.g. runs/full-run-20260921-154251)")
     ap.add_argument("--goal-map", type=int, default=None,
-                    help="travel-target map id for the route hint (e.g. 2 = Pewter City)")
+                    help="OPTIONAL legacy hint: a map to head for when L1 has no plan yet (L1 sets its own goals)")
     ap.add_argument("--level-target", type=int, default=0,
-                    help="grind the party to >= this level before pushing to the goal (readiness need)")
+                    help="OPTIONAL legacy hint: a party level the battle layer grinds toward (L1 sets its own)")
     ap.add_argument("--no-vision", action="store_true",
                     help="reason mode: navigate from TEXT state only (fast text model, no screenshot)")
     ap.add_argument("--model", default=None)
@@ -126,6 +126,10 @@ def main() -> None:
     ap.add_argument("--log", default=None, help="JSONL episode log path")
     ap.add_argument("--screenshot-logging", default="every_step", choices=["none", "errors_only", "every_step"],
                     help="save per-step frames next to the log so steps can be reconstructed")
+    ap.add_argument("--capture", default="off", choices=["off", "decisions", "distill"],
+                    help="decision capture for distillation (--mode reason only): 'decisions' logs "
+                         "every model decision (cheap); 'distill' also step-anchors a save state each "
+                         "step (disk-heavy) + captures deterministic layers")
     args = ap.parse_args()
 
     # named fixture shorthands -> states/<NAME>.state
@@ -216,7 +220,7 @@ def main() -> None:
             if low_conf_reflect is None:
                 low_conf_reflect = 0.35  # unsure actor -> re-plan instead of thrash
             # tier-2 strategist: a strong text model for quest planning when story-gated
-            strategist_provider = LunaRouteProvider(model=args.strategist_model, max_tokens=700)
+            strategist_provider = LunaRouteProvider(model=args.strategist_model, max_tokens=4000)
             print(f"decider=typesafe (model={args.typesafe_model or 'default'}), reflection via {rmodel}, "
                   f"strategist={args.strategist_model}, wait_gate={args.wait_gate}, low_conf_reflect={low_conf_reflect}")
         else:
@@ -250,7 +254,8 @@ def main() -> None:
             from pokemon_agent.logging.run_recorder import RunRecorder, unique_run_dir
             rec_dir = unique_run_dir(Path(args.record_dir) if args.record_dir else (
                 states_dir.parent / "runs" / f"rec-{time.strftime('%Y%m%d-%H%M%S')}"))
-            recorder = RunRecorder(emu, rec_dir)
+            state_every = 1 if args.capture == "distill" else 0
+            recorder = RunRecorder(emu, rec_dir, state_every=state_every)
             print(f"recording run -> {rec_dir}  (view: serve runs/ and open _viewer.html, or open {rec_dir}/viewer.html)")
 
         loop = ReasoningLoop(builder=ObservationBuilder(emu), controller=ActionController(emu),
@@ -259,9 +264,10 @@ def main() -> None:
                              low_conf_reflect=low_conf_reflect, memory=memory,
                              checkpoint_every=args.checkpoint_every,
                              checkpoint_dir=(ckpt_dir if args.checkpoint_every else None),
-                             goal_map=args.goal_map, level_target=args.level_target,
+                             goal_map=args.goal_map, level_target=args.level_target, autonomous=True,
                              strategist_provider=strategist_provider, knowledge=knowledge,
-                             pather=args.pather, l1_every=args.l1_every, on_event=on_event_r)
+                             pather=args.pather, l1_every=args.l1_every,
+                             capture_mode=args.capture, on_event=on_event_r)
         print(f"running REASON mode decider={args.decider} model={rmodel} vision={use_vision} goal={args.goal!r}")
         try:
             loop.run(max_steps=args.steps)

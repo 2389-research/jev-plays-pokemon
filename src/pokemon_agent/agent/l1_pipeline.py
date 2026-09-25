@@ -12,6 +12,8 @@ def validate_step(step: dict) -> tuple[bool, str | None]:
     except (TypeError, ValueError):
         return False, f"step map is missing/invalid: {step.get('map')!r}"
     dw = step.get("done_when")
+    if kind == "explore":
+        return True, None                  # done on a discovery; "who" is an optional preference
     if kind == "travel":
         if step.get("talk") or step.get("who"):
             return False, "travel step cannot talk; use kind:action"
@@ -25,13 +27,24 @@ def validate_step(step: dict) -> tuple[bool, str | None]:
         return False, f"action step needs a checkable done_when; {dw!r} did not parse"
     if parsed == {"on_map": map_id}:
         return False, "action step cannot complete on arrival (on_map)"
+    if "tree_cut" in parsed:
+        from ..games.pokemon_red.maps import map_name
+        from ..games.pokemon_red.predicates import cut_tree_sites
+        _m, x, y = parsed["tree_cut"]
+        sites = sorted(cut_tree_sites(map_id))
+        if (x, y) not in sites:
+            return False, (f"there is no Cut tree at ({x},{y}) on {map_name(map_id)}; "
+                           + (f"its Cut trees are at {', '.join(f'({a},{b})' for a, b in sites)}" if sites
+                              else "it has no Cut trees"))
+    if parsed == {"used": True} and not (step.get("talk") and step.get("who")):
+        return False, 'done_when "used" needs talk:true and the one person/thing in "who"'
     return True, None
 
 
 def run_l1_pipeline(emu, context: dict, planner, *, hard_event: bool, on_trace=None) -> dict | None:
     """Orchestrate the L1 reasoning pipeline: triage (gated unless hard_event) -> brainstorm ->
     decide -> validate/repair-once-then-break for each proposed step. Returns a proposal dict
-    ({"add", "remove", "mission", "milestone", "assessment"}) or None if there's nothing to do
+    ({"add", "remove", "assessment", "catch", + any goals/notepad/interrupted/legacy keys}) or None if there's nothing to do
     (triage said no change) or the decide output can't be salvaged (a step fails validation even
     after repair -- keep the standing plan rather than partially apply a broken decision).
 
@@ -45,14 +58,19 @@ def run_l1_pipeline(emu, context: dict, planner, *, hard_event: bool, on_trace=N
 
     b = planner.l1_brainstorm(emu, context)
     if on_trace:
-        on_trace({"stage": "brainstorm", "assessment": b.get("assessment", "")})
+        on_trace({"stage": "brainstorm", "assessment": b.get("assessment", ""),
+                  **({"error": b["error"]} if b.get("error") else {})})
 
     d = planner.l1_decide(context, b)
     if on_trace:
-        on_trace({"stage": "decide", "add": len(d.get("add", [])), "remove": d.get("remove", [])})
+        on_trace({"stage": "decide", "add": len(d.get("add", [])), "remove": d.get("remove", []),
+                  "anchors": [s.get("after") for s in d.get("add", []) if isinstance(s, dict)],
+                  **({"error": d["error"]} if d.get("error") else {})})
 
     validated_add = []
     for step in d.get("add", []):
+        if not isinstance(step, dict):   # defensive (l1_decide already filters non-dicts)
+            continue
         ok, err = validate_step(step)
         if ok:
             validated_add.append(step)
@@ -60,6 +78,11 @@ def run_l1_pipeline(emu, context: dict, planner, *, hard_event: bool, on_trace=N
         fixed = planner.l1_repair(context, step, err)
         ok2, err2 = validate_step(fixed)
         if ok2:
+            # placement is not repair's job: the ORIGINAL anchor always wins (REPAIR may drop or
+            # echo a mangled `after`)
+            fixed = {k: v for k, v in fixed.items() if k != "after"}
+            if "after" in step:
+                fixed["after"] = step["after"]
             validated_add.append(fixed)
         else:
             if on_trace:
@@ -67,22 +90,36 @@ def run_l1_pipeline(emu, context: dict, planner, *, hard_event: bool, on_trace=N
             return None
 
     remove = d.get("remove") or []
-    # NO-OP DECIDE == NO CHANGE. If decide neither added nor removed a step, the plan structure is
-    # unchanged and re-applying it would only churn the mission/milestone (and re-fire an l1_review),
-    # which reads as L1 "restating" the task instead of continuing it. Treat it as no change: keep the
-    # standing plan (and its active step) and return None. (A real edit still carries mission/
-    # milestone through.) This is what lets a wedge-triggered deep review say "keep going".
-    if not validated_add and not remove:
+    # tiered goals (spec §3.3): goals / notepad / interrupted / catch ride along with a step edit,
+    # and a DECIDE that carries one of them WITHOUT a step edit is returned too — the loop's
+    # goals.detect_change decides whether it really changes anything (a reworded echo does not).
+    extras = {k: d[k] for k in ("goals", "notepad", "interrupted", "mission", "milestone", "lead",
+                                "interrupt_active", "train", "teach") if k in d}
+    carries = (isinstance(d.get("goals"), dict) and bool(d.get("goals"))
+               or isinstance(d.get("notepad"), str)
+               or d.get("interrupted") == ""
+               or (isinstance(d.get("lead"), str) and bool(d.get("lead").strip()))
+               or bool(d.get("train")) or bool(d.get("teach"))
+               or d.get("catch") == "clear"
+               or (isinstance(d.get("catch"), list) and bool(d.get("catch"))))
+    # NO-OP DECIDE == NO CHANGE. If decide neither added nor removed a step and carries no goals/
+    # notepad/catch edit, re-applying it would only churn (legacy mission/milestone rewording, an
+    # echoed "catch": []) and re-fire an l1_review, which reads as L1 "restating" the task instead
+    # of continuing it. Keep the standing plan (and its active step) and return None. This is what
+    # lets a wedge-triggered deep review say "keep going".
+    if not validated_add and not remove and not carries:
         if on_trace:
             on_trace({"stage": "no_change", "why": "decide made no add/remove; continue active step"})
         return None
+    if on_trace and not validated_add and not remove:
+        on_trace({"stage": "goals_candidate",
+                  "keys": [k for k in ("goals", "notepad", "interrupted", "catch") if k in d]})
 
     return {
         "add": validated_add,
         "remove": remove,
-        "mission": d.get("mission"),
-        "milestone": d.get("milestone"),
         "assessment": d.get("assessment"),
-        # optional standing battle goal (design §7.1): a species list L1 wants to catch.
+        # optional standing battle goal (design §7.1): species list / "clear" / None (unchanged)
         "catch": d.get("catch"),
+        **extras,
     }

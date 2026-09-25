@@ -99,7 +99,7 @@ def _wait_menu(emu: Emulator, tries: int = 8) -> bool:
     return menus.menu_open(emu)
 
 
-def _close_shop(emu: Emulator, tries: int = 8) -> None:
+def close_shop(emu: Emulator, tries: int = 8) -> None:
     """Back out of any shop sub-menu to the overworld — press B until the counter menu is gone and no
     menu is open. Used on EVERY exit path (success and failure) so we never leave a menu half-open for
     the next loop step to re-enter (a not-sold item or an unaffordable qty otherwise stalls the counter)."""
@@ -108,6 +108,9 @@ def _close_shop(emu: Emulator, tries: int = 8) -> None:
             return
         menus.cancel(emu)
         emu.tick(12)
+
+
+_close_shop = close_shop   # internal name used by the macro's exit paths
 
 
 def shop_buy(emu: Emulator, item_name: str, qty: int, *, max_advance: int = 14) -> dict:

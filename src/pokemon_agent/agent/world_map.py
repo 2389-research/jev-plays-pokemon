@@ -37,13 +37,14 @@ class WorldMap:
         self.bounds: dict[int, tuple[int, int]] = {}
         # counter / "talk-over" cells per map (talk to an NPC across one), from the ingest
         self.counters: dict[int, set[tuple[int, int]]] = {}
-        # per-map semantic terrain class per cell (floor/wall/grass/water/ledge_*/door/counter)
+        # per-map semantic terrain class per cell (floor/wall/grass/water/ledge_*/door/counter/cut_tree)
         self.terrain: dict[int, dict[tuple[int, int], str]] = {}
 
     # --- updates ----------------------------------------------------------
     def ingest_collision(self, map_id: int, width: int, height: int,
                          walkable: set[tuple[int, int]], counters: set[tuple[int, int]] | None = None,
-                         terrain: dict[tuple[int, int], str] | None = None) -> None:
+                         terrain: dict[tuple[int, int], str] | None = None, ledge_ok: set | None = None,
+                         spins: dict | None = None) -> None:
         """Load a full-map collision grid (from RAM's wOverworldMap) as ground truth: every
         cell in bounds becomes FLOOR or WALL. This gives the navigator the whole map up front
         so it can route around buildings instead of guessing over unseen tiles. ``counters`` are
@@ -57,6 +58,10 @@ class WorldMap:
         self.counters[map_id] = set(counters or ())
         if terrain:
             self.terrain[map_id] = dict(terrain)
+        if ledge_ok is not None:
+            self.__dict__.setdefault("ledge_ok", {})[map_id] = set(ledge_ok)
+        if spins is not None:
+            self.__dict__.setdefault("spins", {})[map_id] = dict(spins)
 
     def observe(self, player: PlayerState | None, local_ascii: list[str] | None) -> None:
         if player is None:
@@ -164,14 +169,17 @@ class WorldMap:
     # never has to guess what a tile is (derived from RAM + the pokered tile catalog).
     SEMANTIC_SYMBOLS = {
         "floor": ".", "wall": "#", "grass": "G", "water": "~",
-        "ledge_s": "v", "ledge_w": "<", "ledge_e": ">", "door": "D", "counter": "C",
+        "ledge_s": "v", "ledge_w": "<", "ledge_e": ">", "door": "D", "counter": "C", "cut_tree": "T",
+        "spinner": "A",
     }
     SEMANTIC_LEGEND = (
         "MAP LEGEND (each tile's real properties, not a guess):\n"
         "  @ = you    . = path (walkable)    # = obstacle: tree/rock/building/fence (NOT walkable)\n"
         "  G = tall grass (walkable; wild Pokemon appear here)    ~ = water (NOT walkable without Surf)\n"
         "  D = door/exit (step onto it to change area)    C = counter (talk to an NPC across it)\n"
-        "  N = a person/NPC (walking into them talks, doesn't move you)\n"
+        "  N = a person/NPC (NOT walkable; walking into them talks, doesn't move you)\n"
+        "  T = small tree CUT can remove (NOT walkable until cut; grows back when you leave the area)\n"
+        "  A = ARROW tile: stepping on it slides you somewhere else on this floor (you can't stop on it)\n"
         "  v/</> = LEDGE, one-way: 'v' you may hop SOUTH, '<' hop WEST, '>' hop EAST; you can NEVER "
         "go back up a ledge, so treat them as walls except in the hop direction.\n"
         "  x = COLUMN (two header rows: tens then units), y = ROW (labeled at left, increases south)."

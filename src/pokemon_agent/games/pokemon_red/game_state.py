@@ -11,9 +11,12 @@ from .constants import ITEMS, MOVES, SPECIES, SPRITES
 
 # --- Gen-1 text charmap (for names + on-screen dialog) --------------------
 # Kept conservative so non-text tiles decode to nothing (avoids garbage like "PKMN").
-_SPECIAL = {
+_SPECIAL = {   # pokered constants/charmap.asm (tiles as rendered on screen)
     0x7F: " ", 0x4E: " ", 0x9C: ":", 0xE8: ".", 0xE6: "?", 0xE7: "!",
-    0xE3: "-", 0xE0: "'", 0xF4: ",", 0x9A: "(", 0x9B: ")",
+    0xE3: "-", 0xE0: "'", 0xF4: ",", 0x9A: "(", 0x9B: ")", 0x9D: ";", 0x9E: "[", 0x9F: "]",
+    0xBA: "é", 0xBB: "'d", 0xBC: "'l", 0xBD: "'s", 0xBE: "'t", 0xBF: "'v", 0xE4: "'r", 0xE5: "'m",
+    0xE1: "PK", 0xE2: "MN", 0x75: "…", 0xF3: "/", 0xEF: "♂", 0xF5: "♀", 0xF1: "×", 0xF0: "¥",
+    0xF2: ".",
 }
 
 _FACING = {0: "south", 4: "north", 8: "west", 12: "east"}
@@ -23,6 +26,27 @@ _FACING = {0: "south", 4: "north", 8: "west", 12: "east"}
 WSPRITE1 = 0xC100  # 16 bytes/sprite; +0 picture id, +9 facing
 WSPRITE2 = 0xC200  # 16 bytes/sprite; +4 map Y, +5 map X (each carries a +4 map-border offset)
 SPRITE_COORD_OFFSET = 4  # wSpriteStateData2 stores map coords shifted by the 4-tile border
+# Missable ("toggleable") objects: the game HIDES them by setting a bit, but leaves the sprite slot
+# populated — e.g. the intro Oak in Pallet, the second lab Oak, starter balls already taken.
+WMISSABLE_LIST = 0xD5CE   # (sprite slot, missable index) pairs for the current map, 0xFF-terminated
+WMISSABLE_FLAGS = 0xD5A6  # bitfield indexed by missable index; bit set = hidden
+
+
+def hidden_sprite_slots(emu: Emulator) -> set[int]:
+    """Sprite slots (1-15) the game has hidden via its missable-object flags. Bounded parse;
+    any read error means "nothing hidden" so a bad read can never make real NPCs disappear."""
+    hidden: set[int] = set()
+    try:
+        for i in range(16):
+            slot = emu.read_memory(WMISSABLE_LIST + 2 * i)
+            if slot == 0xFF:
+                break
+            idx = emu.read_memory(WMISSABLE_LIST + 2 * i + 1)
+            if 1 <= slot <= 15 and idx < 256 and (emu.read_memory(WMISSABLE_FLAGS + idx // 8) >> (idx % 8)) & 1:
+                hidden.add(slot)
+    except Exception:
+        return set()
+    return hidden
 
 
 def _decode_byte(b: int) -> str:
@@ -235,11 +259,22 @@ def read_screen_text(emu: Emulator) -> tuple[str, bool]:
         return "", False
 
 
+def read_dialog_lines(emu: Emulator) -> list[str]:
+    """The two text lines of the standard bottom text box (tile rows 14 and 16), in order. The
+    HeardLog stitches these frames into complete messages (typing grows a line; a scroll moves the
+    lower line up)."""
+    try:
+        return [_decode(emu, WTILEMAP + row * 20 + 1, 18, stop_at_terminator=False).strip()
+                for row in (14, 16)]
+    except Exception:
+        return []
+
+
 def _sprite_kind(name: str) -> str:
     """'item' = a pickup you press A to grab (Poké Ball / item on the ground); else 'person'
     (an NPC you talk to). Lets the executor route grab_item vs talk_to correctly."""
     low = name.lower()
-    if "ball" in low or low in ("item", "boulder"):
+    if "ball" in low or "fossil" in low or low in ("item", "boulder"):
         return "item"
     return "person"
 
@@ -249,10 +284,11 @@ def read_npcs(emu: Emulator) -> list[dict]:
     RAM map coordinates (correct even when off-screen). ``kind`` is 'item' (a pickup) or
     'person' (an NPC to talk to)."""
     out: list[dict] = []
+    hidden = hidden_sprite_slots(emu)
     try:
         for i in range(1, 16):  # slot 0 is the player
             pic = emu.read_memory(WSPRITE1 + i * 16)  # picture id: 0 = empty slot
-            if pic == 0:
+            if pic == 0 or i in hidden:   # empty slot, or a missable the game has hidden
                 continue
             b2 = WSPRITE2 + i * 16
             name = SPRITES.get(pic, f"sprite#{pic}")
@@ -262,7 +298,10 @@ def read_npcs(emu: Emulator) -> list[dict]:
                 "facing": _FACING.get(emu.read_memory(WSPRITE1 + i * 16 + 9), "?"),
                 "sprite": name,
                 "sprite_id": pic,
+                "slot": i,                      # stable identity for a wandering NPC (sprite slot)
                 "kind": _sprite_kind(name),
+                # movement byte 1 (pokered SPRITESTATEDATA2_MOVEMENTBYTE1): $FE = walks around, $FF = stays
+                "wanders": emu.read_memory(b2 + 6) == 0xFE,
             })
     except Exception:
         pass
@@ -302,6 +341,7 @@ def read_facing(emu: Emulator, npcs: list[dict] | None = None) -> dict:
 # --- interaction CONTEXT: "what kind of moment is this?" ------------------
 # Addresses cross-checked against the pokered disassembly / DataCrystal RAM map.
 WISINBATTLE_ADDR = 0xD057   # 0 none / 1 wild / 2 trainer
+WENGAGEDTRAINERCLASS = 0xCD2D  # verified live: 0xCE (JR_TRAINER_F + 200) when a Route 9 trainer spotted us
 WBATTLETYPE = 0xD05A        # 0 normal / 1 old-man tutorial / 2 safari
 WTEXTBOXID = 0xD125         # id of the text box currently set up
 WCURMENUITEM = 0xCC26       # selected menu index (0-based) — PERSISTS when no menu
@@ -351,7 +391,13 @@ def read_context(emu: Emulator) -> dict:
     try:
         ctx["battle_type"] = emu.read_memory(WBATTLETYPE)
         ctx["text_box_id"] = emu.read_memory(WTEXTBOXID)
-        ctx["forced_movement"] = bool(emu.read_memory(WD730) & 0x40)
+        # wStatusFlags5 bit 0 = an NPC is moved by a script, bit 7 = the player is (simulated joypad);
+        # bit 6 (0x40) is only "print text with no delay"
+        ctx["forced_movement"] = bool(emu.read_memory(WD730) & 0x81)
+        # a trainer spotted us and is walking over: wEngagedTrainerClass holds a trainer id (>= 200)
+        # until the battle starts (the battle then reuses those bytes for stat mods) — input is frozen
+        ctx["trainer_engaged"] = (emu.read_memory(WENGAGEDTRAINERCLASS) >= 200
+                                  and emu.read_memory(WISINBATTLE_ADDR) == 0)
         # raw menu cursor — only trustworthy once a menu is confirmed open (see docstring)
         ctx["menu_raw"] = {
             "cursor_item": emu.read_memory(WCURMENUITEM),
@@ -381,4 +427,5 @@ def read_game_state(emu: Emulator) -> dict:
         "rival_name": _decode(emu, WRIVALNAME, 11),
         "dialog_active": dialog_active,
         "screen_text": text,
+        "dialog_lines": read_dialog_lines(emu) if dialog_active else [],
     }

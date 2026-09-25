@@ -17,6 +17,8 @@ load-bearing for the happy path.
 from __future__ import annotations
 
 import json
+import re
+import time
 
 from ..games.pokemon_red import needs
 from ..games.pokemon_red.constants import MAP_NAMES_RAW
@@ -71,7 +73,7 @@ walks the agent to the tile you choose, and you are asked again once it arrives 
 closer — so pick the best next stepping-stone, not the whole path.
 
 WHAT YOU MUST DO — OBJECTIVE and DESTINATION tell you where you are going and why (e.g. "reach
-Viridian Mart — next hop is Viridian City to the north"). Always move toward it.
+<a building> — next hop is <the town it's in> to the north"). Always move toward it.
 
 MEMORY — you are NOT memoryless. RECENT_TRAIL is your last several frames as
 "(x,y)mMAP action -> result" (watch for bouncing between the same tiles). RECENT_WAYPOINTS is
@@ -104,10 +106,15 @@ arrival (stepping through a door, or off a map edge) — you just pick the tile.
 when you REACH it, get STUCK, or the map changes. You are also the get-unstuck mechanism: when WHY
 says the last target was unreachable or made no progress, pick a DIFFERENT tile.
 
-Return ONLY ONE JSON object. Normally a coordinate:
+Return ONLY ONE JSON object. To walk somewhere (explore, head toward the goal), a coordinate:
   {"x":<int>,"y":<int>,"why":"<one short sentence: why this tile>"}
-To talk to a person instead of move:
-  {"kind":"approach_npc","sprite":"<name>","why":"..."}
+For anything involving a PERSON, a THING or a DOOR, name it instead — the router works out where to
+stand, walks there around anyone in the way, faces it and presses A (or steps through the door):
+  talk to a person:        {"kind":"approach_npc","sprite":"<name from NPCS>","why":"..."}
+  use a thing (PC, sign):  {"kind":"use_object","object":"<name from OBJECTS>","why":"..."}
+  go through a door:       {"kind":"enter","map":<dest map id from CANDIDATE_EXITS>,"why":"..."}
+Never pick the tile beside someone to talk to them — name them. A "Cut tree at (x,y)" in OBJECTS is used
+the same way (use_object): the router stands beside it and uses Cut (a party member must know Cut).
 
 COORDINATES: (x,y); x = column (increases EAST), y = row (increases SOUTH, y=0 is the north edge).
 The MAP_VIEW starts with a LEGEND naming every symbol (path, grass 'G' walkable, '#'/water NOT
@@ -121,13 +128,14 @@ way. IGNORE candidates that lead BACKWARD (e.g. a door back into a building you 
 dest is where you came from). If no candidate helps yet, walk toward the goal side of the map and
 you'll be asked again. You may also pick any other walkable tile — candidates are hints, not a menu.
 
-Pick a tile that is in REACHABLE and a real step toward the goal, not one in RECENT_TARGETS you keep
-revisiting. WHY is one short sentence of your reasoning (it becomes the agent's visible short-term
+Pick a walkable tile you can actually get to (not a wall, water or a person) that is a real step toward
+the goal, not one in RECENT_TARGETS you keep revisiting. If REJECTED is present, your previous answer was
+refused for the reason given — pick again with that in mind. WHY is one short sentence of your reasoning (it becomes the agent's visible short-term
 objective and helps debugging — always include it)."""
 
 
 STRATEGIST_SYSTEM = """You are the STRATEGIC planner (tier 2) for an agent playing Pokémon Red,
-working toward the first gym (Brock, in Pewter City, north). You are called when the agent is
+working through the game's gyms and story. You are called when the agent is
 BLOCKED or UNSURE and needs a plan: a STORY GATE (an NPC who won't move, a locked path, a required
 item/errand), OR a NEED it doesn't know how to satisfy — most commonly it must HEAL (party HP is
 low) but doesn't know WHERE the nearest Poké Center is or how to get there. Work out the SEQUENCE
@@ -156,24 +164,24 @@ unblocked.
 For EACH step give an ACCEPTANCE CRITERION (done_when) — the checkable condition that PROVES the
 step is complete (like a quest objective), so a step can't be marked done prematurely. Choose:
   "on_map"            — arrived on that map (default for pure travel).
-  "has_item:<name>"   — that item is now in the bag (talk to the Mart clerk -> has_item:Oak's Parcel).
-  "no_item:<name>"    — that item is gone (delivered/used: give parcel to Oak -> no_item:Oak's Parcel).
+  "has_item:<name>"   — that item is now in the bag (collect/buy it -> has_item:<item>).
+  "no_item:<name>"    — that item is gone (delivered/used: hand it over -> no_item:<item>).
   "level>=<N>"        — party reached level N.   "badges>=<N>" — earned N badges.
   "hp_frac>=<F>"      — party healed to fraction F of max HP (talk to a Poké Center nurse -> hp_frac>=0.95).
   "talked"            — had a conversation on that map (only when nothing more specific fits).
   "verify:<yes/no question>" — a verifier judges it from game state, when none of the above fit.
 
-When "talk" is true, set "who" to the NPC you must talk to (e.g. "Oak", "the Mart clerk") so the
+When "talk" is true, set "who" to the NPC you must talk to (e.g. "the Mart clerk", a named person) so the
 agent approaches the RIGHT person, not the nearest one.
 
 Return ONLY JSON:
 {"plan": "one-line summary",
- "steps": [{"map": <int map id>, "talk": <true|false>, "who": "<npc name to talk to, e.g. Oak>",
+ "steps": [{"map": <int map id>, "talk": <true|false>, "who": "<npc name to talk to>",
             "done_when": "<criterion>", "why": "<short>"}]}"""
 
 
-L1_SYSTEM = """You are the L1 STRATEGIST for an agent playing Pokémon Red, working toward the
-first gym (Brock, Pewter City, north). This is a PERIODIC strategic REVIEW, not a rescue: look
+L1_SYSTEM = """You are the L1 STRATEGIST for an agent playing Pokémon Red, working through the
+game's gyms and story. This is a PERIODIC strategic REVIEW, not a rescue: look
 at the whole situation — the current MISSION/MILESTONE, the standing PLAN (its steps with their
 status), where the agent is, and the SIGNALS (e.g. how long it's been blocked) — and decide
 whether the plan still makes sense. Usually it does; say so and change nothing.
@@ -185,8 +193,8 @@ The done_when is the checkable ACCEPTANCE CRITERION that proves a step is comple
 one of:
   "on_map"            — arrived on that map (default for pure travel).
   "talked"            — had a conversation on that map (only when nothing more specific fits).
-  "has_item:<name>"   — that item is now in the bag (talk to Mart clerk -> has_item:Oak's Parcel).
-  "no_item:<name>"    — that item is gone (delivered/used -> no_item:Oak's Parcel).
+  "has_item:<name>"   — that item is now in the bag (collect/buy it -> has_item:<item>).
+  "no_item:<name>"    — that item is gone (delivered/used -> no_item:<item>).
   "level>=<N>"        — party reached level N.   "badges>=<N>" — earned N badges.
   "hp_frac>=<F>"      — party healed to fraction F of max HP (Poké Center nurse -> hp_frac>=0.95).
   "verify:<yes/no question>" — a verifier judges it from game state, when none of the above fit.
@@ -200,7 +208,7 @@ gate requires) — ground it in the guide rather than guessing.
 WHAT TO RETURN — ONLY a JSON object:
   {"assessment": "<one line: how the plan is doing>",
    "change": <true|false>,
-   "mission": "<the overall mission, e.g. 'reach Pewter and beat Brock'>",
+   "mission": "<the overall mission, e.g. 'earn the next badge'>",
    "milestone": "<the current concrete sub-goal>",
    "add": [ <new step objects, each with a VALID done_when> ],
    "remove": [ <step ids to drop from the current plan> ]}
@@ -213,26 +221,99 @@ steps that should go. Every added step MUST have a done_when from the list above
 
 TRIAGE_SYSTEM = """You are the L1 TRIAGE gate for an agent playing Pokémon Red. This is a CHEAP,
 FAST check that runs every periodic review, before any expensive reasoning: look at the standing
-PLAN (steps + statuses), the current MISSION/MILESTONE, and the SIGNALS (blocked duration, low
-HP, emergency_heal, etc.) and decide ONLY whether the plan needs to change at all. Do NOT propose
+PLAN (steps + statuses), the GOALS (primary / secondary / tertiary, with GOAL_STATUS and any
+INTERRUPTED focus), and the SIGNALS (blocked duration, low HP, emergency_heal, etc.) and decide ONLY whether the plan needs to change at all. Do NOT propose
 what to change — that is a separate, more expensive step. You have NO knowledge-base access here;
 answer from what's given, do not search.
 
 Usually the plan is fine — say so. Say change=true only when something is clearly wrong: a step
 that can't complete, a stuck/blocked signal, an emergency (e.g. low HP with no heal step in the
-plan), or the mission/milestone is stale.
+plan). A goal that already shows met is not by itself a reason to change; say change=true for goals
+only if a goal is clearly wrong or impossible. A battle LOST recently (SIGNALS.recent_battles) is a reason to change — the
+plan needs to adapt, not repeat. A standing catch goal that SIGNALS.catch says is not ready
+(e.g. no Poké Balls) IS a reason to change — the plan needs a step to fix it or the goal dropped.
+MEMORY: SINCE_LAST_REVIEW is what happened since the last review (maps entered, plan changes and why,
+what people said). ATTEMPTS lists steps that failed before, with counts. STALL.steps_without_progress
+counts steps with nothing new; STALL.critique is a reviewer's diagnosis. The same step failing again
+(ATTEMPTS), maps entered over and over, or a critique ARE reasons to change. An ACTIVE step whose
+"doing" is "travelling to <its map>" is working normally — NOT a reason to change; an edit listed as
+IGNORED in SINCE_LAST_REVIEW.your_last_edits is not a reason to try it again.
 
 Return ONLY JSON: {"change": <true|false>, "why": "<one short sentence>"}"""
 
 
+TRAINING_TEXT = """TRAINING — only Pokémon that take part in a battle earn EXP, and the LEAD (first in the party) starts
+every battle, so a bench that never leads stays weak. Training a member is your call: set "lead":
+"<nickname>" (the harness moves it to the front of the party), then grind with a step whose done_when is
+"level:<nickname>>=N" — somewhere its level can handle (weak wild Pokémon, heal often). Set the lead
+back (e.g. "lead": "Dylan") before a gym battle. PARTY shows each member's nickname, level, HP and — in
+"evolves" — what it will become (e.g. "Gyarados at L20"): weigh a Pokémon by its future, not just its level now.
+SWITCH-TRAINING is another option, if you want it: "train": ["<nickname>", ...] puts that member first
+and, when a battle starts, the battle layer sends it out and immediately switches to your strongest
+healthy member — Gen 1 splits the EXP among every member that took part, so it grows without doing the
+fighting. The cost: the incoming member takes one free enemy hit per battle. "train": "clear" stops it.
+Whether and whom to train is your call (SIGNALS.train shows the current setting); a member's future
+evolutions are in the knowledge base (e.g. search "<species> evolution").
+"""
+
+
+FIELD_MOVES_TEXT = """FIELD MOVES — an HM (in ITEMS, e.g. "HM01 Cut") teaches a move that can also be used OUTSIDE battle:
+Cut removes a small tree (T on the map; it grows back when you leave the area), Surf crosses water,
+Strength pushes boulders, Flash lights caves, Fly returns to a visited town. Each needs a party member that
+knows the move AND the right badge (Cut: Cascade Badge). PARTY shows each member's moves and "can_learn_hm"
+(e.g. "none; as Beedrill: Cut" — it can once it evolves). To teach one, set "teach": {"move": "Cut",
+"who": "<nickname>", "forget": "<a move to drop, optional>"} (the harness uses the TM/HM from ITEMS once
+and reports the result in SINCE_LAST_REVIEW). To cut a tree, add a step naming it, e.g.
+{"kind":"action","map":<map>,"talk":true,"who":"Cut tree at (15,18)","done_when":"cut:15,18"} — the router
+walks beside it and uses Cut. Where the trees are, who can learn each HM and where to get them: search the
+knowledge base (e.g. "Cut trees", "Pokemon that can learn Cut", "HMs and field moves").
+"""
+
+
 BRAINSTORM_SYSTEM = """You are the L1 BRAINSTORM step for an agent playing Pokémon Red, working
-toward the first gym (Brock, Pewter City, north). TRIAGE has flagged that the plan may need to
+toward its own GOALS (primary = the long-term aim, e.g. the next badge). TRIAGE has flagged that the plan may need to
 change. Your job here is OPEN-ENDED assessment, not a final plan: think through the situation —
-current MAP, PARTY, ITEMS, BADGES, SIGNALS, MISSION, MILESTONE — and what the game actually
+current MAP, PARTY, ITEMS, BADGES, SIGNALS, GOALS, NOTEPAD — and what the game actually
 requires next (a story gate, an errand, healing, grinding, the next town). A later DECIDE step
 will turn your assessment into concrete quest steps, so be concrete and specific (name the map /
 item / NPC where you can), but do NOT emit step objects or JSON steps yourself here.
+GOALS are the agent's own horizons (primary = the long-term why, secondary = the current chapter,
+tertiary = the immediate focus, possibly a diversion; GOAL_STATUS says whether a criterion holds now;
+INTERRUPTED is a paused focus); NOTEPAD is the agent's own notes. Say if a goal should change.
+ITEMS and SIGNALS.money are ground truth — where the NOTEPAD disagrees, trust ITEMS.
 
+MEMORY — what you have already tried and been told (harness-written ground truth):
+  - SINCE_LAST_REVIEW: what happened since you last reviewed — maps entered (entered_repeatedly = a
+    bounce), plan changes with the REAL reason each step failed, and HEARD (what people, signs and
+    objects said, with who and where; "heard Nx" = said more than once — hints often point the way).
+  - ATTEMPTS: every step that failed before and how often. Do NOT retry the same thing the same way;
+    if it failed repeatedly, something you believe is wrong — change the approach.
+  - HEARD: digest = long-term notes of what you've been told; here = what was said on this map.
+  - UNEXPLORED_HERE: on this map, doors to places you've never been, people you haven't talked to,
+    objects you haven't checked.
+  - STALL: steps without progress, plus a reviewer's CRITIQUE when you've been stuck a while.
+  - INTERRUPTING the ACTIVE step: a plain "remove" of the active step is ignored. When it truly can't
+    wait or has become wrong (e.g. HP critically low before walking through grass, the step became
+    impossible), put its id in "remove", add the replacement, AND set "interrupt_active": {"why":
+    "<the concrete reason it can't wait>"}. A reviewer checks the reason first; reordering for its
+    own sake, or an active step that is merely still travelling, will be rejected.
+  - SINCE_LAST_REVIEW.your_last_edits: what happened to YOUR previous edits (e.g. a remove that was
+    ignored because the step is active, an add that duplicated an existing step). Don't repeat an edit
+    that was ignored — it will be ignored again.
+PLAN status "active" = in progress. An action step at another map is active WHILE travelling there:
+"doing" says what it's doing now (e.g. "travelling to <its map>"). That is normal, not a bug —
+the step can't be removed and doesn't need reordering.
+When you're stuck and don't know the way, do what a player does: explore — go through the doors you
+haven't tried, talk to the people you haven't talked to (an explore step, see DECIDE).
+
+TEAM — the agent owns a TEAM, not just its starter. A single Pokémon is fragile: when the lead
+faints the run is over for that fight, and later gyms punish a one-type team (a gym leader's type
+can wall a team that's weak to it). Growing and balancing the team is part of the long-term plan, and YOU decide when
+it's worth it: catching wild Pokémon is how the team grows. Catching needs Poké Balls in ITEMS (bought
+at a Poké Mart) and a free party slot; set a standing CATCH goal to have the battle layer catch the
+species you want. SIGNALS.catch shows your current catch goal and whether it can fire right now (ready,
+and why not — e.g. no Poké Balls).
+{TRAINING}{FIELD_MOVES}
 TOOL — knowledge base: you SHOULD look things up in a Pokémon Red guide before concluding —
 especially WHERE things are (which map has the item / NPC / Poké Center) and what a story gate
 requires. To search, reply with ONLY {"search": ["query1", "query2"]} (1-3 queries); results come
@@ -243,8 +324,8 @@ Return ONLY JSON (when ready): {"assessment": "<a few sentences: what's going on
 next, and why>"}"""
 
 
-DECIDE_SYSTEM = """You are the L1 DECIDE step for an agent playing Pokémon Red, working toward the
-first gym (Brock, Pewter City, north). BRAINSTORM has already assessed the situation (see
+DECIDE_SYSTEM = """You are the L1 DECIDE step for an agent playing Pokémon Red, working toward its
+own GOALS (primary = the long-term aim, e.g. the next badge). BRAINSTORM has already assessed the situation (see
 BRAINSTORM below); your job now is to turn that into a MINIMAL, concrete set of quest-step edits
 anchored to the EXISTING plan — do NOT redesign the whole plan from scratch, only add what's
 missing and remove what's broken.
@@ -256,19 +337,42 @@ its goal not yet met), return EMPTY "add" and EMPTY "remove" — that means "kee
 active step". Do NOT re-add or restate a step that already exists in the PLAN and is in progress
 (e.g. do not add another heal step when one is already active, nor another "go to X" when that is
 already the active step) — repeating a step never helps and just thrashes the plan. ONLY add a step
-that is genuinely MISSING, and ONLY remove one that is truly impossible or already obsolete. Leave
-MISSION/MILESTONE unchanged unless the concrete sub-goal has actually moved on.
+that is genuinely MISSING, and ONLY remove one that is truly impossible or already obsolete.
 
-You are given: CURRENT_MAP, PARTY, ITEMS, BADGES, PLAN (existing steps), SIGNALS, MISSION,
-MILESTONE, BRAINSTORM (the prior assessment), and MAPS (an id->name table — you MUST use these
-exact ids for any "map" field).
+GOALS — your own horizons, all held at once: PRIMARY = the long-term why (e.g. earn the next
+badge); SECONDARY = the current chapter (e.g. reach the next gym with a team that can win); TERTIARY =
+the immediate focus, which may be a diversion (heal, shop, grind, a story errand). GOALS and NOTEPAD
+follow the same rule as steps: omit "goals", "notepad" and "catch" unless something actually changed
+— a goal was achieved, you are diverting, or you learned something worth keeping. Rewording is not a
+change. When you do edit, include only the tier(s) that changed. GOAL_STATUS "met" means that
+criterion holds right now; you decide when to move on. A brief diversion can be just a step (e.g. a
+heal step) — you don't have to rewrite a goal for it.
+  - Diverting / returning: rewrite the tertiary (or the secondary if the chapter itself changed).
+    INTERRUPTED shows the focus you paused — return to it, or add "interrupted": "" to drop it (a
+    paused focus without a checkable criterion is only dropped when you say so).
+  - Plan concrete steps for your current focus and chapter; keep later chapters as goals / notepad
+    rather than queued steps.
+  - NOTEPAD is your own short notepad — intentions for later, lessons, things not to retry. Send the
+    full rewritten text only when it changes; keep it short (NOTEPAD_TRUNCATED = it was cut).
+  - A goal's optional done_when uses ONLY has_item: (incl. has_item:<name>>=N)/no_item:/level>=/badges>=/hp_frac>=/verify:
+    (never on_map or talked — goals have no map).
+  - ITEMS and SIGNALS.money are GROUND TRUTH. If your NOTEPAD disagrees with ITEMS (e.g. it says you
+    have Poké Balls and ITEMS has none), trust ITEMS and correct the notepad. Catching needs Poké
+    Balls in ITEMS; buying needs enough money.
+
+You are given: CURRENT_MAP, PARTY, ITEMS, BADGES, PLAN (existing steps), SIGNALS, GOALS,
+GOAL_STATUS, INTERRUPTED, NOTEPAD, SINCE_LAST_REVIEW, ATTEMPTS, HEARD, UNEXPLORED_HERE, STALL (see
+BRAINSTORM's MEMORY notes: what happened, what failed, what you were told, what you haven't tried),
+BRAINSTORM (the prior assessment), and MAPS (an id->name table —
+you MUST use these exact ids for any "map" field).
 
 EVERY step you add MUST include an explicit "kind" — this is a HARD requirement; a step with no
 kind silently breaks execution downstream:
   {"kind": "travel", "map": <int>, "talk": false, "who": null,
-   "done_when": "on_map", "why": "<short>"}
+   "done_when": "on_map", "why": "<short>", "after": null}
   {"kind": "action", "map": <int>, "talk": <true|false>, "who": "<npc name, if talk, else null>",
-   "done_when": "<criterion>", "why": "<short>"}
+   "done_when": "<criterion>", "why": "<short>", "after": null}
+  {"kind": "explore", "map": <int>, "who": "<optional: an UNEXPLORED_HERE entry to try first>", "why": "<short>", "after": null}
 
 The kind rule:
   - "travel" is ONLY for moving to a map with no other objective on arrival; its done_when is
@@ -280,60 +384,131 @@ The kind rule:
 done_when MUST be exactly one of (this is the full grammar — nothing else parses):
   "on_map"                    — arrived on the map (travel steps only).
   "has_item:<name>"           — that item is now in the bag.
+  "has_item:<name>>=<N>"      — at least N of that item (buying several: has_item:Poke Ball>=5).
+  "level:<nickname>>=<N>"     — ONE party member reached level N (training: level:Sophie>=16).
   "no_item:<name>"            — that item is gone (used/delivered).
   "level>=<N>"                — party reached level N.
   "badges>=<N>"               — earned N badges.
   "hp_frac>=<F>"              — party healed to fraction F of max HP.
   "talked"                    — had a conversation (only when nothing more specific fits).
+  "cut:<x>,<y>"               — the Cut tree at (x,y) on the step's map is gone (you used Cut on it).
+  "used"                      — the step's "who" (ONE person or thing, e.g. "trash can at (9,9)") was talked
+                                 to / checked once. For searching things one at a time: one step per thing.
   "verify:<yes/no question>"  — judged by a verifier from game state; LAST RESORT ONLY, when the
                                  objective genuinely isn't RAM-checkable. Prefer any RAM-checkable
                                  form above over verify: whenever one applies — verify: is
                                  expensive and fuzzy.
 
 WORKED EXAMPLES (one per objective class — copy the SHAPE, adapt the specifics):
-  pickup an item  -> {"kind":"action","map":42,"talk":true,"who":"the Mart clerk",
-                       "done_when":"has_item:Oak's Parcel","why":"buy/collect the parcel"}
-  buy at a Mart   -> {"kind":"action","map":56,"talk":true,"who":"the Mart clerk",
+(<angle brackets> are placeholders: put REAL map ids from MAPS and real names there.)
+  pickup an item  -> {"kind":"action","map":<map where it is>,"talk":true,"who":"<who hands it over>",
+                       "done_when":"has_item:<item>","why":"collect the item"}
+  buy at a Mart   -> {"kind":"action","map":<a Mart's map>,"talk":true,"who":"the Mart clerk",
                        "done_when":"has_item:Potion","why":"buy Potions before the gym"}
                       Talking to a Mart clerk opens the shop and the buy runs automatically. Add this
                       when you have money and want consumables (e.g. Potions before a gym). Only items
-                      on that Mart's shelf are bought; anything else is a harmless no-op.
-  deliver an item -> {"kind":"action","map":0,"talk":true,"who":"Oak",
-                       "done_when":"no_item:Oak's Parcel","why":"hand the parcel to Oak"}
+                      on that Mart's shelf are bought — each Mart stocks different items (search the KB).
+                      A wedged step's "why_wedged" says why it failed (e.g. the shelf it saw): don't
+                      re-add the same step where it already failed.
+  deliver an item -> {"kind":"action","map":<recipient's map>,"talk":true,"who":"<recipient>",
+                       "done_when":"no_item:<item>","why":"hand the item over"}
                       CANONICAL: deliver -> no_item:<item>. The item LEAVING the bag proves
                       delivery. Do NOT model a delivery as has_item:<something else>.
-  heal            -> {"kind":"action","map":41,"talk":true,"who":"the Nurse",
+  use an object   -> {"kind":"action","map":<its map>,"talk":true,"who":"<the object, e.g. a PC>",
+                       "done_when":"verify:<did it do what you needed?>","why":"use the machine"}
+                      "who" can name a THING you press A on (a PC, machine, trash can, statue) —
+                      current_map.objects lists them; current_map.people lists who is here now.
+  heal            -> {"kind":"action","map":<a Poké Center's map>,"talk":true,"who":"the Nurse",
                        "done_when":"hp_frac>=1.0","why":"heal the party at the Poké Center"}
                       Add a step like this ONLY when SIGNALS shows low HP / emergency_heal — don't
                       invent healing from generic caution.
-  grind           -> {"kind":"action","map":31,"talk":false,"who":null,
-                       "done_when":"level>=12","why":"grind in the grass toward the goal"}
-  earn a badge    -> {"kind":"action","map":2,"talk":true,"who":"Brock",
-                       "done_when":"badges>=1","why":"beat the gym leader"}
-  reach a place   -> {"kind":"travel","map":1,"talk":false,"who":null,
-                       "done_when":"on_map","why":"head to Viridian City"}
-  story beat not  -> {"kind":"action","map":12,"talk":true,"who":"the guard",
+  grind           -> {"kind":"action","map":<a map with wild grass>,"talk":false,"who":null,
+                       "done_when":"level>=<N>","why":"grind in the grass toward the goal"}
+  earn a badge    -> {"kind":"action","map":<the gym's map>,"talk":true,"who":"<the gym leader>",
+                       "done_when":"badges>=<current badges + 1>","why":"beat the gym leader"}
+  reach a place   -> {"kind":"travel","map":<destination map>,"talk":false,"who":null,
+                       "done_when":"on_map","why":"head to <place>"}
+                      Routing knows the real paths — through caves, gates and maps that are split into
+                      separate parts (one route can have halves joined only THROUGH a cave). To cross a
+                      dungeon, add ONE travel step to the place beyond it, not a step per map you pass
+                      through: "go to <the route>" is already true at the cave entrance.
+  story beat not  -> {"kind":"action","map":<its map>,"talk":true,"who":"the guard",
   RAM-trackable        "done_when":"verify:did the guard let us pass?","why":"..."}
+  explore         -> {"kind":"explore","map":<this map>,"who":"<an entry copied from UNEXPLORED_HERE>",
+                       "why":"find the way forward"}
+                      "who" (optional) = what to try first: COPY one entry from UNEXPLORED_HERE (or give
+                      its coordinates, e.g. "(12,7)").
+                      Visits what's unexplored on that map — doors to places never visited, people not
+                      talked to, objects not checked (UNEXPLORED_HERE), your "who" first if given — until
+                      something NEW turns up (a new place or something new heard); then you review again.
+                      Use it when stuck, when you don't know the way, or when ATTEMPTS show the same step
+                      failing — instead of re-adding the failed step. No done_when needed.
+
+PLACEMENT — "after" says where a new step goes. Leave it null (the default) for something to do
+NEXT: right AFTER the ACTIVE step finishes, before the rest of the plan (replacements for a wedged step
+go here). NEXT never stops the active step — if something can't wait for the active step to finish
+(e.g. an emergency heal while the active step walks through grass), INTERRUPT it (see INTERRUPTING
+under MEMORY). Set
+"after": "<id>" only when the step must come AFTER an existing step that hasn't happened yet; the id
+must be from PLAN with status active or pending. "after" is NOT inherited from the step listed before
+it — put it on EVERY step that must wait. Several steps with the same "after" run in the order you list
+them. "end" appends after everything. Example: PLAN [q4 travel-><town> (active), q5 buy Potions
+at <the town's Mart> (pending)]; grinding on <the next route> and then entering <the next area>
+should both wait until after shopping ->
+{"kind":"action","map":<route id>,"talk":false,"who":null,"done_when":"level>=10","why":"grind","after":"q5"}
+{"kind":"travel","map":<area id>,"talk":false,"who":null,"done_when":"on_map","why":"next area","after":"q5"}
 
 RULES:
   - Emit MINIMAL steps: only what's missing from the existing PLAN, anchored to it — don't repeat
     steps already present and on track.
-  - EVERY step MUST include "kind" ("travel" or "action"); never omit it.
+  - EVERY step MUST include "kind" ("travel", "action" or "explore"); never omit it.
+  - Never re-add a step that ATTEMPTS shows failing the same way; change the approach (often: explore).
+  - Put lessons in the NOTEPAD (what failed and why, hints you heard) so later reviews keep them.
   - Use the correct map id from MAPS for every "map" field.
   - Prefer a RAM-checkable done_when (has_item/no_item/level/badges/hp_frac/on_map) over
     "verify:" whenever one applies.
 
-You MAY also set a standing CATCH goal when you want a new team member: add "catch": ["<species>"]
-(or ["any"]) so the battle layer catches that wild Pokémon when it appears; omit it (or [] to clear)
-otherwise — the default is to catch nothing.
+TEAM — the agent owns a TEAM, not just its starter. A single Pokémon is fragile: when the lead
+faints the run is over for that fight, and later gyms punish a one-type team (a gym leader's type
+can wall a team that's weak to it). Growing and balancing the team is part of the long-term plan, and YOU decide when
+it's worth it: catching wild Pokémon is how the team grows. Catching needs Poké Balls in ITEMS (bought
+at a Poké Mart) and a free party slot; set a standing CATCH goal to have the battle layer catch the
+species you want. SIGNALS.catch shows your current catch goal and whether it can fire right now (ready,
+and why not — e.g. no Poké Balls).
+LEARN FROM LOSSES — SIGNALS.recent_battles lists your last fights and their results. If you LOST (e.g.
+to a gym leader), don't simply heal and retry the same way: change something first — train team members,
+buy Potions, pick a better lead or a counter type — and say in the notepad what you're changing and why.
+{TRAINING}{FIELD_MOVES}To set or change the CATCH goal add "catch": ["<species>", ...] (or ["any"]); the battle layer then
+catches a matching wild Pokémon when it can (weakened into the catch band, then a ball). A goal that
+SIGNALS.catch says isn't ready does nothing until you fix the reason (e.g. add a step to buy Poké Balls:
+{"kind":"action","map":<mart>,"talk":true,"who":"the Mart clerk","done_when":"has_item:Poke Ball>=5"}).
+Omit "catch" when it isn't changing; send "catch": "clear" ONLY to remove a goal that SIGNALS.catch
+shows is set.
 
 Return ONLY JSON:
 {"assessment": "<one line: what changed and why>",
- "add": [ <new step objects as above> ],
+ "add": [ <new step objects as above, each with its "after" (null unless it must follow a PLAN step)> ],
  "remove": [ <ids of existing plan steps to drop> ],
- "mission": "<the overall mission>",
- "milestone": "<the current concrete sub-goal>",
- "catch": [ <species to catch, or "any"; omit for none> ]}"""
+ "goals": { <ONLY the tier(s) that changed, e.g. "tertiary": {"text": "<short>", "done_when": "<criterion or null>"}> },
+ "notepad": "<full rewritten notepad>",
+ "catch": [ <species or "any"> ],
+ "lead": "<party nickname to put first>",
+ "train": ["<party nickname>", ...],
+ "teach": {"move": "<move>", "who": "<party nickname>", "forget": "<optional move>"},
+ "interrupt_active": {"why": "<only when replacing the ACTIVE step — the concrete reason it can't wait>"}}
+Omit "goals", "notepad", "catch", "lead", "train", "teach" and "interrupt_active" entirely when not needed (the common case). To drop the
+paused focus, add "interrupted": "" (see GOALS above); otherwise never include "interrupted"."""
+
+
+# the TEAM/TRAINING options must be known where the strategy is formed (BRAINSTORM), not only where it's
+# turned into steps (DECIDE) — runs/sleeves-mtmoon: brainstorm never saw them, so training never came up
+BRAINSTORM_SYSTEM = BRAINSTORM_SYSTEM.replace("{TRAINING}", TRAINING_TEXT).replace("{FIELD_MOVES}", FIELD_MOVES_TEXT)
+DECIDE_SYSTEM = DECIDE_SYSTEM.replace("{TRAINING}", TRAINING_TEXT).replace("{FIELD_MOVES}", FIELD_MOVES_TEXT)
+# runs/sleeves-mtmoon step 1730: one assessment came back in Chinese — state the language outright
+_ENGLISH = "\nWrite every text field (assessment, why, notepad, goals) in English."
+BRAINSTORM_SYSTEM += _ENGLISH
+DECIDE_SYSTEM += _ENGLISH
+TRIAGE_SYSTEM += _ENGLISH
 
 
 REPAIR_SYSTEM = """You are the L1 REPAIR step for an agent playing Pokémon Red. ONE quest step
@@ -343,7 +518,7 @@ corrected "done_when" and/or "kind" so it validates. Do not change anything else
 (map/who/why) unless it is the cause of the error.
 
 done_when MUST be exactly one of:
-  "on_map" | "has_item:<name>" | "no_item:<name>" | "level>=<N>" | "badges>=<N>" |
+  "on_map" | "has_item:<name>" | "has_item:<name>>=<N>" | "no_item:<name>" | "level>=<N>" | "badges>=<N>" |
   "hp_frac>=<F>" | "talked" | "verify:<yes/no question>"
 
 kind is "travel" (done_when must be "on_map", and it must never talk) or "action" (done_when must
@@ -365,28 +540,71 @@ class Planner:
         self.strategist = strategist    # tier-2 chat_json provider (LunaRoute-strong) for quests
         self.knowledge = knowledge      # optional Orrery KnowledgeBase for retrieval-grounded quests
         self.on_search = None           # optional callback(query, n_results) for logging KB tool-calls
+        self.capture = None             # optional distillation Capture (mounted by the loop; §3)
+
+    def _capture_decision(self, layer, provider, state, content, parsed, latency_ms, usage) -> None:
+        """Best-effort per-decision capture (§3): recover the tokens/latency the call site
+        discarded (`chat_json` returns (raw, latency_ms, usage); tokens live inside usage).
+        Never raises / never changes behavior — guarded on the optional mounted Capture."""
+        cap = getattr(self, "capture", None)
+        if cap is None:
+            return
+        tokens = usage.get("total_tokens", 0) if isinstance(usage, dict) else 0
+        cap.record(layer, model=getattr(provider, "model", None),
+                   input=state, output_raw=content, parsed=parsed,
+                   tokens=tokens, latency_ms=latency_ms, extra={"usage": usage})
+
+    def _cap_target(self, state, content, target, latency_ms, usage):
+        """Record a proposer decision (§3) and return the target UNCHANGED (zero-behavior) — used
+        at `propose_target`'s several return points so exactly one record lands per call."""
+        self._capture_decision("l2_propose_target", self.provider, state, content, target, latency_ms, usage)
+        return target
 
     def _llm_with_search(self, provider, system: str, state: dict, *, final_key: str,
-                         max_rounds: int = 3) -> dict:
+                         max_rounds: int = 3, capture_layer: str | None = None) -> dict:
         """Run an LLM call where the model MAY use the knowledge base as a tool: each round it
         returns either {"search": [...]} (we run the queries, feed results back as
         KNOWLEDGE_GATHERED) or its final JSON object (which contains ``final_key``). The model
-        decides when and what to look up. Returns the final parsed dict."""
+        decides when and what to look up. Returns the final parsed dict.
+
+        Distillation capture (§3, best-effort): when ``capture_layer`` is set, each intermediate
+        KB-search round is emitted as a ``model_round`` sharing a ``group_id``, and the final
+        parse is emitted as ONE decision record whose ``tokens`` is the sum across rounds and
+        whose ``extra.search_queries`` lists what was looked up. Never changes behavior."""
+        cap = getattr(self, "capture", None) if capture_layer else None
+        gid = f"{capture_layer}-{id(state)}-{time.time_ns()}" if cap is not None else None
+        tok_sum = 0
+        search_queries: list[str] = []
+
+        def _tok(usage):
+            return usage.get("total_tokens", 0) if isinstance(usage, dict) else 0
+
         gathered: list[dict] = []
         data: dict = {}
         for round_i in range(max_rounds + 1):
             s = {**state, "knowledge_gathered": gathered, "search_rounds_left": max_rounds - round_i}
             try:
-                content, _, _ = provider.chat_json(system, s)
+                content, _lat, _usage = provider.chat_json(system, s)
                 data = json.loads(strip_fences(content))
             except Exception:
                 return data
+            tok_sum += _tok(_usage)
             queries = data.get("search")
             is_search = (isinstance(queries, list) and queries and self.knowledge is not None
                          and final_key not in data and round_i < max_rounds)
             if not is_search:
+                if cap is not None:
+                    cap.record(capture_layer, group_id=gid, model=getattr(provider, "model", None),
+                               input=s, output_raw=content, parsed=data, tokens=tok_sum,
+                               latency_ms=_lat, extra={"search_queries": search_queries,
+                                                       "rounds": round_i, "usage": _usage})
                 return data
+            if cap is not None:
+                cap.record_round(capture_layer, group_id=gid, model=getattr(provider, "model", None),
+                                 input=s, output_raw=content, parsed=data, tokens=_tok(_usage),
+                                 latency_ms=_lat)
             for q in [str(x) for x in queries][:3]:
+                search_queries.append(q)
                 res = self.knowledge.query_texts(q, top_k=4)
                 gathered.append({"query": q, "results": res})
                 if self.on_search:
@@ -412,7 +630,8 @@ class Planner:
                 "maps": {str(mid): name for mid, name in MAP_NAMES_RAW.items()},
             }
             # the strategist MAY search the knowledge base as a tool before finalizing the quest
-            data = self._llm_with_search(prov, STRATEGIST_SYSTEM, state, final_key="steps", max_rounds=3)
+            data = self._llm_with_search(prov, STRATEGIST_SYSTEM, state, final_key="steps",
+                                         max_rounds=3, capture_layer="l1_strategize")
             plan_note = str(data.get("plan") or "quest").strip()
             quest: list[Directive] = []
             for step in data.get("steps", []):
@@ -483,6 +702,31 @@ class Planner:
         except Exception:
             return {"change": False, "add": [], "remove": []}
 
+    @staticmethod
+    def _goal_fields(context: dict, *, notepad: bool = True) -> dict:
+        """The goal view for an L1 state dict. A legacy context (captured inputs, old evals) has
+        only mission/milestone -> derive primary/secondary from them so the new prompts still see
+        sensible goals."""
+        goals = context.get("goals")
+        if not isinstance(goals, dict):
+            goals = {"primary": {"text": str(context.get("mission") or ""), "done_when": None},
+                     "secondary": {"text": str(context.get("milestone") or ""), "done_when": None},
+                     "tertiary": {"text": "", "done_when": None}}
+        out = {"goals": goals,
+               "goal_status": context.get("goal_status") or {t: "none" for t in goals},
+               "interrupted": context.get("interrupted")}
+        if notepad:
+            out["notepad"] = context.get("notepad") or ""
+            out["notepad_truncated"] = bool(context.get("notepad_truncated"))
+        return out
+
+    @staticmethod
+    def _memory_fields(context: dict, *, full: bool = True) -> dict:
+        """What happened since the last review, what was tried / heard / not explored, and stall state
+        (spec 2026-09-24). Absent keys are simply omitted (old captured contexts, evals)."""
+        keys = ("since_last_review", "attempts", "stall") + (("heard", "unexplored_here") if full else ())
+        return {k: context[k] for k in keys if context.get(k) not in (None, [], {}, "")}
+
     def l1_triage(self, context: dict) -> dict:
         """L1 pipeline step 1 (TRIAGE): a cheap, fast, NO-search check of whether the standing
         plan needs to change at all, given the plan + signals. Gates the expensive
@@ -496,12 +740,13 @@ class Planner:
             state = {
                 "plan": context.get("plan"),
                 "signals": context.get("signals"),
-                "mission": context.get("mission"),
-                "milestone": context.get("milestone"),
+                **self._goal_fields(context, notepad=False),
                 "current_map": context.get("current_map"),
+                **self._memory_fields(context, full=False),
             }
-            content, _, _ = self.provider.chat_json(TRIAGE_SYSTEM, state)
+            content, _lat, _usage = self.provider.chat_json(TRIAGE_SYSTEM, state)
             data = json.loads(strip_fences(content))
+            self._capture_decision("l1_triage", self.provider, state, content, data, _lat, _usage)
             if not isinstance(data, dict):
                 return {"change": False, "why": ""}
             return {"change": bool(data.get("change", False)), "why": str(data.get("why") or "")}
@@ -524,15 +769,17 @@ class Planner:
                 "items": context.get("items"),
                 "badges": context.get("badges"),
                 "signals": context.get("signals"),
-                "mission": context.get("mission"),
-                "milestone": context.get("milestone"),
+                "plan": context.get("plan"),
+                **self._goal_fields(context),
+                **self._memory_fields(context),
             }
-            data = self._llm_with_search(prov, BRAINSTORM_SYSTEM, state, final_key="assessment")
+            data = self._llm_with_search(prov, BRAINSTORM_SYSTEM, state, final_key="assessment",
+                                         capture_layer="l1_brainstorm")
             if not isinstance(data, dict):
                 return {"assessment": ""}
             return {"assessment": str(data.get("assessment") or "")}
-        except Exception:
-            return {"assessment": ""}
+        except Exception as e:
+            return {"assessment": "", "error": f"{type(e).__name__}: {e}"[:200]}   # visible in the trace
 
     def l1_decide(self, context: dict, brainstorm: dict) -> dict:
         """L1 pipeline step 3 (DECIDE): turn the BRAINSTORM assessment into a MINIMAL set of quest
@@ -553,30 +800,54 @@ class Planner:
                 "badges": context.get("badges"),
                 "plan": context.get("plan"),
                 "signals": context.get("signals"),
-                "mission": context.get("mission"),
-                "milestone": context.get("milestone"),
+                **self._goal_fields(context),
+                **self._memory_fields(context),
                 "brainstorm": brainstorm.get("assessment", ""),
                 "maps": {str(mid): name for mid, name in MAP_NAMES_RAW.items()},
             }
-            content, _, _ = prov.chat_json(DECIDE_SYSTEM, state)
+            content, _lat, _usage = prov.chat_json(DECIDE_SYSTEM, state)
             data = json.loads(strip_fences(content))
+            self._capture_decision("l1_decide", prov, state, content, data, _lat, _usage)
             if not isinstance(data, dict):
                 return {"add": [], "remove": []}
             add = [s for s in (data.get("add") or []) if isinstance(s, dict)]
             remove = [str(x) for x in (data.get("remove") or [])]
-            # optional standing catch goal (§7.1): a list of species (or "any"); None = unchanged.
+            # optional standing catch goal (§7.1): a species list (or ["any"]) sets it, "clear" clears
+            # it; anything else (absent / [] — an echo) = unchanged (tiered-goals spec §3.3).
             raw_catch = data.get("catch")
-            catch = [str(x) for x in raw_catch] if isinstance(raw_catch, list) else None
-            return {
-                "assessment": str(data.get("assessment") or ""),
-                "add": add,
-                "remove": remove,
-                "mission": str(data.get("mission") or context.get("mission") or ""),
-                "milestone": str(data.get("milestone") or context.get("milestone") or ""),
-                "catch": catch,
-            }
-        except Exception:
-            return {"add": [], "remove": []}
+            if isinstance(raw_catch, list):
+                catch = [str(x) for x in raw_catch]
+            elif isinstance(raw_catch, str) and raw_catch.strip().lower() == "clear":
+                catch = "clear"
+            else:
+                catch = None
+            out = {"assessment": str(data.get("assessment") or ""), "add": add, "remove": remove,
+                   "catch": catch,
+                   # tiered goals (§3.3): passed through raw; goals.detect_change validates +
+                   # decides whether anything really changed. No back-fill from the context.
+                   "goals": data.get("goals") if isinstance(data.get("goals"), dict) else None,
+                   "notepad": data.get("notepad") if isinstance(data.get("notepad"), str) else None}
+            if "interrupted" in data:
+                out["interrupted"] = data["interrupted"]
+            if isinstance(data.get("lead"), str) and data["lead"].strip():
+                out["lead"] = data["lead"].strip()
+            tr = data.get("train")
+            if isinstance(tr, list) and tr:
+                out["train"] = [str(t) for t in tr if str(t).strip()]
+            elif isinstance(tr, str) and tr.strip().lower() == "clear":
+                out["train"] = "clear"
+            if isinstance(data.get("teach"), dict):
+                out["teach"] = data["teach"]
+            ia = data.get("interrupt_active")
+            if isinstance(ia, dict) and str(ia.get("why") or "").strip():
+                out["interrupt_active"] = {"why": str(ia["why"]).strip()[:300]}
+            # legacy keys only if the model still emits them (honored alongside a step edit only)
+            for k in ("mission", "milestone"):
+                if isinstance(data.get(k), str) and data[k].strip():
+                    out[k] = data[k]
+            return out
+        except Exception as e:
+            return {"add": [], "remove": [], "error": f"{type(e).__name__}: {e}"[:200]}   # visible in the trace
 
     def l1_repair(self, context: dict, bad_step: dict, error: str) -> dict:
         """L1 pipeline step (REPAIR): given the DSL grammar, the offending step, and the exact
@@ -594,8 +865,9 @@ class Planner:
                 "current_map": context.get("current_map"),
                 "maps": {str(mid): name for mid, name in MAP_NAMES_RAW.items()},
             }
-            content, _, _ = prov.chat_json(REPAIR_SYSTEM, state)
+            content, _lat, _usage = prov.chat_json(REPAIR_SYSTEM, state)
             data = json.loads(strip_fences(content))
+            self._capture_decision("l1_repair", prov, state, content, data, _lat, _usage)
             if not isinstance(data, dict) or not data:
                 return bad_step
             return data
@@ -651,6 +923,19 @@ class Planner:
             return {"on_map": map_id}
         if low == "talked":
             return {"talked_on_map": map_id}
+        if low == "used":                                  # the step's named who/what answered, once
+            return {"used": True}
+        if low == "explored":                              # an explore step: done on a discovery
+            return {"explored": map_id}
+        if low.startswith("level:") and ">=" in s:        # one party member: level:Sophie>=16
+            name, _, num = s[len("level:"):].rpartition(">=")
+            num = num.strip()
+            return {"member_level": [name.strip(), int(num)]} if name.strip() and num.isdigit() else None
+        if low.startswith("has_item:") and ">=" in s:     # a COUNT: has_item:Poke Ball>=5
+            name, _, num = s[len("has_item:"):].rpartition(">=")
+            iid = resolve_item_id(name.strip())
+            num = num.strip()
+            return {"item_count": [iid, int(num)]} if iid is not None and num.isdigit() and int(num) > 0 else None
         for pre, key in (("has_item:", "has_item"), ("no_item:", "no_item")):
             if low.startswith(pre):
                 iid = resolve_item_id(s[len(pre):])
@@ -665,6 +950,9 @@ class Planner:
                 return {"hp_frac": f">={float(num)}"}
             except ValueError:
                 return None
+        if low.startswith("cut:"):                          # a cut tree on that map is gone: cut:15,18
+            m = re.match(r"cut:\s*\(?\s*(\d+)\s*,\s*(\d+)", low)
+            return {"tree_cut": [map_id, int(m.group(1)), int(m.group(2))]} if m else None
         if low.startswith("verify:"):
             return {"verify": s[len("verify:"):].strip()}  # judged by the verifier (not RAM)
         return None
@@ -693,7 +981,7 @@ class Planner:
         }
         for _ in range(2):  # one retry if the model picks an invalid tile
             try:
-                content, _, _ = self.provider.chat_json(WAYPOINT_SYSTEM, state)
+                content, _lat, _usage = self.provider.chat_json(WAYPOINT_SYSTEM, state)
                 data = json.loads(strip_fences(content))
                 x, y = int(data["x"]), int(data["y"])
             except Exception:
@@ -706,6 +994,8 @@ class Planner:
             progresses = (px is None) or (x, y) != (px, py)
             ok = progresses and (is_exit or reachable is None or (x, y) in reachable)
             if ok:
+                self._capture_decision("l2_next_waypoint", self.provider, state, content,
+                                       {"x": x, "y": y, "reason": reason}, _lat, _usage)
                 return x, y, reason
         return None
 
@@ -731,6 +1021,7 @@ class Planner:
         exit_tile = context.get("exit_tile")
         state = {
             "objective": context.get("objective"),
+            "focus": context.get("focus"),   # L1's tertiary goal (the immediate focus), if any
             "destination": context.get("destination"),
             "goal_dir": context.get("goal_dir"),
             "player": context.get("player"),
@@ -738,6 +1029,7 @@ class Planner:
             "exit_tile": list(exit_tile) if exit_tile else None,
             "candidate_exits": context.get("candidate_exits"),
             "npcs": context.get("npcs"),
+            "objects": context.get("objects") or None,
             "recent_trail": context.get("recent_trail"),
             "recent_targets": context.get("recent_targets"),
             "default": default,
@@ -745,9 +1037,12 @@ class Planner:
         }
         reason = "no response"
         last_raw = None
-        for _ in range(2):  # one retry on an invalid pick
+        content, _lat, _usage = None, 0, {}   # bound for the unresolved-after-failure record
+        for attempt in range(2):  # one retry on an invalid pick — told WHY the first answer was refused
+            if attempt and reason:
+                state = {**state, "rejected": reason}
             try:
-                content, _, _ = self.provider.chat_json(PROPOSER_SYSTEM, state)
+                content, _lat, _usage = self.provider.chat_json(PROPOSER_SYSTEM, state)
                 last_raw = content
                 data = json.loads(strip_fences(content))
                 kind = data.get("kind")
@@ -766,12 +1061,16 @@ class Planner:
                 is_exit = exit_tile is not None and (x, y) == tuple(exit_tile)
                 progresses = (px is None) or (x, y) != (px, py)
                 if progresses and (is_exit or reachable is None or (x, y) in reachable):
-                    return {"kind": "tile", "x": x, "y": y, "note": note}
-                reason = f"tile ({x},{y}) unreachable / no-op"
+                    return self._cap_target(state, content, {"kind": "tile", "x": x, "y": y, "note": note}, _lat, _usage)
+                who = next((n.get("sprite") for n in (context.get("npcs") or [])
+                            if (n.get("x"), n.get("y")) == (x, y)), None)
+                reason = (f"({x},{y}) is where you already are" if not progresses else
+                          f"({x},{y}) is occupied by {who} — a person's tile can't be stood on" if who else
+                          f"({x},{y}) can't be reached from where you are (a wall, water, or cut off)")
                 continue
             if kind == "enter":
                 try:
-                    return {"kind": "enter", "map": int(data["map"]), "note": note}
+                    return self._cap_target(state, content, {"kind": "enter", "map": int(data["map"]), "note": note}, _lat, _usage)
                 except (KeyError, TypeError, ValueError):
                     reason = "enter missing map"
                     continue
@@ -780,13 +1079,20 @@ class Planner:
                 if not sprite:
                     reason = "approach_npc missing sprite"
                     continue
-                return {"kind": "approach_npc", "sprite": sprite, "note": note}
+                return self._cap_target(state, content, {"kind": "approach_npc", "sprite": sprite, "note": note}, _lat, _usage)
+            if kind == "use_object":
+                obj = (data.get("object") or data.get("sprite") or None)
+                if not obj:
+                    reason = "use_object missing object"
+                    continue
+                return self._cap_target(state, content, {"kind": "use_object", "object": obj, "note": note}, _lat, _usage)
             if kind == "exit":
-                return {"kind": "exit", "note": note}
+                return self._cap_target(state, content, {"kind": "exit", "note": note}, _lat, _usage)
             reason = f"unknown kind {kind!r}"
         # a wired provider failed to produce a usable target -> surface it; do NOT guess deterministically
-        return {"kind": "unresolved", "reason": reason, "raw": (str(last_raw)[:300] if last_raw else None),
-                "note": f"proposer failed: {reason}"}
+        return self._cap_target(state, content, {"kind": "unresolved", "reason": reason,
+                "raw": (str(last_raw)[:300] if last_raw else None),
+                "note": f"proposer failed: {reason}"}, _lat, _usage)
 
     # --- travel: LLM picks the target map; graph does the geometry + fallback --
     def _travel(self, emu, memory, why: str) -> Directive:
@@ -824,7 +1130,8 @@ class Planner:
                 "why_replan": why or "starting a new travel directive",
             }
             # the tier-1 planner MAY search the KB as a tool before choosing the reroute target
-            data = self._llm_with_search(self.provider, PLANNER_SYSTEM, state, final_key="target_map")
+            data = self._llm_with_search(self.provider, PLANNER_SYSTEM, state, final_key="target_map",
+                                         capture_layer="l2_travel_reroute")
             tm = int(data.get("target_map"))
             reason = str(data.get("reason") or "").strip() or default_reason
             # validate: must be reachable and not the current map

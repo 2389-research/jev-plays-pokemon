@@ -1,4 +1,4 @@
-from pokemon_agent.agent.world_graph import WorldGraph, seeded_kanto_graph
+from pokemon_agent.agent.world_graph import WorldGraph, full_kanto_graph
 from pokemon_agent.games.pokemon_red.constants import MAP_NAMES_RAW
 
 
@@ -119,44 +119,14 @@ def test_to_dict_from_dict_roundtrip():
     assert g2.unresolved == ["Somewhere"]
 
 
-# --- seed -------------------------------------------------------------------
-def test_seeded_kanto_graph_connected_pallet_to_pewter():
-    g = seeded_kanto_graph()
+# --- the whole ripped Kanto graph (no hand-written corridor) ---------------------
+def test_full_kanto_graph_reaches_far_beyond_the_first_corridor():
+    g = full_kanto_graph()
     name_to_id = {n: i for i, n in MAP_NAMES_RAW.items()}
-    pallet = name_to_id["Pallet Town"]
-    pewter = name_to_id["Pewter City"]
-    route = g.route(pallet, pewter)
-    assert route is not None, "Pallet -> Pewter must be connected in the seed"
-    assert route[0] == pallet and route[-1] == pewter
-    # nothing left unresolved for the core corridor names
-    assert g.unresolved == []
-
-
-def test_seeded_corridor_resolved_ids():
-    g = seeded_kanto_graph()
-    name_to_id = {n: i for i, n in MAP_NAMES_RAW.items()}
-    # sanity: the specific ids the seed relies on
-    assert name_to_id["Pallet Town"] == 0
-    assert name_to_id["Route 1"] == 12
-    assert name_to_id["Viridian City"] == 1
-    assert name_to_id["Route 2"] == 13
-    assert name_to_id["Viridian Forest"] == 51
-    assert name_to_id["Pewter City"] == 2
-    # gate buildings present too
-    assert name_to_id["Viridian Forest South Gate"] == 50
-    assert name_to_id["Viridian Forest North Gate"] == 47
-    # each resolved corridor node has at least one edge
-    for mid in (0, 12, 1, 13, 51, 47, 50, 2):
-        assert g.neighbors(mid), f"map {mid} should have neighbors in seed"
-
-
-def test_seeded_next_hop_walks_toward_pewter():
-    g = seeded_kanto_graph()
-    # from Pallet(0) the first hop is Route 1(12), tile unknown until observed
-    hop = g.next_hop(0, 2)
-    assert hop is not None
-    assert hop[0] == 12
-    assert hop[1] is None
+    for a, b in (("Pallet Town", "Pewter City"), ("Cerulean City", "Vermilion City"),
+                 ("Lavender Town", "Celadon City"), ("Fuchsia City", "Pallet Town")):
+        r = g.route(name_to_id[a], name_to_id[b])
+        assert r is not None and r[0] == name_to_id[a] and r[-1] == name_to_id[b], (a, b)
 
 
 def test_full_kanto_graph_from_pokered_routes_pallet_to_pewter():

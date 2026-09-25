@@ -23,6 +23,18 @@ from ..games.pokemon_red.state import detect_mode, read_player
 # Per-tile budget: a Red overworld step animates over ~16 frames.
 FRAMES_PER_TILE_BUDGET = 24
 POLL = 2  # check position every N frames
+# A/B/START/SELECT are held this long so the game's once-per-loop joypad sampling always sees
+# them (8 frames is the measured minimum in the worst recorded state; +2 margin).
+PRESS_HOLD_FRAMES = 10
+PRESS_SETTLE_FRAMES = 24
+DIRECTION_BUTTONS = frozenset(DIRECTION_BUTTON.values())
+# A warp commits its destination coords + sprites ~35 frames after the map id flips; cap the wait.
+WARP_SETTLE_MAX = 120
+WMOVEMENTFLAGS = 0xD736      # wMovementFlags; bit 6 = jumping down a ledge (or fishing)
+LEDGE_SETTLE_MAX = 60
+# Some warps land on the SAME (x, y) on the new map (e.g. Red's House 1F/2F stairs at (7,1)), so the
+# coords never change; past the observed commit window (34-36 frames) treat the warp as settled.
+WARP_SAMEXY_SETTLE = 60
 
 
 def _pos(emu: Emulator) -> tuple[int, int, int] | None:
@@ -69,9 +81,15 @@ class ActionController:
             self.emu.release(button)
             self.emu.tick(1)  # settle
             total_frames += elapsed + 1
+            total_frames += self._settle_ledge(events)
             if changed:
                 moved_tiles += 1
                 events.append("player_moved")
+                after = _pos(self.emu)
+                if before is not None and after is not None and after[2] != before[2]:
+                    # the map changed: never return (or keep walking) mid-transition
+                    total_frames += self._settle_map_change(before, after, events)
+                    break
             else:
                 events.append(f"movement_blocked:{action.direction.value}")
                 break  # stop the multi-tile move at the wall
@@ -89,20 +107,71 @@ class ActionController:
             detail=f"moved {moved_tiles}/{action.tiles} tiles {action.direction.value}",
         )
 
+    def _settle_ledge(self, events: list[str]) -> int:
+        """A ledge hop moves the player two cells with the joypad ignored while wMovementFlags bit 6
+        (BIT_LEDGE_OR_FISHING) is set: wait it out so the next observation isn't mid-hop."""
+        frames = 0
+        try:
+            if not (self.emu.read_memory(WMOVEMENTFLAGS) & 0x40):
+                return 0
+            events.append("ledge_hop")
+            while self.emu.read_memory(WMOVEMENTFLAGS) & 0x40 and frames < LEDGE_SETTLE_MAX:
+                self.emu.tick(2)
+                frames += 2
+        except Exception:
+            pass
+        return frames
+
+    def _settle_map_change(self, before, flip, events: list[str]) -> int:
+        """After the map id flips, wait out a WARP until its coords + sprites commit; return the
+        frames spent. A warp (door/mat/stairs) flips the map on or next to the pre-step tile and
+        holds the coords there (with the OLD map's sprites) for ~35 frames before jumping to the
+        destination; observing in that window gave the agent a torn frame (map = new, coords and
+        NPCs = old). A map-EDGE connection flips map + coords + sprites on one frame, far from the
+        pre-step tile, and is already settled."""
+        if abs(flip[0] - before[0]) + abs(flip[1] - before[1]) > 1:
+            events.append("map_connection")
+            return 0
+        waited = 0
+        while waited < WARP_SETTLE_MAX:
+            self.emu.tick(POLL)
+            waited += POLL
+            now = _pos(self.emu)
+            if now is not None and (now[0], now[1]) != (flip[0], flip[1]):
+                events.append("warp_settled")
+                return waited
+            if waited >= WARP_SAMEXY_SETTLE and now is not None and now[2] == flip[2]:
+                events.append("warp_settled_samexy")   # destination tile == source tile
+                return waited
+        events.append("warp_settle_timeout")
+        return waited
+
     # --- discrete button presses -----------------------------------------
     def _press(self, action, mode_before) -> ActionResult:
         if isinstance(action, PressAction):
             button = action.button
         else:  # interact / advance_dialog both map to A
             button = GameButton.A
-        self.emu.press(button)
+        if button in DIRECTION_BUTTONS:
+            # a direction TAP only turns the player; holding it would start a walk
+            self.emu.press(button)
+            held = 1
+        else:
+            # A/B/START/SELECT are HELD: Gen 1 samples the joypad once per overworld-loop
+            # iteration, so a 1-frame tap can alias with the sampling and miss every time (the
+            # 1839 run pressed A 107x facing Oak with no dialog). Text/menus advance on a NEW
+            # press edge, so holding never skips a box or double-selects.
+            self.emu.hold(button)
+            self.emu.tick(PRESS_HOLD_FRAMES)
+            self.emu.release(button)
+            held = PRESS_HOLD_FRAMES
         # dialog/menu text needs time to scroll+react; 8 frames was too few (the
         # post-pick starter cutscene stalled), so give a real settle window.
-        self.emu.tick(24)
+        self.emu.tick(PRESS_SETTLE_FRAMES)
         mode_after = detect_mode(self.emu)
         return ActionResult(
             success=True, result="completed", mode_before=mode_before, mode_after=mode_after,
-            frames_elapsed=25, events=[f"pressed:{button.value}"],
+            frames_elapsed=held + PRESS_SETTLE_FRAMES, events=[f"pressed:{button.value}"],
             detail=f"pressed {button.value}",
         )
 

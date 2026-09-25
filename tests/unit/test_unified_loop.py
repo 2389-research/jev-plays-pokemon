@@ -124,16 +124,22 @@ def test_resolve_approach_npc_interacts_when_adjacent_and_facing():
 def test_candidate_exits_lists_doors_and_reachable_edge_openings():
     # L2 should be handed every way OFF the map as a coordinate: warp doors (with dest) AND reachable
     # map-boundary openings (edge tiles), so it can SELECT one instead of us guessing the nearest door.
+    # ONLY in directions the map really connects: Pallet Town (0) connects north + south, not west — and an
+    # indoor map has no edge exits at all (the captured Cerulean Gym request listed 32 fake ones).
     loop, _ = _nav_loop(0)
-    obs = SimpleNamespace(map_dims=(6, 8),
+    obs = SimpleNamespace(map_dims=(6, 8), player=SimpleNamespace(map_id=0, is_outdoor=True),
                           exits=[{"x": 2, "y": 7, "dest_map": 40, "dest_name": "Oaks Lab"}])
     reachable = {(2, 7), (3, 0), (0, 4), (2, 3)}  # door tile, north-edge, west-edge, interior tile
     cands = loop._candidate_exits(obs, reachable)
     doors = [c for c in cands if c["kind"] == "door"]
     edges = {(c["x"], c["y"], c["dir"]) for c in cands if c["kind"] == "edge"}
     assert doors == [{"x": 2, "y": 7, "kind": "door", "dest_map": 40, "dest": "Oaks Lab"}]
-    assert edges == {(3, 0, "N"), (0, 4, "W")}          # boundary openings, with direction
+    assert edges == {(3, 0, "N")}                       # a real connection; no fake west exit
     assert (2, 3) not in {(c["x"], c["y"]) for c in cands}  # interior tile is not a way off
+    gym = SimpleNamespace(map_dims=(10, 14), player=SimpleNamespace(map_id=65, is_outdoor=False),
+                          exits=[{"x": 4, "y": 13, "dest_map": 3, "dest_name": "Cerulean City"}])
+    g = loop._candidate_exits(gym, {(0, 2), (9, 5), (3, 13), (5, 5)})
+    assert [c["kind"] for c in g] == ["door"]
 
 
 def test_propose_target_accepts_bare_coordinate_with_why():
@@ -287,6 +293,7 @@ def test_navigate_leg_configured_failure_ungrounded_stalls_and_flags():
 
 def test_navigate_leg_configured_failure_grounded_proceeds_and_flags():
     loop, _ = _nav_loop(42)
+    loop.portals = None   # the Kanto portal graph covers map 42 now; this test is about the PROPOSER path
     loop.planner.provider = FailProvider()
     loop.memory.graph.next_hop = lambda a, b: (1, (3, 7))
     player = SimpleNamespace(x=3, y=7, map_id=42, facing="east")
@@ -695,3 +702,27 @@ def test_farm_step_advances_through_open_lane_when_forward_isnt_grass():
     start, goal = (5, 12), (5, 0)
     path, _ = _run_farm(loop, start, goal, 10)
     assert path[-1][1] < start[1], f"did not advance north up the lane: {path}"
+
+
+def test_a_rejected_pick_is_re_asked_with_the_reason():
+    """The retry used to repeat the identical prompt; now it says why the first answer was refused."""
+    import json as _j
+    seen = []
+
+    class Two:
+        def __init__(self):
+            self.n = 0
+
+        def chat_json(self, system, state, image=None):
+            seen.append(state)
+            self.n += 1
+            return (_j.dumps({"x": 4, "y": 3, "why": "stand below her"}) if self.n == 1 else
+                    _j.dumps({"x": 5, "y": 2, "why": "open side"})), 0, {}
+    ctx = _ctx()
+    ctx["reachable"] = {(5, 2), (5, 3)}
+    ctx["player"] = {"x": 5, "y": 3, "map_id": 0}
+    ctx["npcs"] = [{"x": 4, "y": 3, "sprite": "Cooltrainer F"}]
+    ctx["exit_tile"] = None
+    t = Planner(goal_map=0, provider=Two()).propose_target(emu=None, context=ctx)
+    assert (t["x"], t["y"]) == (5, 2)
+    assert "rejected" not in seen[0] and "occupied by Cooltrainer F" in seen[1]["rejected"]

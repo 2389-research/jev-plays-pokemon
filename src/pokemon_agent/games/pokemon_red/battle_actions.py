@@ -125,6 +125,8 @@ def _drain_turn(emu: Emulator, *, max_advance: int, done) -> None:
             return
         if battle.fight_menu_showing(emu) and menus.menu_open(emu):
             return
+        if menus.handle_nickname(emu):      # after a catch: answer NO, never type "AAAAAAAAAA"
+            continue
         _press(emu, GameButton.A, 30)
 
 
@@ -228,6 +230,35 @@ def use_item(emu: Emulator, item_name: str, *, max_advance: int = 30) -> dict:
         "active_hp_before": hp_before,
         "active_hp_after": active_hp(),
     }
+
+
+WPLAYERMONNUMBER = 0xCC2F   # wPlayerMonNumber: party index of the Pokémon currently in battle
+
+
+def active_party_index(emu: Emulator) -> int:
+    return emu.read_memory(WPLAYERMONNUMBER)
+
+
+def switch_to(emu: Emulator, slot: int, *, max_advance: int = 30) -> dict:
+    """Voluntarily switch the battling Pokémon to party ``slot``: FIGHT menu -> PKMN -> the slot ->
+    SWITCH, then advance the turn (the enemy gets its move on the incoming Pokémon). Verified from RAM
+    (wPlayerMonNumber). Used for switch-training: the member that was sent out still shares the EXP."""
+    if not battle.in_battle(emu):
+        return {"ok": False, "reason": "not in battle"}
+    before = active_party_index(emu)
+    if before == slot:
+        return {"ok": False, "reason": "already out"}
+    if not _ensure_fight_menu(emu):
+        return {"ok": False, "reason": "battle menu did not open"}
+    _goto_battle_option(emu, "PKMN")
+    _press(emu, GameButton.A, 40)
+    battle.pick_party_slot(emu, slot)
+    _drain_turn(emu, max_advance=max_advance, done=lambda e: False)
+    after = active_party_index(emu)
+    if after != slot and battle.in_battle(emu) and not battle.fight_menu_showing(emu):
+        battle.resolve_switch_screen(emu)       # never leave the party screen up
+    return {"ok": after == slot, "from": before, "to": active_party_index(emu),
+            "battle_over": not battle.in_battle(emu)}
 
 
 def run(emu: Emulator, *, max_advance: int = 20) -> dict:

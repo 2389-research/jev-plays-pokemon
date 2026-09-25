@@ -1,0 +1,2595 @@
+{
+"0": [
+{
+"name": "sign (oakslab sign)",
+"x": 13,
+"y": 13,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (sign)",
+"x": 7,
+"y": 9,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (playershouse sign)",
+"x": 3,
+"y": 5,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (rivalshouse sign)",
+"x": 11,
+"y": 5,
+"kind": "sign",
+"face": null
+}
+],
+"1": [
+{
+"name": "sign (sign)",
+"x": 17,
+"y": 17,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (trainer tips1)",
+"x": 19,
+"y": 1,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (trainer tips2)",
+"x": 21,
+"y": 29,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (mart sign)",
+"x": 30,
+"y": 19,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (pokecenter sign)",
+"x": 24,
+"y": 25,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (gym sign)",
+"x": 27,
+"y": 7,
+"kind": "sign",
+"face": null
+}
+],
+"2": [
+{
+"name": "sign (trainer tips)",
+"x": 19,
+"y": 29,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (police notice sign)",
+"x": 33,
+"y": 19,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (mart sign)",
+"x": 24,
+"y": 17,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (pokecenter sign)",
+"x": 14,
+"y": 25,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (museum sign)",
+"x": 15,
+"y": 9,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (gym sign)",
+"x": 11,
+"y": 17,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (sign)",
+"x": 25,
+"y": 23,
+"kind": "sign",
+"face": null
+}
+],
+"3": [
+{
+"name": "sign (sign)",
+"x": 23,
+"y": 19,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (trainer tips)",
+"x": 17,
+"y": 29,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (mart sign)",
+"x": 26,
+"y": 25,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (pokecenter sign)",
+"x": 20,
+"y": 17,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (bikeshop sign)",
+"x": 11,
+"y": 25,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (gym sign)",
+"x": 27,
+"y": 21,
+"kind": "sign",
+"face": null
+}
+],
+"4": [
+{
+"name": "sign (sign)",
+"x": 11,
+"y": 9,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (silph scope sign)",
+"x": 9,
+"y": 3,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (mart sign)",
+"x": 16,
+"y": 13,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (pokecenter sign)",
+"x": 4,
+"y": 5,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (pokemon house sign)",
+"x": 5,
+"y": 9,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (pokemon tower sign)",
+"x": 17,
+"y": 7,
+"kind": "sign",
+"face": null
+}
+],
+"5": [
+{
+"name": "sign (sign)",
+"x": 27,
+"y": 3,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (notice sign)",
+"x": 37,
+"y": 13,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (mart sign)",
+"x": 24,
+"y": 13,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (pokecenter sign)",
+"x": 12,
+"y": 3,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (pokemon fan club sign)",
+"x": 7,
+"y": 13,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (gym sign)",
+"x": 7,
+"y": 19,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (harbor sign)",
+"x": 29,
+"y": 15,
+"kind": "sign",
+"face": null
+}
+],
+"6": [
+{
+"name": "sign (trainer tips1)",
+"x": 27,
+"y": 15,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (sign)",
+"x": 19,
+"y": 15,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (pokecenter sign)",
+"x": 42,
+"y": 9,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (gym sign)",
+"x": 13,
+"y": 29,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (mansion sign)",
+"x": 21,
+"y": 9,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (deptstore sign)",
+"x": 12,
+"y": 13,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (trainer tips2)",
+"x": 39,
+"y": 21,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (prizeexchange sign)",
+"x": 33,
+"y": 21,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (gamecorner sign)",
+"x": 27,
+"y": 21,
+"kind": "sign",
+"face": null
+}
+],
+"7": [
+{
+"name": "sign (sign1)",
+"x": 15,
+"y": 23,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (sign2)",
+"x": 25,
+"y": 15,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (safari game sign)",
+"x": 17,
+"y": 5,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (mart sign)",
+"x": 6,
+"y": 13,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (pokecenter sign)",
+"x": 20,
+"y": 27,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (wardens home sign)",
+"x": 27,
+"y": 29,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (safari zone sign)",
+"x": 21,
+"y": 15,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (gym sign)",
+"x": 5,
+"y": 29,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (chansey sign)",
+"x": 33,
+"y": 7,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (voltorb sign)",
+"x": 27,
+"y": 7,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (kangaskhan sign)",
+"x": 13,
+"y": 7,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (slowpoke sign)",
+"x": 31,
+"y": 13,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (lapras sign)",
+"x": 13,
+"y": 15,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (fossil sign)",
+"x": 7,
+"y": 7,
+"kind": "sign",
+"face": null
+}
+],
+"8": [
+{
+"name": "sign (sign)",
+"x": 9,
+"y": 5,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (mart sign)",
+"x": 16,
+"y": 11,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (pokecenter sign)",
+"x": 12,
+"y": 11,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (pokemonlab sign)",
+"x": 9,
+"y": 11,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (gym sign)",
+"x": 13,
+"y": 3,
+"kind": "sign",
+"face": null
+}
+],
+"9": [
+{
+"name": "sign",
+"x": 11,
+"y": 13,
+"kind": "object",
+"face": null
+}
+],
+"10": [
+{
+"name": "sign (sign)",
+"x": 17,
+"y": 5,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (fighting dojo sign)",
+"x": 27,
+"y": 5,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (gym sign)",
+"x": 35,
+"y": 5,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (mart sign)",
+"x": 26,
+"y": 11,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (trainer tips1)",
+"x": 39,
+"y": 19,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (trainer tips2)",
+"x": 5,
+"y": 21,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (silph co sign)",
+"x": 15,
+"y": 21,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (pokecenter sign)",
+"x": 10,
+"y": 29,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (mr psychics house sign)",
+"x": 27,
+"y": 29,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (silph co latest product sign)",
+"x": 1,
+"y": 19,
+"kind": "sign",
+"face": null
+}
+],
+"12": [
+{
+"name": "sign (sign)",
+"x": 9,
+"y": 27,
+"kind": "sign",
+"face": null
+}
+],
+"13": [
+{
+"name": "sign (sign)",
+"x": 5,
+"y": 65,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (digletts cave sign)",
+"x": 11,
+"y": 11,
+"kind": "sign",
+"face": null
+}
+],
+"14": [
+{
+"name": "sign (sign)",
+"x": 59,
+"y": 9,
+"kind": "sign",
+"face": null
+}
+],
+"15": [
+{
+"name": "sign (pokecenter sign)",
+"x": 12,
+"y": 5,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (mt moon sign)",
+"x": 17,
+"y": 7,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (sign)",
+"x": 27,
+"y": 7,
+"kind": "sign",
+"face": null
+}
+],
+"16": [
+{
+"name": "sign (underground path sign)",
+"x": 17,
+"y": 29,
+"kind": "sign",
+"face": null
+}
+],
+"17": [
+{
+"name": "sign (underground path sign)",
+"x": 19,
+"y": 15,
+"kind": "sign",
+"face": null
+}
+],
+"18": [
+{
+"name": "sign (underground path sign)",
+"x": 3,
+"y": 13,
+"kind": "sign",
+"face": null
+}
+],
+"19": [
+{
+"name": "sign (underground sign)",
+"x": 17,
+"y": 3,
+"kind": "sign",
+"face": null
+}
+],
+"20": [
+{
+"name": "sign (sign)",
+"x": 25,
+"y": 7,
+"kind": "sign",
+"face": null
+}
+],
+"21": [
+{
+"name": "sign (rocktunnel north sign)",
+"x": 7,
+"y": 19,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (pokecenter sign)",
+"x": 12,
+"y": 19,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (rocktunnel south sign)",
+"x": 9,
+"y": 55,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (powerplant sign)",
+"x": 5,
+"y": 41,
+"kind": "sign",
+"face": null
+}
+],
+"22": [
+{
+"name": "sign (diglettscave sign)",
+"x": 1,
+"y": 5,
+"kind": "sign",
+"face": null
+}
+],
+"23": [
+{
+"name": "sign (sign)",
+"x": 13,
+"y": 13,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (sport fishing sign)",
+"x": 11,
+"y": 63,
+"kind": "sign",
+"face": null
+}
+],
+"24": [
+{
+"name": "sign (trainer tips1)",
+"x": 15,
+"y": 13,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (trainer tips2)",
+"x": 33,
+"y": 5,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (sign)",
+"x": 31,
+"y": 11,
+"kind": "sign",
+"face": null
+}
+],
+"25": [
+{
+"name": "sign (sign)",
+"x": 17,
+"y": 13,
+"kind": "sign",
+"face": null
+}
+],
+"26": [
+{
+"name": "sign (sign)",
+"x": 39,
+"y": 9,
+"kind": "sign",
+"face": null
+}
+],
+"27": [
+{
+"name": "sign (cycling road sign)",
+"x": 27,
+"y": 11,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (sign)",
+"x": 5,
+"y": 17,
+"kind": "sign",
+"face": null
+}
+],
+"28": [
+{
+"name": "sign (notice sign1)",
+"x": 9,
+"y": 51,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (trainer tips1)",
+"x": 9,
+"y": 63,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (trainer tips2)",
+"x": 9,
+"y": 75,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (sign)",
+"x": 9,
+"y": 87,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (notice sign2)",
+"x": 9,
+"y": 111,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (cycling road ends sign)",
+"x": 9,
+"y": 141,
+"kind": "sign",
+"face": null
+}
+],
+"29": [
+{
+"name": "sign (sign)",
+"x": 43,
+"y": 7,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (cycling road sign)",
+"x": 33,
+"y": 5,
+"kind": "sign",
+"face": null
+}
+],
+"30": [
+{
+"name": "sign (sign)",
+"x": 11,
+"y": 9,
+"kind": "sign",
+"face": null
+}
+],
+"31": [
+{
+"name": "sign (seafoam islands west sign)",
+"x": 51,
+"y": 7,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (seafoam islands east sign)",
+"x": 57,
+"y": 11,
+"kind": "sign",
+"face": null
+}
+],
+"33": [
+{
+"name": "sign (pokemon league sign)",
+"x": 7,
+"y": 11,
+"kind": "sign",
+"face": null
+}
+],
+"34": [
+{
+"name": "sign (victory road gate sign)",
+"x": 3,
+"y": 33,
+"kind": "sign",
+"face": null
+}
+],
+"36": [
+{
+"name": "sign (bill sign)",
+"x": 43,
+"y": 3,
+"kind": "sign",
+"face": null
+}
+],
+"37": [
+{
+"name": "sign (tv)",
+"x": 3,
+"y": 1,
+"kind": "sign",
+"face": null
+}
+],
+"38": [
+{
+"name": "PC",
+"x": 0,
+"y": 1,
+"kind": "object",
+"face": null
+},
+{
+"name": "SNES",
+"x": 3,
+"y": 5,
+"kind": "object",
+"face": null
+}
+],
+"39": [
+{
+"name": "bookcase",
+"x": 0,
+"y": 1,
+"kind": "object",
+"face": null
+},
+{
+"name": "bookcase",
+"x": 1,
+"y": 1,
+"kind": "object",
+"face": null
+},
+{
+"name": "bookcase",
+"x": 7,
+"y": 1,
+"kind": "object",
+"face": null
+}
+],
+"40": [
+{
+"name": "poster",
+"x": 4,
+"y": 0,
+"kind": "object",
+"face": null
+},
+{
+"name": "poster",
+"x": 5,
+"y": 0,
+"kind": "object",
+"face": null
+},
+{
+"name": "PC (email)",
+"x": 0,
+"y": 1,
+"kind": "object",
+"face": null
+},
+{
+"name": "PC (email)",
+"x": 1,
+"y": 1,
+"kind": "object",
+"face": null
+}
+],
+"41": [
+{
+"name": "bench",
+"x": 0,
+"y": 4,
+"kind": "object",
+"face": null
+},
+{
+"name": "PC",
+"x": 13,
+"y": 3,
+"kind": "object",
+"face": null
+}
+],
+"43": [
+{
+"name": "viridian school notebook",
+"x": 3,
+"y": 4,
+"kind": "object",
+"face": null
+},
+{
+"name": "viridian school blackboard",
+"x": 3,
+"y": 0,
+"kind": "object",
+"face": null
+}
+],
+"45": [
+{
+"name": "gym statue",
+"x": 15,
+"y": 15,
+"kind": "object",
+"face": null
+},
+{
+"name": "gym statue",
+"x": 18,
+"y": 15,
+"kind": "object",
+"face": null
+}
+],
+"51": [
+{
+"name": "sign (trainer tips1)",
+"x": 24,
+"y": 40,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (use antidote sign)",
+"x": 16,
+"y": 32,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (trainer tips2)",
+"x": 26,
+"y": 17,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (trainer tips3)",
+"x": 4,
+"y": 24,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (trainer tips4)",
+"x": 18,
+"y": 45,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (leaving sign)",
+"x": 2,
+"y": 1,
+"kind": "sign",
+"face": null
+}
+],
+"52": [
+{
+"name": "fossil display",
+"x": 2,
+"y": 3,
+"kind": "object",
+"face": null
+},
+{
+"name": "fossil display",
+"x": 2,
+"y": 6,
+"kind": "object",
+"face": null
+}
+],
+"53": [
+{
+"name": "sign (space shuttle sign)",
+"x": 11,
+"y": 2,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (moon stone sign)",
+"x": 2,
+"y": 5,
+"kind": "sign",
+"face": null
+}
+],
+"54": [
+{
+"name": "gym statue",
+"x": 3,
+"y": 10,
+"kind": "object",
+"face": null
+},
+{
+"name": "gym statue",
+"x": 6,
+"y": 10,
+"kind": "object",
+"face": null
+}
+],
+"58": [
+{
+"name": "bench",
+"x": 0,
+"y": 4,
+"kind": "object",
+"face": null
+},
+{
+"name": "PC",
+"x": 13,
+"y": 3,
+"kind": "object",
+"face": null
+}
+],
+"59": [
+{
+"name": "sign (beware zubat sign)",
+"x": 15,
+"y": 23,
+"kind": "sign",
+"face": null
+}
+],
+"62": [
+{
+"name": "sign (wall hole)",
+"x": 3,
+"y": 0,
+"kind": "sign",
+"face": null
+}
+],
+"64": [
+{
+"name": "bench",
+"x": 0,
+"y": 4,
+"kind": "object",
+"face": null
+},
+{
+"name": "PC",
+"x": 13,
+"y": 3,
+"kind": "object",
+"face": null
+}
+],
+"65": [
+{
+"name": "gym statue",
+"x": 3,
+"y": 11,
+"kind": "object",
+"face": null
+},
+{
+"name": "gym statue",
+"x": 6,
+"y": 11,
+"kind": "object",
+"face": null
+}
+],
+"66": [
+{
+"name": "bicycle",
+"x": 1,
+"y": 0,
+"kind": "object",
+"face": null
+},
+{
+"name": "bicycle",
+"x": 2,
+"y": 1,
+"kind": "object",
+"face": null
+},
+{
+"name": "bicycle",
+"x": 1,
+"y": 2,
+"kind": "object",
+"face": null
+},
+{
+"name": "bicycle",
+"x": 3,
+"y": 2,
+"kind": "object",
+"face": null
+},
+{
+"name": "bicycle",
+"x": 0,
+"y": 4,
+"kind": "object",
+"face": null
+},
+{
+"name": "bicycle",
+"x": 1,
+"y": 5,
+"kind": "object",
+"face": null
+}
+],
+"68": [
+{
+"name": "bench",
+"x": 0,
+"y": 4,
+"kind": "object",
+"face": null
+},
+{
+"name": "PC",
+"x": 13,
+"y": 3,
+"kind": "object",
+"face": null
+}
+],
+"81": [
+{
+"name": "bench",
+"x": 0,
+"y": 4,
+"kind": "object",
+"face": null
+},
+{
+"name": "PC",
+"x": 13,
+"y": 3,
+"kind": "object",
+"face": null
+}
+],
+"82": [
+{
+"name": "sign (sign)",
+"x": 11,
+"y": 29,
+"kind": "sign",
+"face": null
+}
+],
+"86": [
+{
+"name": "sign (left binoculars)",
+"x": 1,
+"y": 2,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (right binoculars)",
+"x": 6,
+"y": 2,
+"kind": "sign",
+"face": null
+}
+],
+"88": [
+{
+"name": "Bill's PC (runs the Cell Separator teleporter machine)",
+"x": 1,
+"y": 4,
+"kind": "object",
+"face": "north"
+}
+],
+"89": [
+{
+"name": "PC",
+"x": 13,
+"y": 3,
+"kind": "object",
+"face": null
+},
+{
+"name": "bench",
+"x": 0,
+"y": 4,
+"kind": "object",
+"face": null
+}
+],
+"90": [
+{
+"name": "sign (sign 1)",
+"x": 1,
+"y": 0,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (sign 2)",
+"x": 6,
+"y": 0,
+"kind": "sign",
+"face": null
+}
+],
+"92": [
+{
+"name": "gym statue",
+"x": 3,
+"y": 14,
+"kind": "object",
+"face": null
+},
+{
+"name": "gym statue",
+"x": 6,
+"y": 14,
+"kind": "object",
+"face": null
+},
+{
+"name": "trash can",
+"x": 6,
+"y": 1,
+"kind": "object",
+"face": null
+},
+{
+"name": "trash can",
+"x": 1,
+"y": 7,
+"kind": "object",
+"face": null
+},
+{
+"name": "trash can",
+"x": 1,
+"y": 9,
+"kind": "object",
+"face": null
+},
+{
+"name": "trash can",
+"x": 1,
+"y": 11,
+"kind": "object",
+"face": null
+},
+{
+"name": "trash can",
+"x": 3,
+"y": 7,
+"kind": "object",
+"face": null
+},
+{
+"name": "trash can",
+"x": 3,
+"y": 9,
+"kind": "object",
+"face": null
+},
+{
+"name": "trash can",
+"x": 3,
+"y": 11,
+"kind": "object",
+"face": null
+},
+{
+"name": "trash can",
+"x": 5,
+"y": 7,
+"kind": "object",
+"face": null
+},
+{
+"name": "trash can",
+"x": 5,
+"y": 9,
+"kind": "object",
+"face": null
+},
+{
+"name": "trash can",
+"x": 5,
+"y": 11,
+"kind": "object",
+"face": null
+},
+{
+"name": "trash can",
+"x": 7,
+"y": 7,
+"kind": "object",
+"face": null
+},
+{
+"name": "trash can",
+"x": 7,
+"y": 9,
+"kind": "object",
+"face": null
+},
+{
+"name": "trash can",
+"x": 7,
+"y": 11,
+"kind": "object",
+"face": null
+},
+{
+"name": "trash can",
+"x": 9,
+"y": 7,
+"kind": "object",
+"face": null
+},
+{
+"name": "trash can",
+"x": 9,
+"y": 9,
+"kind": "object",
+"face": null
+},
+{
+"name": "trash can",
+"x": 9,
+"y": 11,
+"kind": "object",
+"face": null
+}
+],
+"100": [
+{
+"name": "trash can",
+"x": 13,
+"y": 5,
+"kind": "object",
+"face": null
+},
+{
+"name": "trash can",
+"x": 13,
+"y": 7,
+"kind": "object",
+"face": null
+}
+],
+"101": [
+{
+"name": "sign (trash)",
+"x": 4,
+"y": 1,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (seasick book)",
+"x": 1,
+"y": 2,
+"kind": "sign",
+"face": null
+}
+],
+"122": [
+{
+"name": "sign (directory sign)",
+"x": 11,
+"y": 4,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (current floor sign)",
+"x": 14,
+"y": 1,
+"kind": "sign",
+"face": null
+}
+],
+"123": [
+{
+"name": "sign (current floor sign)",
+"x": 14,
+"y": 1,
+"kind": "sign",
+"face": null
+}
+],
+"124": [
+{
+"name": "sign (snes1)",
+"x": 2,
+"y": 4,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (rpg)",
+"x": 3,
+"y": 4,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (snes2)",
+"x": 5,
+"y": 4,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (sports game)",
+"x": 6,
+"y": 4,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (snes3)",
+"x": 2,
+"y": 6,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (puzzle game)",
+"x": 3,
+"y": 6,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (snes4)",
+"x": 5,
+"y": 6,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (fighting game)",
+"x": 6,
+"y": 6,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (current floor sign)",
+"x": 14,
+"y": 1,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (pokemon poster1)",
+"x": 4,
+"y": 1,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (pokemon poster2)",
+"x": 6,
+"y": 1,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (pokemon poster3)",
+"x": 10,
+"y": 1,
+"kind": "sign",
+"face": null
+}
+],
+"125": [
+{
+"name": "sign (current floor sign)",
+"x": 14,
+"y": 1,
+"kind": "sign",
+"face": null
+}
+],
+"126": [
+{
+"name": "sign (vending machine1)",
+"x": 10,
+"y": 1,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (vending machine2)",
+"x": 11,
+"y": 1,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (vending machine3)",
+"x": 12,
+"y": 2,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (current floor sign)",
+"x": 13,
+"y": 2,
+"kind": "sign",
+"face": null
+}
+],
+"128": [
+{
+"name": "sign (managers suite sign)",
+"x": 4,
+"y": 9,
+"kind": "sign",
+"face": null
+}
+],
+"129": [
+{
+"name": "sign (meeting room sign)",
+"x": 4,
+"y": 9,
+"kind": "sign",
+"face": null
+},
+{
+"name": "PC",
+"x": 0,
+"y": 5,
+"kind": "object",
+"face": null
+}
+],
+"130": [
+{
+"name": "sign (game program pc)",
+"x": 1,
+"y": 3,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (playing game pc)",
+"x": 4,
+"y": 3,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (game script pc)",
+"x": 1,
+"y": 6,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (dev room sign)",
+"x": 4,
+"y": 9,
+"kind": "sign",
+"face": null
+}
+],
+"131": [
+{
+"name": "sign (house sign)",
+"x": 3,
+"y": 7,
+"kind": "sign",
+"face": null
+}
+],
+"132": [
+{
+"name": "link cable help",
+"x": 3,
+"y": 0,
+"kind": "object",
+"face": null
+},
+{
+"name": "link cable help",
+"x": 4,
+"y": 0,
+"kind": "object",
+"face": null
+},
+{
+"name": "t m notebook",
+"x": 3,
+"y": 4,
+"kind": "object",
+"face": null
+}
+],
+"133": [
+{
+"name": "bench",
+"x": 0,
+"y": 4,
+"kind": "object",
+"face": null
+},
+{
+"name": "PC",
+"x": 13,
+"y": 3,
+"kind": "object",
+"face": null
+}
+],
+"134": [
+{
+"name": "gym statue",
+"x": 3,
+"y": 15,
+"kind": "object",
+"face": null
+},
+{
+"name": "gym statue",
+"x": 6,
+"y": 15,
+"kind": "object",
+"face": null
+}
+],
+"135": [
+{
+"name": "sign (poster)",
+"x": 9,
+"y": 4,
+"kind": "sign",
+"face": null
+},
+{
+"name": "slot machine",
+"x": 18,
+"y": 15,
+"kind": "object",
+"face": null
+},
+{
+"name": "slot machine",
+"x": 18,
+"y": 14,
+"kind": "object",
+"face": null
+},
+{
+"name": "slot machine",
+"x": 18,
+"y": 13,
+"kind": "object",
+"face": null
+},
+{
+"name": "slot machine",
+"x": 18,
+"y": 12,
+"kind": "object",
+"face": null
+},
+{
+"name": "slot machine",
+"x": 18,
+"y": 11,
+"kind": "object",
+"face": null
+},
+{
+"name": "slot machine",
+"x": 18,
+"y": 10,
+"kind": "object",
+"face": null
+},
+{
+"name": "slot machine",
+"x": 13,
+"y": 10,
+"kind": "object",
+"face": null
+},
+{
+"name": "slot machine",
+"x": 13,
+"y": 11,
+"kind": "object",
+"face": null
+},
+{
+"name": "slot machine",
+"x": 13,
+"y": 12,
+"kind": "object",
+"face": null
+},
+{
+"name": "slot machine",
+"x": 13,
+"y": 13,
+"kind": "object",
+"face": null
+},
+{
+"name": "slot machine",
+"x": 13,
+"y": 14,
+"kind": "object",
+"face": null
+},
+{
+"name": "slot machine",
+"x": 13,
+"y": 15,
+"kind": "object",
+"face": null
+},
+{
+"name": "slot machine",
+"x": 12,
+"y": 15,
+"kind": "object",
+"face": null
+},
+{
+"name": "slot machine",
+"x": 12,
+"y": 14,
+"kind": "object",
+"face": null
+},
+{
+"name": "slot machine",
+"x": 12,
+"y": 13,
+"kind": "object",
+"face": null
+},
+{
+"name": "slot machine",
+"x": 12,
+"y": 12,
+"kind": "object",
+"face": null
+},
+{
+"name": "slot machine",
+"x": 12,
+"y": 11,
+"kind": "object",
+"face": null
+},
+{
+"name": "slot machine",
+"x": 12,
+"y": 10,
+"kind": "object",
+"face": null
+},
+{
+"name": "slot machine",
+"x": 7,
+"y": 10,
+"kind": "object",
+"face": null
+},
+{
+"name": "slot machine",
+"x": 7,
+"y": 11,
+"kind": "object",
+"face": null
+},
+{
+"name": "slot machine",
+"x": 7,
+"y": 12,
+"kind": "object",
+"face": null
+},
+{
+"name": "slot machine",
+"x": 7,
+"y": 13,
+"kind": "object",
+"face": null
+},
+{
+"name": "slot machine",
+"x": 7,
+"y": 14,
+"kind": "object",
+"face": null
+},
+{
+"name": "slot machine",
+"x": 7,
+"y": 15,
+"kind": "object",
+"face": null
+},
+{
+"name": "slot machine",
+"x": 6,
+"y": 15,
+"kind": "object",
+"face": null
+},
+{
+"name": "slot machine",
+"x": 6,
+"y": 14,
+"kind": "object",
+"face": null
+},
+{
+"name": "slot machine",
+"x": 6,
+"y": 13,
+"kind": "object",
+"face": null
+},
+{
+"name": "slot machine",
+"x": 6,
+"y": 12,
+"kind": "object",
+"face": null
+},
+{
+"name": "slot machine",
+"x": 6,
+"y": 11,
+"kind": "object",
+"face": null
+},
+{
+"name": "slot machine",
+"x": 6,
+"y": 10,
+"kind": "object",
+"face": null
+},
+{
+"name": "slot machine",
+"x": 1,
+"y": 10,
+"kind": "object",
+"face": null
+},
+{
+"name": "slot machine",
+"x": 1,
+"y": 11,
+"kind": "object",
+"face": null
+},
+{
+"name": "slot machine",
+"x": 1,
+"y": 12,
+"kind": "object",
+"face": null
+},
+{
+"name": "slot machine",
+"x": 1,
+"y": 13,
+"kind": "object",
+"face": null
+},
+{
+"name": "slot machine",
+"x": 1,
+"y": 14,
+"kind": "object",
+"face": null
+},
+{
+"name": "slot machine",
+"x": 1,
+"y": 15,
+"kind": "object",
+"face": null
+}
+],
+"136": [
+{
+"name": "sign (current floor sign)",
+"x": 14,
+"y": 1,
+"kind": "sign",
+"face": null
+}
+],
+"137": [
+{
+"name": "sign (prize vendor 1)",
+"x": 2,
+"y": 2,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (prize vendor 2)",
+"x": 4,
+"y": 2,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (prize vendor 3)",
+"x": 6,
+"y": 2,
+"kind": "sign",
+"face": null
+}
+],
+"140": [
+{
+"name": "PC",
+"x": 13,
+"y": 3,
+"kind": "object",
+"face": null
+},
+{
+"name": "bench",
+"x": 0,
+"y": 4,
+"kind": "object",
+"face": null
+}
+],
+"141": [
+{
+"name": "bench",
+"x": 0,
+"y": 4,
+"kind": "object",
+"face": null
+},
+{
+"name": "PC",
+"x": 13,
+"y": 3,
+"kind": "object",
+"face": null
+}
+],
+"149": [
+{
+"name": "magazines",
+"x": 0,
+"y": 1,
+"kind": "object",
+"face": null
+},
+{
+"name": "magazines",
+"x": 1,
+"y": 1,
+"kind": "object",
+"face": null
+},
+{
+"name": "magazines",
+"x": 7,
+"y": 1,
+"kind": "object",
+"face": null
+}
+],
+"154": [
+{
+"name": "PC",
+"x": 13,
+"y": 3,
+"kind": "object",
+"face": null
+},
+{
+"name": "bench",
+"x": 0,
+"y": 4,
+"kind": "object",
+"face": null
+}
+],
+"155": [
+{
+"name": "sign (display left)",
+"x": 4,
+"y": 3,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (display right)",
+"x": 5,
+"y": 3,
+"kind": "sign",
+"face": null
+}
+],
+"157": [
+{
+"name": "gym statue",
+"x": 3,
+"y": 15,
+"kind": "object",
+"face": null
+},
+{
+"name": "gym statue",
+"x": 6,
+"y": 15,
+"kind": "object",
+"face": null
+}
+],
+"162": [
+{
+"name": "sign (boulders sign)",
+"x": 9,
+"y": 15,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (danger sign)",
+"x": 23,
+"y": 1,
+"kind": "sign",
+"face": null
+}
+],
+"165": [
+{
+"name": "mansion1 script_ switches",
+"x": 2,
+"y": 5,
+"kind": "object",
+"face": null
+}
+],
+"166": [
+{
+"name": "gym statue",
+"x": 17,
+"y": 13,
+"kind": "object",
+"face": null
+}
+],
+"167": [
+{
+"name": "sign (photo)",
+"x": 3,
+"y": 2,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (meeting room sign)",
+"x": 9,
+"y": 4,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (r and d sign)",
+"x": 13,
+"y": 4,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (testing room sign)",
+"x": 17,
+"y": 4,
+"kind": "sign",
+"face": null
+}
+],
+"169": [
+{
+"name": "sign (pc keyboard)",
+"x": 0,
+"y": 4,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (pc monitor)",
+"x": 1,
+"y": 4,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (amber pipe)",
+"x": 2,
+"y": 1,
+"kind": "sign",
+"face": null
+}
+],
+"170": [
+{
+"name": "PC",
+"x": 0,
+"y": 4,
+"kind": "object",
+"face": null
+},
+{
+"name": "PC",
+"x": 2,
+"y": 4,
+"kind": "object",
+"face": null
+}
+],
+"171": [
+{
+"name": "bench",
+"x": 0,
+"y": 4,
+"kind": "object",
+"face": null
+},
+{
+"name": "PC",
+"x": 13,
+"y": 3,
+"kind": "object",
+"face": null
+}
+],
+"174": [
+{
+"name": "PC",
+"x": 15,
+"y": 7,
+"kind": "object",
+"face": null
+}
+],
+"176": [
+{
+"name": "sign (snes)",
+"x": 3,
+"y": 5,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (pc)",
+"x": 0,
+"y": 1,
+"kind": "sign",
+"face": null
+}
+],
+"177": [
+{
+"name": "dojo scroll",
+"x": 3,
+"y": 9,
+"kind": "object",
+"face": null
+},
+{
+"name": "dojo scroll",
+"x": 6,
+"y": 9,
+"kind": "object",
+"face": null
+},
+{
+"name": "fighting dojo2",
+"x": 4,
+"y": 0,
+"kind": "object",
+"face": null
+},
+{
+"name": "fighting dojo3",
+"x": 5,
+"y": 0,
+"kind": "object",
+"face": null
+}
+],
+"178": [
+{
+"name": "gym statue",
+"x": 9,
+"y": 15,
+"kind": "object",
+"face": null
+}
+],
+"182": [
+{
+"name": "bench",
+"x": 0,
+"y": 4,
+"kind": "object",
+"face": null
+},
+{
+"name": "PC",
+"x": 13,
+"y": 3,
+"kind": "object",
+"face": null
+}
+],
+"185": [
+{
+"name": "sign (binoculars)",
+"x": 6,
+"y": 2,
+"kind": "sign",
+"face": null
+},
+{
+"name": "route15 gate left binoculars",
+"x": 1,
+"y": 2,
+"kind": "object",
+"face": null
+}
+],
+"187": [
+{
+"name": "sign (left binoculars)",
+"x": 1,
+"y": 2,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (right binoculars)",
+"x": 6,
+"y": 2,
+"kind": "sign",
+"face": null
+}
+],
+"191": [
+{
+"name": "sign (left binoculars)",
+"x": 1,
+"y": 2,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (right binoculars)",
+"x": 6,
+"y": 2,
+"kind": "sign",
+"face": null
+}
+],
+"195": [
+{
+"name": "sign (left binoculars)",
+"x": 1,
+"y": 2,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (right binoculars)",
+"x": 6,
+"y": 2,
+"kind": "sign",
+"face": null
+}
+],
+"214": [
+{
+"name": "mansion2 script_ switches",
+"x": 2,
+"y": 11,
+"kind": "object",
+"face": null
+}
+],
+"215": [
+{
+"name": "mansion3 script_ switches",
+"x": 10,
+"y": 5,
+"kind": "object",
+"face": null
+}
+],
+"216": [
+{
+"name": "mansion4 script_ switches",
+"x": 20,
+"y": 3,
+"kind": "object",
+"face": null
+},
+{
+"name": "mansion4 script_ switches",
+"x": 18,
+"y": 25,
+"kind": "object",
+"face": null
+}
+],
+"217": [
+{
+"name": "sign (rest house sign)",
+"x": 26,
+"y": 10,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (trainer tips)",
+"x": 6,
+"y": 4,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (sign)",
+"x": 5,
+"y": 23,
+"kind": "sign",
+"face": null
+}
+],
+"218": [
+{
+"name": "sign (rest house sign)",
+"x": 36,
+"y": 4,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (trainer tips 1)",
+"x": 4,
+"y": 25,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (sign)",
+"x": 13,
+"y": 31,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (trainer tips 2)",
+"x": 19,
+"y": 33,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (trainer tips 3)",
+"x": 26,
+"y": 28,
+"kind": "sign",
+"face": null
+}
+],
+"219": [
+{
+"name": "sign (rest house sign)",
+"x": 12,
+"y": 12,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (find wardens teeth sign)",
+"x": 17,
+"y": 3,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (trainer tips)",
+"x": 26,
+"y": 4,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (sign)",
+"x": 24,
+"y": 22,
+"kind": "sign",
+"face": null
+}
+],
+"220": [
+{
+"name": "sign (rest house sign)",
+"x": 18,
+"y": 20,
+"kind": "sign",
+"face": null
+},
+{
+"name": "sign (trainer tips sign)",
+"x": 14,
+"y": 22,
+"kind": "sign",
+"face": null
+}
+],
+"223": [
+{
+"name": "bench",
+"x": 0,
+"y": 4,
+"kind": "object",
+"face": null
+},
+{
+"name": "PC",
+"x": 13,
+"y": 3,
+"kind": "object",
+"face": null
+}
+],
+"224": [
+{
+"name": "bench",
+"x": 0,
+"y": 4,
+"kind": "object",
+"face": null
+},
+{
+"name": "PC",
+"x": 13,
+"y": 3,
+"kind": "object",
+"face": null
+}
+],
+"225": [
+{
+"name": "bench",
+"x": 0,
+"y": 4,
+"kind": "object",
+"face": null
+},
+{
+"name": "PC",
+"x": 13,
+"y": 3,
+"kind": "object",
+"face": null
+}
+],
+"235": [
+{
+"name": "PC",
+"x": 10,
+"y": 12,
+"kind": "object",
+"face": null
+}
+],
+"236": [
+{
+"name": "sign (elevator)",
+"x": 3,
+"y": 0,
+"kind": "sign",
+"face": null
+}
+]
+}

@@ -107,3 +107,14 @@ def test_reconcile_carries_kind_default_action():
     assert out[0].kind == "action"
     out2 = reconcile_quests([], {"add": [{"map": 2, "kind": "travel"}]}, next_id=lambda: "q2")
     assert out2[0].kind == "travel"
+
+
+def test_the_active_step_is_removable_only_with_an_approved_interrupt():
+    from pokemon_agent.agent.quest_reconciler import QuestStep, reconcile_quests
+    cur = [QuestStep(id="q1", map=42, talk=True, who="clerk", done_when="has_item:Potion", status="active")]
+    add = [{"kind": "action", "map": 41, "talk": True, "who": "the Nurse", "done_when": "hp_frac>=1.0"}]
+    kept = reconcile_quests(cur, {"add": add, "remove": ["q1"]}, next_id=lambda: "q2")
+    assert [s.id for s in kept] == ["q1", "q2"]
+    cur[0].status = "active"
+    swapped = reconcile_quests(cur, {"add": add, "remove": ["q1"]}, next_id=lambda: "q3", allow_active_removal=True)
+    assert [s.id for s in swapped] == ["q3"]

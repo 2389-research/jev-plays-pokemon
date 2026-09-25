@@ -27,7 +27,7 @@ import operator
 
 from ...emulator.interface import Emulator
 from . import needs
-from .game_state import WNUMBAGITEMS, WBAGITEMS, WPARTYCOUNT, read_badges, read_money
+from .game_state import WNUMBAGITEMS, WBAGITEMS, WPARTYCOUNT, read_badges, read_money, read_party
 from .needs import WCURMAP, WISINBATTLE
 
 WPLAYERX = 0xD362
@@ -48,6 +48,23 @@ def _bag_item_ids(emu) -> set[int]:
     except Exception:
         pass
     return ids
+
+def _bag_item_qty(emu, item_id: int) -> int:
+    total = 0
+    try:
+        n = emu.read_memory(WNUMBAGITEMS)
+        if n > 20:
+            return 0
+        for i in range(n):
+            iid = emu.read_memory(WBAGITEMS + i * 2)
+            if iid == 0xFF:
+                break
+            if iid == item_id:
+                total += emu.read_memory(WBAGITEMS + i * 2 + 1)
+    except Exception:
+        pass
+    return total
+
 
 _OPS = {">=": operator.ge, "<=": operator.le, ">": operator.gt,
         "<": operator.lt, "==": operator.eq, "!=": operator.ne}
@@ -70,6 +87,21 @@ def _cmp(value: float, spec) -> bool:
     return value == spec
 
 
+def cut_tree_sites(map_id: int) -> set[tuple[int, int]]:
+    """Where the game's Cut trees stand on a map (scripts/gen_cut_trees.py)."""
+    import json
+    from functools import lru_cache
+    from pathlib import Path
+
+    @lru_cache(maxsize=1)
+    def _load():
+        try:
+            return json.loads((Path(__file__).with_name("cut_trees.json")).read_text())
+        except Exception:
+            return {}
+    return {(t["x"], t["y"]) for t in _load().get(str(int(map_id)), [])}
+
+
 def _clause(key: str, spec, emu: Emulator, memory=None) -> bool:
     if key == "on_map":
         return _cmp(emu.read_memory(WCURMAP), spec)
@@ -85,6 +117,15 @@ def _clause(key: str, spec, emu: Emulator, memory=None) -> bool:
         return _cmp(read_money(emu), spec)
     if key == "in_battle":
         return _cmp(1 if emu.read_memory(WISINBATTLE) else 0, spec)
+    if key == "tree_cut":
+        # spec = [map, x, y]: on that map, the Cut tree tile at (x, y) is gone (it regrows on reload,
+        # so this is only true while we're on the map having cut it)
+        from .map_reader import read_collision_map
+        mid, x, y = (int(v) for v in spec)
+        if (x, y) not in cut_tree_sites(mid):
+            return False                     # not a tree at all (runs/sleeves-east: "done" instantly)
+        coll = read_collision_map(emu) if emu.read_memory(WCURMAP) == mid else None
+        return bool(coll) and coll["terrain"].get((x, y)) not in (None, "cut_tree")
     if key == "has_item":
         # spec = item id (int): true when that item is in the bag (e.g. Oak's Parcel 0x46).
         try:
@@ -97,6 +138,23 @@ def _clause(key: str, spec, emu: Emulator, memory=None) -> bool:
             return int(spec) not in _bag_item_ids(emu)
         except (TypeError, ValueError):
             return False
+    if key == "member_level":
+        # spec = [nickname or species, N]: that party member reached level N (training one Pokemon)
+        try:
+            name, n = str(spec[0]).strip().lower(), int(spec[1])
+        except (TypeError, ValueError, IndexError):
+            return False
+        for m in read_party(emu):
+            if name in (str(m.get("nickname") or "").strip().lower(), str(m.get("species") or "").lower()):
+                return int(m.get("level") or 0) >= n
+        return False
+    if key == "item_count":
+        # spec = [item id, N]: at least N of that item in the bag (e.g. 5 Poke Balls bought)
+        try:
+            iid, n = int(spec[0]), int(spec[1])
+        except (TypeError, ValueError, IndexError):
+            return False
+        return _bag_item_qty(emu, iid) >= n
     if key == "talked_on_map":
         # spec = map id: true once we've had a real dialog with an NPC on that map (from
         # interaction memory) — the machine-checkable "did the talk_to step happen" signal.

@@ -146,6 +146,21 @@ class TypeSafeReasoner:
         self.wait_on_low_confidence = wait_on_low_confidence
         self.max_consecutive_waits = max_consecutive_waits
         self._low_conf_waits = 0
+        self.capture = None    # optional distillation Capture (mounted by the loop; §3)
+
+    def _cap_jev(self, layer, state, ans, confidence, latency_ms=0, extra=None) -> None:
+        """Best-effort per-decision capture for a Jev Choice (§3): records the calibrated
+        confidence + probabilities. Never raises / never changes behavior."""
+        cap = getattr(self, "capture", None)
+        if cap is None:
+            return
+        ex = {"probabilities": getattr(ans, "probabilities", None)}
+        if extra:
+            ex.update(extra)
+        cap.record(layer, model=getattr(self.client, "model", "typesafe"),
+                   input=state, output_raw=str(getattr(ans, "choice", None)),
+                   parsed={"choice": getattr(ans, "choice", None)},
+                   confidence=confidence, latency_ms=latency_ms, extra=ex)
 
     # --- reflection is generative: delegate or pass through --------------------
     def reflect(self, **kwargs) -> tuple[ReflectionPlan, int, dict]:
@@ -182,7 +197,7 @@ class TypeSafeReasoner:
         blocked_dirs = blocked_dirs or set()
         state = {
             "primary_goal": primary_goal,
-            "current_plan": plan.model_dump() if plan else None,
+            "current_plan": plan.prompt_view() if plan else None,   # goals yes, notepad no
             "player": player_desc,
             "game_state": game_state,
             "social_memory": social_memory,
@@ -272,6 +287,10 @@ class TypeSafeReasoner:
             reasoning=note,
             action=action,
         )
+        # capture the executor decision — parsed={"choice": raw model pick}; the EXECUTED choice can
+        # differ (SAYCAN option_bias re-rank / low-conf->wait gate), so surface it in extra for replay.
+        self._cap_jev("jev_action", state, ans, confidence, latency_ms=latency,
+                      extra={"executed": choice})
         return step, latency, usage
 
     # --- L3 PATHING via Jev: step-by-step direction choice toward a target tile ----
@@ -325,6 +344,7 @@ class TypeSafeReasoner:
         conf = float(getattr(ans, "confidence", 0.0) or 0.0)
         probs = getattr(ans, "probabilities", None)
         choice = ans.choice if isinstance(ans.choice, str) else ""
+        self._cap_jev("jev_path", state, ans, conf, latency_ms=latency)
         try:
             return Direction(choice[len("move_"):]), conf, probs
         except Exception:
@@ -368,6 +388,14 @@ class TypeSafeReasoner:
             choice = ans.choice if (ans is not None and isinstance(ans.choice, str)) else "no"
             conf = float(getattr(ans, "confidence", 0.0) or 0.0) if ans is not None else 0.0
             out[name] = (choice if choice in ("yes", "no") else "no", conf)
+        # jev_flow has TWO calibrated answers (dialogue + menu); record the combined result (§3).
+        cap = getattr(self, "capture", None)
+        if cap is not None:
+            cap.record("jev_flow", model=getattr(self.client, "model", "typesafe"),
+                       input=state, output_raw=str({k: v[0] for k, v in out.items()}),
+                       parsed={k: v[0] for k, v in out.items()},
+                       confidence=out.get("dialogue", (None, None))[1],
+                       extra={"dialogue": list(out["dialogue"]), "menu": list(out["menu"])})
         return out
 
     # --- Jev picks the ROUTING POLICY for a leg (a calibrated 1-of-N objective choice) ----
@@ -399,6 +427,7 @@ class TypeSafeReasoner:
         ans = resp.answers["pol"]
         conf = float(getattr(ans, "confidence", 0.0) or 0.0)
         pol = ans.choice if isinstance(ans.choice, str) and ans.choice in criteria else "shortest"
+        self._cap_jev("jev_policy", state, ans, conf)
         return pol, conf
 
     def choose_npc(self, *, objective, candidates):
@@ -416,11 +445,12 @@ class TypeSafeReasoner:
         state = {"task": "Pick the person to walk up to and talk to for the current objective.",
                  "objective": objective, "candidates": candidates}
         instr = ("Choose the ONE person who best fits OBJECTIVE — the specific NPC the plan needs "
-                 "(e.g. Professor Oak for a lab errand, a shop CLERK to buy/collect, the NURSE to heal). "
+                 "(e.g. the person an errand names, a shop CLERK to buy/collect, the NURSE to heal). "
                  "Prefer someone NOT already talked to unless the objective needs them again.")
         resp = self.client.system_one(state=state, questions={"npc": Choice(instructions=instr, criteria=criteria)})
         ans = resp.answers["npc"]
         conf = float(getattr(ans, "confidence", 0.0) or 0.0)
+        self._cap_jev("jev_npc", state, ans, conf, extra={"candidates": candidates})
         try:
             idx = int(ans.choice)
         except (TypeError, ValueError):

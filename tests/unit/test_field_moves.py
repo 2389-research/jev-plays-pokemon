@@ -183,3 +183,33 @@ def test_a_can_is_credited_not_the_person_standing_behind_it():
                                                         "facing": {"front_tile": [9, 9], "facing_sprite": gentleman}}))
     m = loop.heard.by_map[92]["messages"][-1]
     assert (m["speaker"], m["at"]) == ("trash can", [9, 9])
+
+
+# ---- scripted turn-backs are remembered (runs/sleeves-surge3: the thirsty Saffron guards) -----------
+def test_a_scripted_push_back_marks_the_portal_and_survives_leaving_by_another_door(monkeypatch):
+    loop, events = _loop()
+    loop.portals = type("PG", (), {
+        "portals": {"route5gate:warp1": {"id": "route5gate:warp1", "map": 70, "coord": [3, 5], "kind": "warp",
+                                          "dest_map": 16, "label": "Route5Gate south door"},
+                    "route5gate:warp3": {"id": "route5gate:warp3", "map": 70, "coord": [3, 0], "kind": "warp",
+                                         "dest_map": 16, "label": "Route5Gate north door"}},
+        "portals_on": lambda self, m: [p for p in self.portals.values() if p["map"] == m],
+    })()
+    loop._directive = Directive(intent=Intent.TRAVEL, target={"kind": "map", "map": 81}, success={"on_map": 81},
+                                quest_id="q1")
+    monkeypatch.setattr(loop, "_portal_next", lambda p, t: loop.portals.portals["route5gate:warp1"])
+    loop.heard.recent.append({"map": 70, "last_step": 10, "speaker": None,
+                              "text": "I'm on guard duty. Gee, I'm thirsty, though!"})
+    loop.session.step = 11
+    loop._pos_prev, loop._last_action_type = (70, 4, 3), "advance_dialog"
+    loop._target = {"kind": "tile", "x": 3, "y": 5, "portal": True}
+    loop._observe_pushback(SimpleNamespace(player=SimpleNamespace(x=4, y=2, map_id=70)))   # moved by the game
+    assert "route5gate:warp1" in loop.memory.blocked_portals
+    assert loop.memory.blocked_portals["route5gate:warp1"]["kind"] == "script" and "thirsty" in \
+        loop.memory.blocked_portals["route5gate:warp1"]["why"]
+    assert loop._target is None                                   # re-route now, not after a wedge
+    # our own step never counts
+    loop.memory.blocked_portals.clear()
+    loop._pos_prev, loop._last_action_type = (70, 4, 3), "move"
+    loop._observe_pushback(SimpleNamespace(player=SimpleNamespace(x=4, y=2, map_id=70)))
+    assert not loop.memory.blocked_portals

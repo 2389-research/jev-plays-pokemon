@@ -370,8 +370,15 @@ class ReasoningLoop:
                                 map_name=map_name(obs.player.map_id))
             self._wedge_maps.append(map_name(obs.player.map_id))
             if self.portals is not None:           # got through a portal we thought blocked: it isn't
+                # only the portal we actually came through (left from its tile): a gate's two door pairs
+                # both lead to Route 5, and leaving by the north doors must not clear the guarded south ones
+                prev = getattr(self, "_pos_prev", None)
+
+                def came_through(p):
+                    return (prev is not None and p.get("map") == prev[0] and p.get("dest_map") == obs.player.map_id
+                            and abs(p["coord"][0] - prev[1]) + abs(p["coord"][1] - prev[2]) <= 1)
                 for pid in [k for k in self.memory.blocked_portals
-                            if (self.portals.portals.get(k) or {}).get("dest_map") == obs.player.map_id]:
+                            if came_through(self.portals.portals.get(k) or {"coord": (-99, -99)})]:
                     self.memory.blocked_portals.pop(pid, None)
                     self.on_event("portal_unblocked", {"step": self.session.step, "portal": pid, "why": "went through"})
             if first and len(self._map_history) > 1:
@@ -384,6 +391,7 @@ class ReasoningLoop:
             self.memory.graph.observe_exits(obs.player.map_id, obs.exits)
         self._observe_heard(obs)
         self._observe_npcs(obs)
+        self._observe_pushback(obs)
         self._check_answer(obs)
         self._observe_progress(obs)
         if obs.game_state and obs.game_state.get("npcs"):
@@ -1981,7 +1989,10 @@ class ReasoningLoop:
         walk right up to (no sprite in the way), isn't blocked any more — drop it. runs/explore-live:
         the agent stood ON the tile a stale "blocked by a Guard at (27,12)" named, and still no route."""
         pg, emu = self.portals, self.controller.emu
-        mine = [(k, pg.portals[k]) for k in self.memory.blocked_portals if k in pg.portals]
+        # a portal a SCRIPT turned us back from (a guard) has a clear path by definition: walking up to it
+        # proves nothing — only a change of bag/badges (the gate signature) or the TTL retries it
+        mine = [(k, pg.portals[k]) for k, v in self.memory.blocked_portals.items()
+                if k in pg.portals and v.get("kind") != "script"]
         try:
             player = read_player(emu)
         except Exception:
@@ -2014,7 +2025,34 @@ class ReasoningLoop:
                 self.episode.record(self.session.step, "discovery", text=f"{p['label']} is reachable now")
                 self.on_event("portal_unblocked", {"step": self.session.step, "portal": k, "why": "path is clear"})
 
-    def _note_blocked_portal(self, player, xy, why: str) -> None:
+    def _observe_pushback(self, obs) -> None:
+        """The game moved the player without the agent moving (a text-advance or wait step), right after
+        something was said, AWAY from the portal it was heading for: a script turned it back (a thirsty
+        guard, a badge check). Remember that portal as blocked, with what was said, so routing stops
+        sending the agent back there (runs/sleeves-surge3: into Route 5 Gate 4x, pushed back each time)."""
+        p = obs.player
+        prev = getattr(self, "_pos_prev", None)
+        act = getattr(self, "_last_action_type", None)
+        self._pos_prev = (p.map_id, p.x, p.y) if p is not None else None
+        if p is None or prev is None or prev[0] != p.map_id or (prev[1], prev[2]) == (p.x, p.y):
+            return
+        if act not in ("advance_dialog", "wait", "press"):
+            return                                     # our own step (or unknown)
+        said = next((m for m in reversed(self.heard.recent)
+                     if m.get("map") == p.map_id and m["last_step"] >= self.session.step - 12), None)
+        d = self._directive
+        if said is None or d is None or d.intent != Intent.TRAVEL or d.target_map in (None, p.map_id):
+            return
+        portal = self._portal_next(p, d.target_map)
+        if portal is None:
+            return
+        px, py = portal["coord"]
+        if abs(px - p.x) + abs(py - p.y) <= abs(px - prev[1]) + abs(py - prev[2]):
+            return                                     # moved toward it: not a turn-back
+        why = f'turned back by {said.get("speaker") or "someone"}: "{said["text"][:140]}"'
+        self._note_blocked_portal(p, portal["coord"], why, kind="script")
+
+    def _note_blocked_portal(self, player, xy, why: str, kind: str = "path") -> None:
         """The agent couldn't get through the portal at ``xy`` on this map: remember it (with what it
         saw / heard) so routing tries another way, and so L1 is told."""
         pg = self.portals
@@ -2025,7 +2063,10 @@ class ReasoningLoop:
         if portal is None:
             return
         self.memory.blocked_portals[portal["id"]] = {"step": self.session.step, "why": why[:200],
-                                                     "sig": self._gate_sig()}
+                                                     "sig": self._gate_sig(), "kind": kind}
+        t = self._target
+        if isinstance(t, dict) and t.get("kind") == "tile" and (t.get("x"), t.get("y")) == tuple(portal["coord"]):
+            self._target = None                  # aimed at the portal we just learned is closed: re-route now
         self.episode.record(self.session.step, "portal_blocked", text=f"{portal['label']}: {why[:160]}")
         self.on_event("portal_blocked", {"step": self.session.step, "portal": portal["id"], "why": why[:200]})
 
@@ -3221,6 +3262,7 @@ class ReasoningLoop:
     def _finish(self, obs, rstep, result, latency, usage, shot) -> ActionResult:
         from ..games.pokemon_red.game_state import read_screen_text
         _, caused_dialog = read_screen_text(self.builder.emu)
+        self._last_action_type = getattr(rstep.action, "type", None)     # for _observe_pushback
         self.interactions.record_action(self.session.step, obs.player, rstep.action, caused_dialog)
         # NOTE: no bump-discovery of walls. Walkability is RAM ground truth (the collision map,
         # which already includes walls/signs/trees/ledges as non-walkable); NPCs come from sprite

@@ -243,3 +243,27 @@ def test_cut_criteria_only_count_real_trees():
     assert not ok and "no Cut tree at (15,18)" in err and "(19,28)" in err  # Vermilion's tree, asked in Cerulean
     assert validate_step({"kind": "action", "map": 20, "talk": True, "who": "Cut tree at (5,8)",
                           "done_when": "cut:5,8"})[0]
+
+
+def test_a_disabled_move_is_not_chosen():
+    """runs/sleeves-rocktunnel: a Slowpoke Disabled Dig (wPlayerDisabledMove 0xD06D = 0x37: slot 3, 7 turns)
+    and the battle layer picked Dig ~47 times ("The move is disabled!")."""
+    from pokemon_agent.games.pokemon_red import battle
+
+    class Emu:
+        mem = {0xD06D: 0x37, 0xD02D: 7, 0xD02E: 25, 0xD02F: 7, 0xD030: 25}
+
+        def read_memory(self, a, bank=None):
+            return self.mem.get(a, 0)
+    emu = Emu()
+    import pokemon_agent.games.pokemon_red.battle as b
+    orig = b.move_count
+    b.move_count = lambda e: 4
+    try:
+        assert battle.disabled_slot(emu) == 2
+        assert battle.selectable_pp(emu) == [7, 25, 0, 25]
+        assert battle.usable_slot(battle.selectable_pp(emu), 2) != 2
+        emu.mem[0xD06D] = 0
+        assert battle.disabled_slot(emu) is None
+    finally:
+        b.move_count = orig

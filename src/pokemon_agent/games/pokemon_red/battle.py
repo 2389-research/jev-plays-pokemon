@@ -64,6 +64,28 @@ def active_pp(emu: Emulator) -> list[int]:
     return [emu.read_memory(ACTIVE_PP + i) & 0x3F for i in range(move_count(emu))]
 
 
+PLAYER_DISABLED_MOVE = 0xD06D   # wPlayerDisabledMove: high nibble = disabled slot (1-4), low = turns left
+
+
+def disabled_slot(emu: Emulator) -> int | None:
+    """The active mon's move slot (0-based) the opponent Disabled, or None (runs/sleeves-rocktunnel: a
+    Slowpoke disabled Dig and the battle layer picked it ~47 times: "The move is disabled!")."""
+    try:
+        hi = emu.read_memory(PLAYER_DISABLED_MOVE) >> 4
+    except Exception:
+        return None
+    return hi - 1 if hi else None
+
+
+def selectable_pp(emu: Emulator) -> list[int]:
+    """active_pp with a move the game will refuse (Disabled) counted as 0 — for choosing, not for display."""
+    pp = active_pp(emu)
+    d = disabled_slot(emu)
+    if d is not None and 0 <= d < len(pp):
+        pp[d] = 0
+    return pp
+
+
 ACTIVE_TYPES = 0xD019      # wBattleMonType1/2
 ENEMY_TYPES = 0xCFEA       # wEnemyMonType1/2
 
@@ -270,7 +292,7 @@ def use_move(emu: Emulator, slot: int = 0, *, max_advance: int = 28) -> dict:
     if n == 0:
         return {"ok": False, "reason": "no moves"}
     slot = max(0, min(slot, n - 1))
-    slot = usable_slot(active_pp(emu), slot)   # never select a move the game will refuse (0 PP)
+    slot = usable_slot(selectable_pp(emu), slot)   # never select a move the game will refuse (0 PP / Disabled)
     before = enemy_hp(emu)
     move_name = active_moves(emu)[slot]
 

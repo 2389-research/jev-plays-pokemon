@@ -134,7 +134,8 @@ def choose_move(client, emu: Emulator, *, type_knowledge: list[str] | None = Non
     if not moves:
         return 0, 0.0
     pp = battle.active_pp(emu)
-    usable = [i for i in range(len(moves)) if i >= len(pp) or pp[i] > 0]
+    can = battle.selectable_pp(emu)            # a Disabled move counts as unusable
+    usable = [i for i in range(len(moves)) if i >= len(can) or can[i] > 0]
     if not usable:
         return 0, 0.0          # every move is out of PP: the game uses Struggle
     # only moves with PP left can be chosen (the game refuses a 0-PP move and the menu loops); each option
@@ -165,7 +166,7 @@ def choose_move(client, emu: Emulator, *, type_knowledge: list[str] | None = Non
         slot = 0
     slot = max(0, min(slot, len(moves) - 1))
     if slot not in usable:
-        slot = battle.usable_slot(pp, slot)
+        slot = battle.usable_slot(can, slot)
     confidence = float(getattr(ans, "confidence", 0.0) or 0.0)
     if capture is not None:
         capture.record("battle_move", model=getattr(client, "model", "typesafe"),

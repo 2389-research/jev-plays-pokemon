@@ -74,7 +74,7 @@ def make_loop(emu, run):
     loop = ReasoningLoop(builder=ObservationBuilder(emu), controller=ActionController(emu), reasoner=reasoner,
                          session=Session(GoalState(primary="play", current="play")), vision=False, reflect_every=8,
                          low_conf_reflect=0.35, memory=AgentMemory.load(Path(f"runs/{run}/latest.mem.json")),
-                         strategist_provider=LunaRouteProvider(model="glm-5.3", max_tokens=700),
+                         strategist_provider=LunaRouteProvider(model="glm-5.3", max_tokens=4000),
                          knowledge=KnowledgeBase.from_env(), autonomous=True)
     loop._l1_due = lambda: False
     return loop

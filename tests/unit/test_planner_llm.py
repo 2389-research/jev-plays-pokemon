@@ -244,7 +244,8 @@ def test_l1_decide_no_provider_returns_safe_default():
 
 def test_l1_decide_garbage_returns_safe_default():
     p = Planner(goal_map=2, strategist=FakeProvider("not json"))
-    assert p.l1_decide({}, {}) == {"add": [], "remove": []}
+    out = p.l1_decide({}, {})
+    assert (out["add"], out["remove"]) == ([], []) and "JSONDecodeError" in out["error"]   # failure is visible
 
 
 def test_l1_brainstorm_returns_assessment():

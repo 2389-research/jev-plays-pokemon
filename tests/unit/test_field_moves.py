@@ -128,3 +128,45 @@ def test_a_cut_tree_joins_the_components_the_rip_kept_apart():
     route = pg.route(5, pg.components_reachable(5, 15, 17, cut), 92)
     assert route and route[-1]["dest_map"] == 92
 
+
+
+# ---- one interaction per step (runs/sleeves-surge: the trash-can puzzle) ---------------------------
+def test_used_is_a_step_criterion_that_needs_a_single_who():
+    from pokemon_agent.agent.l1_pipeline import validate_step
+    assert Planner._parse_done_when("used", 92) == {"used": True}
+    assert validate_step({"kind": "action", "map": 92, "talk": True, "who": "trash can at (9,9)", "done_when": "used"})[0]
+    assert not validate_step({"kind": "action", "map": 92, "talk": False, "done_when": "used"})[0]
+
+
+def test_used_steps_on_one_map_are_not_deduped_into_one():
+    from pokemon_agent.agent.quest_reconciler import reconcile_quests
+    ids = iter(f"q{i}" for i in range(1, 99))
+    add = [{"kind": "action", "map": 92, "talk": True, "who": f"trash can at ({x},9)", "done_when": "used"}
+           for x in (1, 3, 5)] + [{"kind": "action", "map": 92, "talk": True, "who": "trash can at (1,9)",
+                                   "done_when": "used"}]
+    out = reconcile_quests([], {"add": add, "remove": []}, next_id=lambda: next(ids))
+    assert [s.who for s in out] == ["trash can at (1,9)", "trash can at (3,9)", "trash can at (5,9)"]
+
+
+def test_repeated_objects_are_named_with_their_tile():
+    loop, _ = _loop()
+    cans = [o["name"] for o in loop._objects_here(92) if "trash can" in o["name"]]
+    assert len(cans) == 16 and "trash can at (9,9)" in cans
+    assert any(o["name"] == "gym statue at (3,14)" for o in loop._objects_here(92))
+
+
+def test_used_counts_only_the_named_one_answering():
+    loop, _ = _loop()
+    d = Directive(intent=Intent.TALK_TO, target={"kind": "npc", "map": 92, "sprite": "trash can at (1,11)"},
+                  success={"used": True}, quest_id="q7")
+    loop._directive = d
+
+    def press_and_open(at):
+        loop._interact_with({}, at, {"x": at[0], "y": at[1], "sprite": "trash can"})
+        loop.session.step += 1
+        loop._check_answer(SimpleNamespace(game_state={"dialog_active": True, "facing": {
+            "facing_sprite": None, "front_tile": list(at)}}))
+    press_and_open((3, 11))                                   # a different can answered
+    assert not loop._directive_satisfied(d)
+    press_and_open((1, 11))
+    assert loop._directive_satisfied(d)

@@ -89,7 +89,12 @@ def reconcile_quests(current, proposal, *, next_id, on_event=None, allow_active_
     pending = [s for s in current if s.status == "pending" and s.id not in remove]
     # dedup only against LIVE steps: a done step never blocks a repeat errand (heal again, return to
     # a map, shop again) — brock-goals4: ~60 emergency heals were dropped against an old done heal
-    have = {(s.map, s.done_when or "on_map"): s.id for s in active + pending}
+    def dedup_key(mp, dw, who):
+        # a "used" step IS its who: one per thing checked (runs/sleeves-surge: 11 trash-can steps collapsed
+        # to the first because all were (92, "used"))
+        dw = dw or "on_map"
+        return (mp, dw, (who or "").strip().lower()) if str(dw).strip().lower() == "used" else (mp, dw)
+    have = {dedup_key(s.map, s.done_when, s.who): s.id for s in active + pending}
     status_of = {s.id: s.status for s in current}
     live = {s.id for s in active + pending}
     active_ids = {s.id for s in active}
@@ -124,7 +129,7 @@ def reconcile_quests(current, proposal, *, next_id, on_event=None, allow_active_
             continue
         kind = str(a.get("kind") or "action")
         dw = "explored" if kind == "explore" else a.get("done_when")
-        key = (mp, dw or "on_map")
+        key = dedup_key(mp, dw, a.get("who"))
         if key in have:
             if on_event is not None:
                 on_event("l1_add_deduped", {"map": mp, "done_when": dw, "against": have[key]})

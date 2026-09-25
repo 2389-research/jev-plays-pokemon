@@ -220,7 +220,7 @@ def main() -> None:
             if low_conf_reflect is None:
                 low_conf_reflect = 0.35  # unsure actor -> re-plan instead of thrash
             # tier-2 strategist: a strong text model for quest planning when story-gated
-            strategist_provider = LunaRouteProvider(model=args.strategist_model, max_tokens=700)
+            strategist_provider = LunaRouteProvider(model=args.strategist_model, max_tokens=4000)
             print(f"decider=typesafe (model={args.typesafe_model or 'default'}), reflection via {rmodel}, "
                   f"strategist={args.strategist_model}, wait_gate={args.wait_gate}, low_conf_reflect={low_conf_reflect}")
         else:

@@ -921,6 +921,10 @@ class ReasoningLoop:
                                                  "reason": self._directive.reason})
                 if not more_for_step:
                     self._mark_step(qid, "done")
+                    if "used" in (self._directive.success or {}):
+                        # checking ONE thing is for finding something out: what it said may change what
+                        # to check next (a switch under a trash can) — L1 reviews before the next one
+                        self._l1_event = True
                 self._servo_fail = 0
             if self._quest:
                 self._directive = self._quest.popleft()
@@ -938,6 +942,8 @@ class ReasoningLoop:
         success = directive.success or {}
         if directive.intent == Intent.EXPLORE:
             return self._explore_found(directive)
+        if "used" in success:          # the NAMED person/thing answered during this step (_check_answer)
+            return directive.quest_id is not None and directive.quest_id in self.__dict__.get("_answered", set())
         if "verify" in success:
             judge = getattr(self.reasoner, "judge", None)
             # throttle the model check (it's an LLM/Jev call): only every few steps of the step
@@ -1130,6 +1136,16 @@ class ReasoningLoop:
                     if stuck else "pick the next target toward the goal"),
         }
         target = self.planner.propose_target(self.controller.emu, ctx)
+        # the step named ONE instance ("trash can at (9,9)"); an answer naming the same kind of thing
+        # without saying which would drop that (runs/sleeves-surge: "trash can" -> the nearest can)
+        want = str((default or {}).get("sprite") or "")
+        wxy = re.search(r"\((\d+)\s*,\s*(\d+)\)", want)
+        if target and target.get("kind") in ("approach_npc", "use_object") and wxy:
+            got = str(target.get("sprite") or target.get("object") or "")
+            gxy = re.search(r"\((\d+)\s*,\s*(\d+)\)", got)
+            if match_objects([{"name": want}], got) and (gxy is None or gxy.groups() != wxy.groups()):
+                target = {**target, "kind": "approach_npc", "sprite": want}   # the step's own instance
+                target.pop("object", None)
         if not target:
             target = default
         if target.get("kind") == "unresolved":
@@ -1611,7 +1627,12 @@ class ReasoningLoop:
         terrain shows right now (cut ones are gone; they regrow when the map reloads)."""
         trees = [{"name": f"Cut tree at ({x},{y})", "x": x, "y": y, "kind": "cut_tree"}
                  for (x, y), cls in sorted((self.world.terrain.get(map_id) or {}).items()) if cls == "cut_tree"]
-        return list(objects_on(map_id)) + trees
+        objs = [dict(o) for o in objects_on(map_id)]
+        names = [o["name"] for o in objs]
+        for o in objs:           # 15 "trash can"s: a name alone can't say which (runs/sleeves-surge)
+            if names.count(o["name"]) > 1:
+                o["name"] = f"{o['name']} at ({o['x']},{o['y']})"
+        return objs + trees
 
     def _use_cut(self, tree: dict, target, directive):
         """Facing a Cut tree: use Cut from the party menu (the player chose to — this only runs for a
@@ -1726,10 +1747,20 @@ class ReasoningLoop:
         self._await_answer = None
         facing = gs.get("facing") or {}
         fs = facing.get("facing_sprite")
-        if not fs or fs.get("x") is None:
+        front = tuple(facing.get("front_tile") or ())
+        got = (int(fs["x"]), int(fs["y"])) if fs and fs.get("x") is not None else None
+        if aw["sprite"]:
+            right = got == aw["xy"]
+        else:                                     # an object: we face its tile and no person there answered
+            right = front == aw["xy"] and got != front
+        if right:
+            d = self._directive
+            named = re.search(r"\((\d+)\s*,\s*(\d+)\)", str((d.target or {}).get("sprite") or "")) if d else None
+            if d is not None and d.quest_id is not None and (named is None or
+                                                             (int(named.group(1)), int(named.group(2))) == aw["xy"]):
+                self.__dict__.setdefault("_answered", set()).add(d.quest_id)   # done_when "used": THE named one
             return
-        got = (int(fs["x"]), int(fs["y"]))
-        if got == aw["xy"] or (not aw["sprite"] and list(got) != list(facing.get("front_tile") or [])):
+        if got is None or (not aw["sprite"] and got != front):
             return
         who = str(fs.get("sprite") or "someone")
         tgt = aw["target"]

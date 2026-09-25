@@ -27,6 +27,8 @@ def validate_step(step: dict) -> tuple[bool, str | None]:
         return False, f"action step needs a checkable done_when; {dw!r} did not parse"
     if parsed == {"on_map": map_id}:
         return False, "action step cannot complete on arrival (on_map)"
+    if parsed == {"used": True} and not (step.get("talk") and step.get("who")):
+        return False, 'done_when "used" needs talk:true and the one person/thing in "who"'
     return True, None
 
 
@@ -47,12 +49,14 @@ def run_l1_pipeline(emu, context: dict, planner, *, hard_event: bool, on_trace=N
 
     b = planner.l1_brainstorm(emu, context)
     if on_trace:
-        on_trace({"stage": "brainstorm", "assessment": b.get("assessment", "")})
+        on_trace({"stage": "brainstorm", "assessment": b.get("assessment", ""),
+                  **({"error": b["error"]} if b.get("error") else {})})
 
     d = planner.l1_decide(context, b)
     if on_trace:
         on_trace({"stage": "decide", "add": len(d.get("add", [])), "remove": d.get("remove", []),
-                  "anchors": [s.get("after") for s in d.get("add", []) if isinstance(s, dict)]})
+                  "anchors": [s.get("after") for s in d.get("add", []) if isinstance(s, dict)],
+                  **({"error": d["error"]} if d.get("error") else {})})
 
     validated_add = []
     for step in d.get("add", []):

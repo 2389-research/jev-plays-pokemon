@@ -392,6 +392,8 @@ done_when MUST be exactly one of (this is the full grammar — nothing else pars
   "hp_frac>=<F>"              — party healed to fraction F of max HP.
   "talked"                    — had a conversation (only when nothing more specific fits).
   "cut:<x>,<y>"               — the Cut tree at (x,y) on the step's map is gone (you used Cut on it).
+  "used"                      — the step's "who" (ONE person or thing, e.g. "trash can at (9,9)") was talked
+                                 to / checked once. For searching things one at a time: one step per thing.
   "verify:<yes/no question>"  — judged by a verifier from game state; LAST RESORT ONLY, when the
                                  objective genuinely isn't RAM-checkable. Prefer any RAM-checkable
                                  form above over verify: whenever one applies — verify: is
@@ -776,8 +778,8 @@ class Planner:
             if not isinstance(data, dict):
                 return {"assessment": ""}
             return {"assessment": str(data.get("assessment") or "")}
-        except Exception:
-            return {"assessment": ""}
+        except Exception as e:
+            return {"assessment": "", "error": f"{type(e).__name__}: {e}"[:200]}   # visible in the trace
 
     def l1_decide(self, context: dict, brainstorm: dict) -> dict:
         """L1 pipeline step 3 (DECIDE): turn the BRAINSTORM assessment into a MINIMAL set of quest
@@ -844,8 +846,8 @@ class Planner:
                 if isinstance(data.get(k), str) and data[k].strip():
                     out[k] = data[k]
             return out
-        except Exception:
-            return {"add": [], "remove": []}
+        except Exception as e:
+            return {"add": [], "remove": [], "error": f"{type(e).__name__}: {e}"[:200]}   # visible in the trace
 
     def l1_repair(self, context: dict, bad_step: dict, error: str) -> dict:
         """L1 pipeline step (REPAIR): given the DSL grammar, the offending step, and the exact
@@ -921,6 +923,8 @@ class Planner:
             return {"on_map": map_id}
         if low == "talked":
             return {"talked_on_map": map_id}
+        if low == "used":                                  # the step's named who/what answered, once
+            return {"used": True}
         if low == "explored":                              # an explore step: done on a discovery
             return {"explored": map_id}
         if low.startswith("level:") and ">=" in s:        # one party member: level:Sophie>=16

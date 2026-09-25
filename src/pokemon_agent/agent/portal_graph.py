@@ -90,7 +90,7 @@ class PortalGraph:
         to be blocked and elevators (dynamic destinations) are not routed unless ``allow_blocked``."""
         return [p for p in self.portals_on(map_id)
                 if p["component"] == comp and p["dest_map"] is not None and p["kind"] != "elevator"
-                and (p["kind"] != "cut" or self.can_cut)
+                and (p["kind"] != "cut" or self.can_cut) and not p.get("inaccessible")
                 and (allow_blocked or p["id"] not in self.blocked)]
 
     # --- static routing over (map, component) nodes ----------------------

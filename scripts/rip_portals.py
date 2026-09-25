@@ -179,6 +179,9 @@ def parse_warps(map_name: str) -> list[dict]:
                     "y": int(m.group(2)),
                     "dest_const": m.group(3),
                     "dest_warp": m.group(4),
+                    # pokered marks leftover warps with no door "; inaccessible" (Celadon City -> Mart 5F,
+                    # two in Silph Co.): never route through them
+                    "inaccessible": "inaccessible" in s.lower(),
                 })
     return warps
 
@@ -453,6 +456,7 @@ def build_portal_graph(map_names: list[str]) -> dict:
                 "direction": warp_direction(md, x, y),
                 "label": f"{md.name} warp {slot} -> {dest_const}",
                 "note": note,
+                **({"inaccessible": True} if wp.get("inaccessible") else {}),
             }
 
     # ---- edge portals: OFFSET-AWARE cell-level pairing (K0) -----------------

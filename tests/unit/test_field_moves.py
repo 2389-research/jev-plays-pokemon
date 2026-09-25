@@ -337,3 +337,15 @@ def test_a_trainer_battle_that_paid_prize_money_is_a_win(monkeypatch):
     monkeypatch.setattr(gs, "read_money", lambda emu: 18638)
     loop._record_battle_end(party_size_now=3)
     assert loop._battle_log[-1]["result"] == "won"
+
+
+def test_pokereds_inaccessible_warps_are_never_routed():
+    """runs/sleeves-hideout: 'go to Celadon Mart 5F' routed through Celadon City's leftover warp at (39,19)
+    (pokered: '; inaccessible') ~15 times instead of climbing the store's stairs."""
+    from pokemon_agent.agent.portal_graph import PortalGraph
+    pg = PortalGraph.load()
+    assert pg.portals["celadoncity:warp9"].get("inaccessible")
+    assert pg.portals["silphco1f:warp5"].get("inaccessible") and pg.portals["silphco11f:warp3"].get("inaccessible")
+    cc = next(m for m, v in pg.maps.items() if v["name"] == "CeladonCity")
+    route = pg.route(cc, {pg.portals["celadoncity:warp1"]["component"]}, 136)
+    assert route[0]["id"] == "celadoncity:warp1" and all(not p.get("inaccessible") for p in route)

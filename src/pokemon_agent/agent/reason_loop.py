@@ -886,11 +886,16 @@ class ReasoningLoop:
             if (self._directive.intent == Intent.TRAVEL and obs.player is not None and tmap is not None
                     and tmap != obs.player.map_id):
                 portal = self._portal_next(obs.player, tmap)
-                # only an OBSERVED blockage counts: no walkable path to the portal right now
-                if (portal is not None and abs(portal["coord"][0] - obs.player.x)
-                        + abs(portal["coord"][1] - obs.player.y) <= 8
-                        and self._path_len(obs.player, tuple(portal["coord"])) is None):
-                    self._note_blocked_portal(obs.player, portal["coord"], why)
+                # only an OBSERVED blockage counts: no walkable path to the portal right now, or we stood
+                # right next to it and still couldn't go through (runs/sleeves-hideout: Celadon City's
+                # leftover warp to Mart 5F, "1 steps away, no progress" three times)
+                if portal is not None and abs(portal["coord"][0] - obs.player.x) + abs(portal["coord"][1] - obs.player.y) <= 8:
+                    gap = self._path_len(obs.player, tuple(portal["coord"]))
+                    if gap is None:
+                        self._note_blocked_portal(obs.player, portal["coord"], why)
+                    elif gap <= 1:
+                        self._note_blocked_portal(obs.player, portal["coord"],
+                                                  f"stood next to it and couldn't go through — {why}", kind="no_entry")
             if self._directive.quest_id is not None:
                 self._mark_step(self._directive.quest_id, "wedged", reason=why)
             self._blocked_for_n = 0
@@ -2095,7 +2100,7 @@ class ReasoningLoop:
         # a portal a SCRIPT turned us back from (a guard) has a clear path by definition: walking up to it
         # proves nothing — only a change of bag/badges (the gate signature) or the TTL retries it
         mine = [(k, pg.portals[k]) for k, v in self.memory.blocked_portals.items()
-                if k in pg.portals and v.get("kind") != "script"]
+                if k in pg.portals and v.get("kind") not in ("script", "no_entry")]
         try:
             player = read_player(emu)
         except Exception:

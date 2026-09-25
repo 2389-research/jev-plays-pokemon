@@ -131,3 +131,32 @@ def report(name: str, target: Tile, player: Tile, planned: list[Side]) -> str:
     if walls:
         parts.append("/".join(walls) + " wall")
     return f"{name} ({target[0]},{target[1]}): " + "; ".join(parts)
+
+
+def first_tree_on_way(player: Tile, goals, *, walkable, trees, blocked=(), cuts=(), terrain=None, ledge_ok=None,
+                      spins=None) -> Tile | None:
+    """With Cut trees counted as passable, the first tree on a shortest path from ``player`` to any of
+    ``goals`` — the one to cut first — or None if even that doesn't reach them (or no tree is needed)."""
+    hops = ledge_hops(terrain or {}, ledge_ok, spins)
+    goals, trees = set(goals), set(trees)
+    open_ = set(walkable) | trees
+    prev: dict[Tile, Tile | None] = {tuple(player): None}
+    q = deque([tuple(player)])
+    while q:
+        c = q.popleft()
+        if c in goals:
+            path = []
+            while c is not None:
+                path.append(c)
+                c = prev[c]
+            return next((t for t in reversed(path) if t in trees), None)
+        x, y = c
+        nxt = [((x + 1, y), False), ((x - 1, y), False), ((x, y + 1), False), ((x, y - 1), False)]
+        nxt += [(land, True) for _d, land in hops.get(c, [])]
+        for n, hop in nxt:
+            if n in prev or n not in open_ or n in blocked or (not hop and frozenset({c, n}) in cuts):
+                continue
+            prev[n] = c
+            q.append(n)
+    return None
+

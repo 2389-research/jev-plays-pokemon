@@ -302,3 +302,12 @@ def test_loaded_memory_step_stamps_are_older_than_the_new_session():
     # the unreviewed old event (after the old last review) and the new one both show, in order — before the
     # rebase the new event (step 5 < 2995) was hidden until the first review of the new session
     assert again.episode.since(now=10).get("actions") == ["old", "new"]
+
+
+def test_the_tree_standing_between_us_and_a_person_is_found():
+    """Celadon Gym (runs/sleeves-next): Erika's open side was 'a separate area' behind a Cut tree."""
+    from pokemon_agent.agent.interaction import first_tree_on_way
+    walk = {(x, 5) for x in range(0, 3)} | {(x, 5) for x in range(4, 8)}      # a corridor with a tree at (3,5)
+    assert first_tree_on_way((0, 5), [(7, 5)], walkable=walk, trees={(3, 5)}) == (3, 5)
+    assert first_tree_on_way((0, 5), [(2, 5)], walkable=walk, trees={(3, 5)}) is None       # no tree needed
+    assert first_tree_on_way((0, 5), [(9, 9)], walkable=walk, trees={(3, 5)}) is None       # unreachable anyway

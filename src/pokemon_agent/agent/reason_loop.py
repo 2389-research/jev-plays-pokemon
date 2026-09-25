@@ -1660,6 +1660,23 @@ class ReasoningLoop:
             self._approach_wait = getattr(self, "_approach_wait", 0) + 1
             from ..core.models import WaitAction
             return WaitAction(frames=30)
+        # a Cut tree may be what separates us (Celadon Gym: Erika's nook sits behind trees): if the party
+        # can cut and counting trees as passable reaches a side, cut the first tree on that way, then re-plan
+        if use is None and self._party_can_cut():
+            from .interaction import first_tree_on_way
+            trees = {c for c, cls in (geo.get("terrain") or {}).items() if cls == "cut_tree"}
+            stands = [s_.stand for s_ in planned if s_.status == "open"]
+            tree = first_tree_on_way((player.x, player.y), stands, walkable=geo["walkable"], trees=trees,
+                                     blocked=set(geo["occupied"]) - {(nx, ny)} | set(geo.get("warps") or ()),
+                                     cuts=geo.get("cuts") or (), terrain=geo.get("terrain"),
+                                     ledge_ok=geo.get("ledge_ok"), spins=geo.get("spins")) if trees and stands else None
+            if tree is not None:
+                t_obj = {"x": tree[0], "y": tree[1], "name": f"Cut tree at ({tree[0]},{tree[1]})", "kind": "cut_tree"}
+                self.on_event("cut_on_the_way", {"step": self.session.step, "tree": list(tree),
+                                                 "for": str(npc.get("sprite"))})
+                return self._face_and_interact({"x": tree[0], "y": tree[1], "sprite": t_obj["name"]}, target, obs,
+                                               blocked_dirs, occupied,
+                                               use=lambda: self._use_cut(t_obj, target, self._directive))
         self._approach_block = report(str(npc.get("sprite") or "the target"), (nx, ny), (player.x, player.y),
                                       planned)
         self.on_event("approach_blocked", {"step": self.session.step, "report": self._approach_block})

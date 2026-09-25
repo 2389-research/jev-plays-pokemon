@@ -352,7 +352,8 @@ class ReasoningLoop:
             if (cm is not None and cm["map_id"] == mid
                     and (obs.player.x, obs.player.y) in cm["walkable"]):  # reject stale/transition reads
                 self.world.ingest_collision(cm["map_id"], cm["width"], cm["height"],
-                                            cm["walkable"], cm.get("counters"), cm.get("terrain"))
+                                            cm["walkable"], cm.get("counters"), cm.get("terrain"),
+                                            cm.get("ledge_ok"))
         self.world.observe(obs.player, obs.walkability)
         # the SEMANTIC map (grass/water/ledges/doors + legend) is what the agent reasons on; fall
         # back to the plain floor/wall render before any collision has been ingested.
@@ -482,6 +483,22 @@ class ReasoningLoop:
         if self.planner is None:
             self._maybe_reflect(obs, player_desc)
             return self._jev_turn(obs, player_desc, self._blocked_dirs(obs, None), None, shot)
+
+        # a trainer spotted us and is walking over: the game ignores input until the battle starts, so a
+        # move would only "fail" and count toward a wedge (runs/sleeves-east: Route 9's step wedged during
+        # a trainer's approach, before the battle even began). Wait it out (bounded, in case of a stale byte).
+        if ctx.get("trainer_engaged") and getattr(self, "_engaged_wait", 0) < 40:
+            self._engaged_wait = getattr(self, "_engaged_wait", 0) + 1
+            from ..core.models import WaitAction
+            rstep = ReasonStep(location="overworld", objective="a trainer is coming to battle",
+                               reasoning="trainer engaged: input is frozen until the battle starts",
+                               action=WaitAction(frames=20))
+            self._prev = rstep
+            self._emit_reason(rstep, 0)
+            res = self.controller.execute(rstep.action)
+            return self._finish(obs, rstep, res, 0, {}, shot)
+        if not ctx.get("trainer_engaged"):
+            self._engaged_wait = 0
 
         # training (L1's call): put the chosen LEAD at the front of the party so it starts battles and
         # earns EXP — done through the in-game menu, on the overworld only
@@ -1087,6 +1104,13 @@ class ReasoningLoop:
         tmap0 = directive.target_map if directive is not None else None
         portal = self._portal_next(obs.player, tmap0) if (tmap0 is not None and obs.player is not None) else None
         self._cap_det("portal_next", {"map_id": getattr(obs.player, "map_id", None), "target_map": tmap0}, portal)
+        if portal is not None and portal.get("kind") == "cut":
+            cx, cy = int(portal["coord"][0]), int(portal["coord"][1])
+            self.on_event("portal_hop", {"step": self.session.step, "from_map": obs.player.map_id,
+                                         "to_map": portal["dest_map"], "coord": [cx, cy], "goal_map": int(tmap0),
+                                         "cut": True})
+            return {"kind": "approach_npc", "sprite": f"Cut tree at ({cx},{cy})",
+                    "note": f"the way to {map_name(tmap0)} goes through the Cut tree at ({cx},{cy})"}
         if portal is not None:
             cx, cy = int(portal["coord"][0]), int(portal["coord"][1])
             self.on_event("portal_hop", {"step": self.session.step, "from_map": obs.player.map_id,
@@ -1096,6 +1120,9 @@ class ReasoningLoop:
                    "note": f"portal toward {map_name(portal['dest_map'])}"}
             if portal.get("kind") == "ledge":
                 tgt["hop"] = portal.get("hop")   # reach the take-off cell, then hop (K8)
+                alt = self._ledge_takeoff(obs, portal)
+                if alt is not None:
+                    tgt["x"], tgt["y"], tgt["hop"] = alt
             return tgt
         if tmap0 is not None and self._no_known_route(obs.player, tmap0):
             # the ground-truth graph has NO way there from here: don't guess a tile (that wanders) —
@@ -1396,7 +1423,7 @@ class ReasoningLoop:
         walk = set(coll["walkable"]) | {goal}   # the door tile may be off the walkable set
         blocked = set(occupied) | (self._warp_tiles(player.map_id) - {goal})   # never through another door
         cuts = (getattr(self.world, "cut_edges", None) or {}).get(getattr(player, "map_id", None), set())
-        hops = ledge_hops(coll.get("terrain") or {})
+        hops = ledge_hops(coll.get("terrain") or {}, coll.get("ledge_ok"))
         prev: dict[tuple[int, int], tuple[tuple[int, int], Direction, bool] | None] = {start: None}
         q = deque([start])
         found = False
@@ -1475,7 +1502,15 @@ class ReasoningLoop:
             cands = match_objects(self._objects_here(mid), sprite)
             at = re.search(r"\((\d+)\s*,\s*(\d+)\)", str(sprite or ""))
             if at:                                   # "Cut tree at (15,18)": that one, if it's listed
-                cands = [o for o in cands if (o["x"], o["y"]) == (int(at.group(1)), int(at.group(2)))] or cands
+                exact = [o for o in cands if (o["x"], o["y"]) == (int(at.group(1)), int(at.group(2)))]
+                if not exact and cands and all(o.get("kind") == "cut_tree" for o in cands):
+                    # runs/sleeves-east: L1 named Vermilion's tree coordinates in Cerulean — say so, don't
+                    # silently go cut a different tree
+                    self._approach_block = (f"there's no Cut tree at ({at.group(1)},{at.group(2)}) on "
+                                            f"{map_name(mid)}; Cut trees here: "
+                                            + ", ".join(f"({o['x']},{o['y']})" for o in cands))
+                    return self._report_unreachable(None, target, directive)
+                cands = exact or cands
             obj = min(cands, key=lambda o: abs(o["x"] - player.x) + abs(o["y"] - player.y)) if cands else None
         if obj is not None and obj.get("kind") == "cut_tree":
             return self._report_unreachable(
@@ -1671,6 +1706,8 @@ class ReasoningLoop:
                                 text=f"used Cut on the tree at ({tree['x']},{tree['y']}): "
                                      + ("it's gone" if gone else f"didn't work — {said[:80]}"))
             if gone:
+                if isinstance(self._target, dict) and "Cut tree" in str(self._target.get("sprite") or ""):
+                    self._target = None               # the way is open: routing picks the next portal
                 return WaitAction(frames=1)
             why = f"Cut didn't work: {said[:100]}"
         self._approach_block = f"can't cut the tree at ({tree['x']},{tree['y']}): {why}"
@@ -1691,7 +1728,7 @@ class ReasoningLoop:
         return {"walkable": set(map(tuple, coll["walkable"])), "occupied": occ,
                 "warps": self._warp_tiles(player.map_id),
                 "cuts": (getattr(self.world, "cut_edges", None) or {}).get(player.map_id, set()),
-                "terrain": coll.get("terrain")}
+                "terrain": coll.get("terrain"), "ledge_ok": coll.get("ledge_ok")}
 
     def _observe_npcs(self, obs) -> None:
         """Remember when each sprite (by slot) last changed tile, so a wanderer can be told apart from a
@@ -1983,6 +2020,49 @@ class ReasoningLoop:
             self.on_event("portal_unblocked", {"step": now, "portal": pid})
         self._revalidate_blocked()
         pg.blocked = {k: v.get("why", "") for k, v in bp.items()}
+        if getattr(self, "_can_cut_step", None) != now:
+            self._can_cut_step = now
+            pg.can_cut = self._party_can_cut()
+
+    def _ledge_takeoff(self, obs, portal) -> tuple[int, int, str] | None:
+        """A ledge is a whole row, but the graph records ONE take-off cell per crossing: any take-off whose
+        landing is in the portal's destination area will do. The nearest one nobody stands on, by walking
+        distance (runs/sleeves-east: a beaten trainer stood on Route 9's recorded take-off (11,10) while the
+        player at (10,10) could hop right there). None -> keep the recorded one."""
+        from .interaction import distances
+        player = obs.player
+        try:
+            coll = read_collision_map(self.controller.emu)
+        except Exception:
+            coll = None
+        if not coll or coll.get("map_id") != player.map_id or self.portals is None:
+            return None
+        grid = self.portals._grid(player.map_id)
+        occ = {(int(n["x"]), int(n["y"])) for n in ((obs.game_state or {}).get("npcs") or []) if "x" in n}
+        walk = set(map(tuple, coll["walkable"]))
+        dist = distances((player.x, player.y), walkable=walk, blocked=occ,
+                         cuts=(getattr(self.world, "cut_edges", None) or {}).get(player.map_id, set()),
+                         terrain=coll.get("terrain"), ledge_ok=coll.get("ledge_ok"))
+        best = None
+        for take, hops in ledge_hops(coll.get("terrain") or {}, coll.get("ledge_ok")).items():
+            for d, land in hops:
+                if grid.get(land) != portal.get("dest_component") or take in occ or land in occ or take not in dist:
+                    continue
+                if best is None or dist[take] < best[0]:
+                    best = (dist[take], take, d.value)
+        return (best[1][0], best[1][1], best[2]) if best else None
+
+    def _party_can_cut(self) -> bool:
+        """Someone in the party knows Cut and the Cascade Badge (wObtainedBadges bit 1) is held — then a
+        Cut tree on the way is a crossing, not a wall."""
+        from ..games.pokemon_red import party_menu
+        emu = self.controller.emu
+        try:
+            if not (emu.read_memory(0xD356) & 0b10):
+                return False
+            return any(party_menu.knows(emu, i, "Cut") for i in range(len(read_party(emu))))
+        except Exception:
+            return False
 
     def _revalidate_blocked(self) -> None:
         """A belief is testable: a portal on THIS map that we recorded as blocked, but that we can now
@@ -2096,9 +2176,17 @@ class ReasoningLoop:
             route = self._portal_route(player, tmap)
             if route is None:
                 parts.append(f"no known way from this part of {map_name(player.map_id)} to {map_name(tmap)}")
-                trees = [f"({o['x']},{o['y']})" for o in self._objects_here(player.map_id) if o.get("kind") == "cut_tree"]
-                if trees:
-                    parts.append(f"Cut trees on this map at {', '.join(trees)} (Cut removes them)")
+                pg = self.portals
+                if pg is not None and not pg.can_cut:
+                    pg.can_cut = True                   # would a Cut tree open it? (information only)
+                    try:
+                        alt = self._portal_route(player, tmap)
+                    finally:
+                        pg.can_cut = False
+                    tree = next((p for p in (alt or []) if p["kind"] == "cut"), None)
+                    if tree is not None:
+                        parts.append(f"the way there needs Cut: {tree['label']} (a party member must know Cut "
+                                     f"and you need the Cascade Badge)")
                 if self.memory.blocked_portals:
                     parts.append("blocked earlier: " + "; ".join(
                         f"{k.split(':')[0]} ({v.get('why', '')[:80]})" for k, v in list(self.memory.blocked_portals.items())[:3]))
@@ -3545,7 +3633,7 @@ class ReasoningLoop:
         if not coll or coll.get("map_id") != player.map_id:
             return None
         walk = (set(map(tuple, coll["walkable"])) - occ) | {tuple(goal)}
-        hops = ledge_hops(coll.get("terrain") or {})
+        hops = ledge_hops(coll.get("terrain") or {}, coll.get("ledge_ok"))
         start = (player.x, player.y)
         dist, q = {start: 0}, deque([start])
         while q:

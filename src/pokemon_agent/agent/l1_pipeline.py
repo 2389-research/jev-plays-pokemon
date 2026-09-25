@@ -27,6 +27,15 @@ def validate_step(step: dict) -> tuple[bool, str | None]:
         return False, f"action step needs a checkable done_when; {dw!r} did not parse"
     if parsed == {"on_map": map_id}:
         return False, "action step cannot complete on arrival (on_map)"
+    if "tree_cut" in parsed:
+        from ..games.pokemon_red.maps import map_name
+        from ..games.pokemon_red.predicates import cut_tree_sites
+        _m, x, y = parsed["tree_cut"]
+        sites = sorted(cut_tree_sites(map_id))
+        if (x, y) not in sites:
+            return False, (f"there is no Cut tree at ({x},{y}) on {map_name(map_id)}; "
+                           + (f"its Cut trees are at {', '.join(f'({a},{b})' for a, b in sites)}" if sites
+                              else "it has no Cut trees"))
     if parsed == {"used": True} and not (step.get("talk") and step.get("who")):
         return False, 'done_when "used" needs talk:true and the one person/thing in "who"'
     return True, None

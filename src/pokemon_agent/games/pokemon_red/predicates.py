@@ -87,6 +87,21 @@ def _cmp(value: float, spec) -> bool:
     return value == spec
 
 
+def cut_tree_sites(map_id: int) -> set[tuple[int, int]]:
+    """Where the game's Cut trees stand on a map (scripts/gen_cut_trees.py)."""
+    import json
+    from functools import lru_cache
+    from pathlib import Path
+
+    @lru_cache(maxsize=1)
+    def _load():
+        try:
+            return json.loads((Path(__file__).with_name("cut_trees.json")).read_text())
+        except Exception:
+            return {}
+    return {(t["x"], t["y"]) for t in _load().get(str(int(map_id)), [])}
+
+
 def _clause(key: str, spec, emu: Emulator, memory=None) -> bool:
     if key == "on_map":
         return _cmp(emu.read_memory(WCURMAP), spec)
@@ -107,6 +122,8 @@ def _clause(key: str, spec, emu: Emulator, memory=None) -> bool:
         # so this is only true while we're on the map having cut it)
         from .map_reader import read_collision_map
         mid, x, y = (int(v) for v in spec)
+        if (x, y) not in cut_tree_sites(mid):
+            return False                     # not a tree at all (runs/sleeves-east: "done" instantly)
         coll = read_collision_map(emu) if emu.read_memory(WCURMAP) == mid else None
         return bool(coll) and coll["terrain"].get((x, y)) not in (None, "cut_tree")
     if key == "has_item":

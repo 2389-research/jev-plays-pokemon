@@ -41,6 +41,12 @@ _LEDGE_SOUTH = {0x36, 0x37}   # hop DOWN
 _LEDGE_WEST = {0x27}          # hop LEFT
 _LEDGE_EAST = {0x0D, 0x1D}    # hop RIGHT
 _WATER = {0x14}
+# data/tilesets/ledge_tiles.asm: a hop needs the right (tile you stand on, ledge tile) pair — a cell above
+# a ledge is not automatically a take-off (runs/sleeves-east: the hop from Route 9 (10,10) was refused)
+_LEDGE_PAIRS = {"south": {(0x2C, 0x37), (0x39, 0x36), (0x39, 0x37)},
+                "west": {(0x2C, 0x27), (0x39, 0x27)},
+                "east": {(0x2C, 0x0D), (0x2C, 0x1D), (0x39, 0x0D)}}
+_LEDGE_BACK = {"ledge_s": ("south", (0, -1)), "ledge_w": ("west", (1, 0)), "ledge_e": ("east", (-1, 0))}
 _OW_DOOR = {0x1B, 0x58}       # walkable tiles that trigger a warp when a warp event sits on them
 GYM = 7
 # a small tree the field move CUT removes (engine/overworld/cut.asm: wTileInFrontOfPlayer $3d in the
@@ -108,6 +114,7 @@ def read_collision_map(emu) -> dict | None:
         walkable: set[tuple[int, int]] = set()
         counters: set[tuple[int, int]] = set()
         grass: set[tuple[int, int]] = set()
+        tile_ids: dict[tuple[int, int], int] = {}
         terrain: dict[tuple[int, int], str] = {}  # (x,y) -> semantic class (floor/wall/grass/water/ledge_*/door/counter/cut_tree)
         block_tiles: dict[int, list[int]] = {}
         for by in range(hb):
@@ -123,13 +130,22 @@ def read_collision_map(emu) -> dict | None:
                         cell = (bx * 2 + cc, by * 2 + cr)
                         cls = _classify(t, tileset, collset, grass_tile, counter_ids)
                         terrain[cell] = cls
+                        tile_ids[cell] = t
                         if t in collset:
                             walkable.add(cell)
                         if cls == "counter":
                             counters.add(cell)
                         elif cls == "grass":
                             grass.add(cell)
+        ledge_ok: set[tuple[int, int, str]] = set()   # (take-off x, y, hop direction) the game accepts
+        for (x, y), cls in terrain.items():
+            if cls in _LEDGE_BACK:
+                d, (dx, dy) = _LEDGE_BACK[cls]
+                take = (x + dx, y + dy)
+                if (tile_ids.get(take), tile_ids[(x, y)]) in _LEDGE_PAIRS[d]:
+                    ledge_ok.add((take[0], take[1], d))
         return {"map_id": m(WCURMAP), "width": wb * 2, "height": hb * 2,
-                "walkable": walkable, "counters": counters, "grass": grass, "terrain": terrain}
+                "walkable": walkable, "counters": counters, "grass": grass, "terrain": terrain,
+                "ledge_ok": ledge_ok}
     except Exception:
         return None

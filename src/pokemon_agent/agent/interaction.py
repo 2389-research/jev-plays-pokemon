@@ -70,10 +70,10 @@ def sides(target: Tile, *, counters=(), face: str | None = None) -> list[Side]:
     return out
 
 
-def distances(start: Tile, *, walkable, blocked=(), cuts=(), terrain=None) -> dict[Tile, int]:
+def distances(start: Tile, *, walkable, blocked=(), cuts=(), terrain=None, ledge_ok=None) -> dict[Tile, int]:
     """Walking steps from ``start`` to every reachable tile (sprites/doors in ``blocked`` are
     obstacles, elevation cuts respected, ledges one-way)."""
-    hops = ledge_hops(terrain or {})
+    hops = ledge_hops(terrain or {}, ledge_ok)
     dist, q = {start: 0}, deque([start])
     while q:
         c = q.popleft()
@@ -91,12 +91,12 @@ def distances(start: Tile, *, walkable, blocked=(), cuts=(), terrain=None) -> di
 
 
 def plan(player: Tile, target: Tile, *, walkable, occupied: dict[Tile, str], warps=(), counters=(),
-         cuts=(), terrain=None, face: str | None = None) -> list[Side]:
+         cuts=(), terrain=None, face: str | None = None, ledge_ok=None) -> list[Side]:
     """Every side of ``target`` with its status and walking distance; open reachable sides first,
     nearest first. The caller stands on ``result[0]`` when its ``dist`` is not None."""
     others = {xy: who for xy, who in occupied.items() if xy != tuple(target)}
     dist = distances(tuple(player), walkable=walkable, blocked=set(others) | (set(warps) - {tuple(player)}),
-                     cuts=cuts, terrain=terrain)
+                     cuts=cuts, terrain=terrain, ledge_ok=ledge_ok)
     out = []
     for s in sides(tuple(target), counters=counters, face=face):
         s.status = why_not(s.stand, walkable=walkable, occupied=others, warps=warps) or "open"

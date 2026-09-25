@@ -43,7 +43,7 @@ class WorldMap:
     # --- updates ----------------------------------------------------------
     def ingest_collision(self, map_id: int, width: int, height: int,
                          walkable: set[tuple[int, int]], counters: set[tuple[int, int]] | None = None,
-                         terrain: dict[tuple[int, int], str] | None = None) -> None:
+                         terrain: dict[tuple[int, int], str] | None = None, ledge_ok: set | None = None) -> None:
         """Load a full-map collision grid (from RAM's wOverworldMap) as ground truth: every
         cell in bounds becomes FLOOR or WALL. This gives the navigator the whole map up front
         so it can route around buildings instead of guessing over unseen tiles. ``counters`` are
@@ -57,6 +57,8 @@ class WorldMap:
         self.counters[map_id] = set(counters or ())
         if terrain:
             self.terrain[map_id] = dict(terrain)
+        if ledge_ok is not None:
+            self.__dict__.setdefault("ledge_ok", {})[map_id] = set(ledge_ok)
 
     def observe(self, player: PlayerState | None, local_ascii: list[str] | None) -> None:
         if player is None:

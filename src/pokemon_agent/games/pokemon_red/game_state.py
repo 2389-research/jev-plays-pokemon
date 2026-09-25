@@ -341,6 +341,7 @@ def read_facing(emu: Emulator, npcs: list[dict] | None = None) -> dict:
 # --- interaction CONTEXT: "what kind of moment is this?" ------------------
 # Addresses cross-checked against the pokered disassembly / DataCrystal RAM map.
 WISINBATTLE_ADDR = 0xD057   # 0 none / 1 wild / 2 trainer
+WENGAGEDTRAINERCLASS = 0xCD2D  # verified live: 0xCE (JR_TRAINER_F + 200) when a Route 9 trainer spotted us
 WBATTLETYPE = 0xD05A        # 0 normal / 1 old-man tutorial / 2 safari
 WTEXTBOXID = 0xD125         # id of the text box currently set up
 WCURMENUITEM = 0xCC26       # selected menu index (0-based) — PERSISTS when no menu
@@ -390,7 +391,13 @@ def read_context(emu: Emulator) -> dict:
     try:
         ctx["battle_type"] = emu.read_memory(WBATTLETYPE)
         ctx["text_box_id"] = emu.read_memory(WTEXTBOXID)
-        ctx["forced_movement"] = bool(emu.read_memory(WD730) & 0x40)
+        # wStatusFlags5 bit 0 = an NPC is moved by a script, bit 7 = the player is (simulated joypad);
+        # bit 6 (0x40) is only "print text with no delay"
+        ctx["forced_movement"] = bool(emu.read_memory(WD730) & 0x81)
+        # a trainer spotted us and is walking over: wEngagedTrainerClass holds a trainer id (>= 200)
+        # until the battle starts (the battle then reuses those bytes for stat mods) — input is frozen
+        ctx["trainer_engaged"] = (emu.read_memory(WENGAGEDTRAINERCLASS) >= 200
+                                  and emu.read_memory(WISINBATTLE_ADDR) == 0)
         # raw menu cursor — only trustworthy once a menu is confirmed open (see docstring)
         ctx["menu_raw"] = {
             "cursor_item": emu.read_memory(WCURMENUITEM),

@@ -41,14 +41,41 @@ class PortalGraph:
         # portals the agent OBSERVED it couldn't get through (a sprite in the way, pushed back) ->
         # {portal_id: why}. Set by the loop from memory; never story knowledge baked into the data.
         self.blocked: dict[str, str] = {}
+        # Cut-tree crossings ("cut" portals) are routed only when the party can cut (set by the loop:
+        # someone knows Cut and the Cascade Badge is held) — the graph never assumes an ability
+        self.can_cut: bool = False
         self._by_map: dict[int, list[dict]] = {}
         for p in portals.values():
             self._by_map.setdefault(p["map"], []).append(p)
 
+    def add_cut_trees(self, trees: dict) -> None:
+        """Each tree that separates two static components becomes a pair of "cut" portals (one per
+        direction) standing on the tree tile, approached from that side (scripts/gen_cut_trees.py)."""
+        for mid, ts in trees.items():
+            mid = int(mid)
+            if mid not in self.maps:
+                continue
+            for t in ts:
+                sides = {int(c): tuple(a) for c, a in (t.get("sides") or {}).items()}
+                for c1, a1 in sides.items():
+                    for c2 in sides:
+                        if c2 == c1:
+                            continue
+                        pid = f"{self.maps[mid]['name'].lower()}:cut_{t['x']}_{t['y']}_{c1}_{c2}"
+                        p = {"id": pid, "map": mid, "coord": [t["x"], t["y"]], "approach": list(a1), "kind": "cut",
+                             "dest_map": mid, "dest_component": c2, "component": c1, "direction": None,
+                             "label": f"{self.map_name(mid)} Cut tree at ({t['x']},{t['y']})"}
+                        self.portals[pid] = p
+                        self._by_map.setdefault(mid, []).append(p)
+
     @classmethod
     def load(cls, path: str | Path | None = None) -> "PortalGraph":
         d = json.loads(Path(path or _DEFAULT).read_text())
-        return cls(d["maps"], d["portals"], d.get("version"))
+        pg = cls(d["maps"], d["portals"], d.get("version"))
+        trees = Path(path or _DEFAULT).with_name("cut_trees.json")
+        if trees.exists():
+            pg.add_cut_trees(json.loads(trees.read_text()))
+        return pg
 
     # --- names -----------------------------------------------------------
     def map_name(self, mid) -> str:
@@ -63,6 +90,7 @@ class PortalGraph:
         to be blocked and elevators (dynamic destinations) are not routed unless ``allow_blocked``."""
         return [p for p in self.portals_on(map_id)
                 if p["component"] == comp and p["dest_map"] is not None and p["kind"] != "elevator"
+                and (p["kind"] != "cut" or self.can_cut)
                 and (allow_blocked or p["id"] not in self.blocked)]
 
     # --- static routing over (map, component) nodes ----------------------
@@ -142,7 +170,7 @@ class PortalGraph:
         grid = self._grid(map_id)
         portal_comp: dict[tuple[int, int], int] = {}
         for p in self.portals_on(map_id):
-            if p["kind"] == "ledge":
+            if p["kind"] in ("ledge", "cut"):
                 continue
             portal_comp[tuple(p["coord"])] = p["component"]
             if p.get("approach"):
@@ -182,7 +210,7 @@ class PortalGraph:
             return grid[(int(x), int(y))]
         portal_comp = {}
         for p in self.portals_on(map_id):
-            if p["kind"] == "ledge":
+            if p["kind"] in ("ledge", "cut"):
                 continue
             portal_comp[tuple(p["coord"])] = p["component"]
             if p.get("approach"):

@@ -213,3 +213,33 @@ def test_a_scripted_push_back_marks_the_portal_and_survives_leaving_by_another_d
     loop._pos_prev, loop._last_action_type = (70, 4, 3), "move"
     loop._observe_pushback(SimpleNamespace(player=SimpleNamespace(x=4, y=2, map_id=70)))
     assert not loop.memory.blocked_portals
+
+
+# ---- Cut trees in routing; real ledge take-offs (runs/sleeves-east: Route 9) ---------------------------
+def test_routing_goes_through_a_cut_tree_only_when_the_party_can_cut():
+    from pokemon_agent.agent.portal_graph import PortalGraph
+    pg = PortalGraph.load()
+    r9 = next(m for m, v in pg.maps.items() if v["name"] == "Route9")
+    west = {3}                                              # Route 9's entrance side of the tree at (5,8)
+    pg.can_cut = False
+    long_way = pg.route(r9, west, 21)
+    assert long_way and long_way[0]["label"].startswith("Route9 west edge")      # back through Cerulean
+    pg.can_cut = True
+    short = pg.route(r9, west, 21)
+    assert short[0]["kind"] == "cut" and tuple(short[0]["coord"]) == (5, 8) and short[-1]["dest_map"] == 21
+
+
+def test_a_ledge_hop_needs_the_right_standing_tile():
+    from pokemon_agent.agent.navigator import ledge_hops
+    terrain = {(10, 11): "ledge_s", (11, 11): "ledge_s"}
+    assert set(ledge_hops(terrain)) == {(10, 10), (11, 10)}                 # terrain alone: any cell above
+    assert set(ledge_hops(terrain, {(11, 10, "south")})) == {(11, 10)}      # the game's table decides
+
+
+def test_cut_criteria_only_count_real_trees():
+    from pokemon_agent.agent.l1_pipeline import validate_step
+    ok, err = validate_step({"kind": "action", "map": 3, "talk": True, "who": "Cut tree at (15,18)",
+                             "done_when": "cut:15,18"})
+    assert not ok and "no Cut tree at (15,18)" in err and "(19,28)" in err  # Vermilion's tree, asked in Cerulean
+    assert validate_step({"kind": "action", "map": 20, "talk": True, "who": "Cut tree at (5,8)",
+                          "done_when": "cut:5,8"})[0]

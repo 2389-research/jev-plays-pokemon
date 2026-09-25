@@ -190,6 +190,120 @@ def evolution_docs() -> dict[str, str]:
     return docs
 
 
+# HMs: where each is given, the badge that allows it outside battle (engine/menus/start_sub_menus.asm),
+# and what it does in the field. Locations are game facts (story events), listed for L1 to reason with.
+HM_FACTS = [
+    ("HM01", "Cut", "Cascade Badge (Misty)", "the S.S. Anne captain in Vermilion Harbor (he's seasick; talk to him)",
+     "cuts down a small tree (shown as T on the map) standing in the way; the tree grows back when you leave the area"),
+    ("HM02", "Fly", "Thunder Badge (Lt. Surge)", "a girl in the house on Route 16 (reached through Celadon's west side)",
+     "flies to any town you have visited"),
+    ("HM03", "Surf", "Soul Badge (Koga)", "the Secret House deep in the Safari Zone (Fuchsia City)",
+     "crosses water (~ on the map)"),
+    ("HM04", "Strength", "Rainbow Badge (Erika)", "the Safari Zone warden in Fuchsia City, after you return his Gold "
+     "Teeth (found in the Safari Zone)", "pushes boulders (Victory Road, Seafoam Islands)"),
+    ("HM05", "Flash", "Boulder Badge (Brock)", "Professor Oak's aide in the Route 2 Gate (behind a cut tree on Route 2), "
+     "once you've caught 10 kinds of Pokémon", "lights up dark caves (Rock Tunnel)"),
+]
+CUT_TREE_TILE = {"OVERWORLD": 0x3D, "GYM": 0x50}   # engine/overworld/cut.asm (wTileInFrontOfPlayer)
+
+
+def hm_docs(wild: dict) -> dict[str, str]:
+    """HMs / field moves, and who can learn each HM (ripped learnsets + where they're found in Red)."""
+    sys.path.insert(0, str(REPO / "src"))
+    from pokemon_agent.games.pokemon_red.tmhm import _data, learners
+    docs = {}
+    lines = ["HMs and field moves in Pokémon Red (game facts). An HM is a reusable item that TEACHES a move; the "
+             "move can then be used OUTSIDE battle from the party menu (START > POKéMON > choose the Pokémon > the "
+             "move's name, listed above STATS), but only once you hold the badge that allows it.",
+             "How to use one: (1) get the HM item; (2) teach it: START > ITEM > the HM > USE > choose a Pokémon that "
+             "can learn it (if it already knows 4 moves, pick one to forget; HM moves themselves can't be forgotten "
+             "normally); (3) stand next to the obstacle FACING it and use the move from the party menu. Pressing A "
+             "at a tree or boulder does nothing by itself in Gen 1.", ""]
+    for code, move, badge, where, what in HM_FACTS:
+        lines.append(f"- {code} {move}: {what}. Needs the {badge} to use outside battle. Where: {where}.")
+    lines.append("")
+    lines.append("Other field moves (from the party menu, no badge): Dig and Teleport (escape to the last Pokémon "
+                 "Center / out of a cave), Softboiled (share HP).")
+    docs[f"{PREFIX}HMs and field moves (Cut, Fly, Surf, Strength, Flash)"] = "\n".join(lines)
+
+    # where each learner lives in the wild in Red (species -> maps), for "who could I catch to learn Cut?"
+    where: dict[str, list[str]] = defaultdict(list)
+    for area, t in wild.items():
+        for slots_key in ("grass", "water"):
+            for _lvl, sp in (t.get(slots_key) or (0, []))[1]:
+                nm, place = species(sp), name(area)
+                if place not in where[nm]:
+                    where[nm].append(place)
+    def norm(x):
+        return re.sub(r"[^a-z0-9]", "", x.lower())
+    wn = {norm(k): v for k, v in where.items()}
+    for code, move, badge, _where, _what in HM_FACTS:
+        ls = learners(move)
+        rows = []
+        for sp in ls:
+            found = wn.get(norm(sp))
+            rows.append(f"- {sp}" + (f": wild in {', '.join(found[:6])}" if found else ": not found wild in Red "
+                                                                                          "(evolve, trade or gift)"))
+        docs[f"{PREFIX}Pokemon that can learn {move} ({code})"] = (
+            f"Pokémon in Pokémon Red that can learn {move} from {code} (ripped from the game's TM/HM learnsets). "
+            f"A Pokémon that can't learn it may evolve into one that can (see its evolution). Using {move} outside "
+            f"battle needs the {badge}.\n" + "\n".join(rows))
+    mach = _data()["machines"]
+    docs[f"{PREFIX}TM and HM list (what each teaches)"] = (
+        "Every TM and HM in Pokémon Red and the move it teaches. A TM is used up when taught; an HM is reusable.\n"
+        + "\n".join(f"- {k}: {v}" for k, v in sorted(mach.items(), key=lambda kv: (kv[0][:2] != "HM", kv[0]))))
+    return docs
+
+
+def cut_tree_docs() -> dict[str, str]:
+    """Every small tree that Cut removes, per map, from the ripped block data — and what each tree
+    separates (the doors / map edges reachable on each side of it)."""
+    import rip_portals as rp
+    consts, tilesets = rp.parse_map_constants(), rp.parse_tilesets()
+    lines = []
+    for mname in rp.all_map_names():
+        try:
+            md = rp.load_map(mname, consts, tilesets)
+        except Exception:
+            continue
+        tid = CUT_TREE_TILE.get(md.tileset)
+        trees = sorted(c for c, t in md.tiles.items() if tid is not None and t == tid)
+        if not trees:
+            continue
+        comp = rp.connected_components(md.walkable)
+        where_by_comp: dict[int, list[str]] = defaultdict(list)
+        for w in md.warps:
+            c = comp.get((w["x"], w["y"]))
+            if c is None:
+                cs = [comp[n] for n in ((w["x"], w["y"] + 1), (w["x"], w["y"] - 1), (w["x"] + 1, w["y"]),
+                                         (w["x"] - 1, w["y"])) if n in comp]
+                c = min(cs) if cs else None
+            if c is not None:
+                d = f"door to {w['dest_const'].replace('_', ' ').title()}"
+                if d not in where_by_comp[c]:
+                    where_by_comp[c].append(d)
+        for cn in md.connections:
+            edge = {"north": [(x, 0) for x in range(md.width)], "south": [(x, md.height - 1) for x in range(md.width)],
+                    "west": [(0, y) for y in range(md.height)], "east": [(md.width - 1, y) for y in range(md.height)]
+                    }.get(cn["dir"].lower(), [])
+            for c in {comp[e] for e in edge if e in comp}:
+                where_by_comp[c].append(f"{cn['dir'].lower()} edge to {name(cn['target_name'])}")
+        parts = []
+        for (x, y) in trees:
+            sides = sorted({comp[n] for n in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)) if n in comp})
+            if len(sides) >= 2:
+                desc = " | ".join(", ".join(where_by_comp.get(c) or ["no doors/exits"]) for c in sides)
+                parts.append(f"({x},{y}) separates: {desc}")
+            else:
+                parts.append(f"({x},{y})")
+        lines.append(f"- {name(mname)}: cut trees at " + "; ".join(parts))
+    return {f"{PREFIX}Cut trees (where small trees block the way)": (
+        "Every small tree that the field move CUT removes, per area, with what lies on each side of it (the "
+        "doors and map exits reachable from each side). Coordinates are (x, y) on that area's map. A cut tree grows "
+        "back when you leave the area. Using Cut needs HM01 taught to a party Pokémon and the Cascade Badge.\n"
+        + "\n".join(lines))}
+
+
 def build_docs() -> dict[str, str]:
     pg = PortalGraph.load()
     wild = wild_tables()
@@ -344,6 +458,10 @@ def build_docs() -> dict[str, str]:
              ]
     docs[f"{PREFIX}story gates and blockers"] = "\n".join(lines)
 
+    # --- HMs / field moves / TM list / who can learn each HM / every cut tree (ripped)
+    docs.update(hm_docs(wild))
+    docs.update(cut_tree_docs())
+
     # --- evolutions (ripped from data/pokemon/evos_moves.asm): what each Pokémon becomes, and how
     for title, text in evolution_docs().items():
         docs[f"{PREFIX}{title}"] = text
@@ -361,7 +479,8 @@ CURATED_STORY = """Curated overview (hand-written, not derived from game data) o
 4. Cerulean: MISTY (Water; Grass and Electric are super-effective). Cascade Badge. North: Nugget Bridge (Route 24, rival)
    and Route 25 to Bill's house (S.S. Ticket). Then through the trashed house (Rocket, TM28 Dig) south to Route 5.
 5. Route 5 -> Underground Path -> Route 6 -> Vermilion City: board the S.S. Anne with the ticket, get HM01 CUT from the
-   captain. LT. SURGE (Electric; Ground is immune/super-effective). Thunder Badge (Cut usable outside battle).
+   captain (usable outside battle thanks to the Cascade Badge; the tree in front of Vermilion Gym needs it).
+   LT. SURGE (Electric; Ground is immune/super-effective). Thunder Badge (Fly usable outside battle).
 6. Route 11 / Diglett's Cave back to Route 2; Route 9 -> Route 10 -> ROCK TUNNEL (Flash helps) -> Lavender Town.
 7. Route 8 -> Underground Path -> Route 7 -> Celadon City: ERIKA (Grass; Fire/Ice/Flying/Poison/Bug super-effective).
    Rainbow Badge. Game Corner -> Rocket Hideout -> Silph Scope. Buy drinks on the Department Store roof.

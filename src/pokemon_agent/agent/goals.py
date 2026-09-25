@@ -111,6 +111,7 @@ class GoalsChange:
     catch: list[str] | str | None = None                   # list = set it; "clear"; None = unchanged
     lead: str | None = None                                # a party nickname to put first; "clear" removes
     train: list[str] | str | None = None                   # switch-train these members; "clear" removes
+    teach: dict | None = None                              # {"move", "who", "forget"?}: teach a TM/HM once
 
 
 def _crit(dw: str | None) -> dict | None:
@@ -180,7 +181,11 @@ def detect_change(plan: AgentPlan, prop: dict, *, step_edit: bool) -> GoalsChang
         names = [str(t).strip() for t in train if str(t).strip()]
         if names and [norm(t) for t in names] != cur_train:
             ch.train = names
+    teach = prop.get("teach")
+    if isinstance(teach, dict) and str(teach.get("move") or "").strip() and str(teach.get("who") or "").strip():
+        ch.teach = {k: str(teach[k]).strip() for k in ("move", "who", "forget") if str(teach.get(k) or "").strip()}
     if not (ch.goals or ch.notepad is not None or ch.catch is not None or ch.lead is not None or ch.train is not None
+            or ch.teach is not None
             or (ch.drop_interrupted and plan.interrupted.text)):
         return None
     return ch
@@ -213,6 +218,8 @@ def apply_change(plan: AgentPlan, ch: GoalsChange, *, pre_status: dict[str, str]
         else:
             bg["train"] = list(ch.train)
         plan.battle_goals = bg
+    if ch.teach is not None:
+        plan.battle_goals = {**(plan.battle_goals or {}), "teach": dict(ch.teach)}
     if ch.lead is not None:
         bg = dict(plan.battle_goals or {})
         if ch.lead == "clear":

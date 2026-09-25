@@ -37,7 +37,7 @@ class WorldMap:
         self.bounds: dict[int, tuple[int, int]] = {}
         # counter / "talk-over" cells per map (talk to an NPC across one), from the ingest
         self.counters: dict[int, set[tuple[int, int]]] = {}
-        # per-map semantic terrain class per cell (floor/wall/grass/water/ledge_*/door/counter)
+        # per-map semantic terrain class per cell (floor/wall/grass/water/ledge_*/door/counter/cut_tree)
         self.terrain: dict[int, dict[tuple[int, int], str]] = {}
 
     # --- updates ----------------------------------------------------------
@@ -164,7 +164,7 @@ class WorldMap:
     # never has to guess what a tile is (derived from RAM + the pokered tile catalog).
     SEMANTIC_SYMBOLS = {
         "floor": ".", "wall": "#", "grass": "G", "water": "~",
-        "ledge_s": "v", "ledge_w": "<", "ledge_e": ">", "door": "D", "counter": "C",
+        "ledge_s": "v", "ledge_w": "<", "ledge_e": ">", "door": "D", "counter": "C", "cut_tree": "T",
     }
     SEMANTIC_LEGEND = (
         "MAP LEGEND (each tile's real properties, not a guess):\n"
@@ -172,6 +172,7 @@ class WorldMap:
         "  G = tall grass (walkable; wild Pokemon appear here)    ~ = water (NOT walkable without Surf)\n"
         "  D = door/exit (step onto it to change area)    C = counter (talk to an NPC across it)\n"
         "  N = a person/NPC (NOT walkable; walking into them talks, doesn't move you)\n"
+        "  T = small tree CUT can remove (NOT walkable until cut; grows back when you leave the area)\n"
         "  v/</> = LEDGE, one-way: 'v' you may hop SOUTH, '<' hop WEST, '>' hop EAST; you can NEVER "
         "go back up a ledge, so treat them as walls except in the hop direction.\n"
         "  x = COLUMN (two header rows: tens then units), y = ROW (labeled at left, increases south)."

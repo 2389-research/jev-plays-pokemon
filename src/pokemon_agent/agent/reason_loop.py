@@ -23,6 +23,7 @@ executor→action path (legacy behavior for the vertical-slice tests).
 """
 from __future__ import annotations
 
+import re
 from collections import deque
 from collections.abc import Callable
 from typing import Optional
@@ -476,6 +477,16 @@ class ReasoningLoop:
 
         # training (L1's call): put the chosen LEAD at the front of the party so it starts battles and
         # earns EXP — done through the in-game menu, on the overworld only
+        if self._maybe_teach():
+            from ..core.models import WaitAction
+            rstep = ReasonStep(location="party", objective="teach a move", reasoning="L1's teach order",
+                               action=WaitAction(frames=1))
+            self._prev = rstep
+            self._emit_reason(rstep, 0)
+            return self._finish(obs, rstep, ActionResult(success=True, result="completed",
+                                                         mode_before=detect_mode(self.controller.emu),
+                                                         mode_after=detect_mode(self.controller.emu),
+                                                         detail="taught a move (teach)"), 0, {}, shot)
         if self._maybe_apply_lead():
             from ..core.models import WaitAction
             rstep = ReasonStep(location="party", objective="put the lead first",
@@ -1075,7 +1086,9 @@ class ReasoningLoop:
         if tmap0 is not None and self._no_known_route(obs.player, tmap0):
             # the ground-truth graph has NO way there from here: don't guess a tile (that wanders) —
             # stall so the step wedges with the real reason and L1 decides (e.g. explore)
-            return {"kind": "unresolved", "reason": f"no known way to {map_name(tmap0)} from here"}
+            trees = [f"({o['x']},{o['y']})" for o in self._objects_here(obs.player.map_id) if o.get("kind") == "cut_tree"]
+            return {"kind": "unresolved", "reason": f"no known way to {map_name(tmap0)} from here"
+                    + (f"; Cut trees on this map at {', '.join(trees)}" if trees else "")}
         prov = getattr(self.planner, "provider", None) if self.planner else None
         if prov is None:
             return default
@@ -1104,7 +1117,7 @@ class ReasoningLoop:
             "npcs": [{"x": int(n["x"]), "y": int(n["y"]), "sprite": n.get("sprite"),
                       "talked_to": n.get("talked_to")}
                      for n in ((obs.game_state or {}).get("npcs") or []) if "x" in n and "y" in n],
-            "objects": [{"name": o["name"], "x": o["x"], "y": o["y"]} for o in objects_on(player.map_id)],
+            "objects": [{"name": o["name"], "x": o["x"], "y": o["y"]} for o in self._objects_here(player.map_id)],
             "recent_trail": list(self._recent)[-8:],
             "recent_targets": [dict(t) for t in self._recent_targets],
             "reachable": reach,
@@ -1433,7 +1446,18 @@ class ReasoningLoop:
         mid = getattr(player, "map_id", None)
         # a THING, not a person (Bill's PC, a sign, a trash can): RAM has no sprite for it, so aim at its
         # tile from the ripped object table (runs/vermilion-team: "use the PC" re-talked to Bill forever)
-        obj = None if named else next(iter(match_objects(objects_on(mid), sprite)), None)
+        obj = None
+        if not named:
+            cands = match_objects(self._objects_here(mid), sprite)
+            at = re.search(r"\((\d+)\s*,\s*(\d+)\)", str(sprite or ""))
+            if at:                                   # "Cut tree at (15,18)": that one, if it's listed
+                cands = [o for o in cands if (o["x"], o["y"]) == (int(at.group(1)), int(at.group(2)))] or cands
+            obj = min(cands, key=lambda o: abs(o["x"] - player.x) + abs(o["y"] - player.y)) if cands else None
+        if obj is not None and obj.get("kind") == "cut_tree":
+            return self._report_unreachable(
+                self._face_and_interact({"x": obj["x"], "y": obj["y"], "sprite": obj["name"]}, target, obs,
+                                        blocked_dirs, occupied, use=lambda: self._use_cut(obj, target, directive)),
+                target, directive)
         if obj is not None:
             key = ["obj", mid, int(obj["x"]), int(obj["y"])]
             if isinstance(target, dict) and talk_step:
@@ -1520,7 +1544,7 @@ class ReasoningLoop:
             self._wedge_active(f"can't get beside them — {block}")
         return move
 
-    def _face_and_interact(self, npc, target, obs, blocked_dirs, occupied, face: str | None = None):
+    def _face_and_interact(self, npc, target, obs, blocked_dirs, occupied, face: str | None = None, use=None):
         """Reach a tile beside ``npc`` (a person, or an object from the map table), face it, press A.
         ``face`` limits the approach to the one side the game accepts (Bill's PC: facing north).
         WHERE to stand is ``interaction.plan``: only standable sides (walkable, nobody on it, not a
@@ -1548,6 +1572,8 @@ class ReasoningLoop:
                     return MoveAction(direction=d)   # blocked step into the counter -> bump/turn
                 return self._interact_with(target, (nx, ny), npc)
             if facing_ok:
+                if use is not None:                   # a field move (Cut) instead of pressing A
+                    return use()
                 return self._interact_with(target, (nx, ny), npc)   # adjacent AND facing -> talk
             return MoveAction(direction=d)        # adjacent, turn to face (a blocked step turns you)
         others = occupied - {(nx, ny)}
@@ -1579,6 +1605,47 @@ class ReasoningLoop:
                                       planned)
         self.on_event("approach_blocked", {"step": self.session.step, "report": self._approach_block})
         return None
+
+    def _objects_here(self, map_id) -> list[dict]:
+        """Things on this map to use: the ripped object table (PC, signs...) plus every Cut tree the RAM
+        terrain shows right now (cut ones are gone; they regrow when the map reloads)."""
+        trees = [{"name": f"Cut tree at ({x},{y})", "x": x, "y": y, "kind": "cut_tree"}
+                 for (x, y), cls in sorted((self.world.terrain.get(map_id) or {}).items()) if cls == "cut_tree"]
+        return list(objects_on(map_id)) + trees
+
+    def _use_cut(self, tree: dict, target, directive):
+        """Facing a Cut tree: use Cut from the party menu (the player chose to — this only runs for a
+        target naming the tree). Reports plainly when it can't: nobody knows Cut, or no Cascade Badge."""
+        from ..core.models import WaitAction
+        from ..games.pokemon_red import party_menu
+        from ..games.pokemon_red.game_state import read_badges
+        from ..games.pokemon_red.map_reader import read_collision_map as _rcm
+        emu = self.controller.emu
+        party = read_party(emu)
+        slot = next((i for i in range(len(party)) if party_menu.knows(emu, i, "Cut")), None)
+        why = None
+        if slot is None:
+            from ..games.pokemon_red.tmhm import can_learn
+            able = [str(m.get("nickname") or m.get("species")) for m in party if can_learn(m.get("species"), "Cut")]
+            why = ("nobody in the party knows Cut" + (f" ({', '.join(able)} can learn it from HM01)" if able
+                                                       else " and nobody in the party can learn it"))
+        elif not (emu.read_memory(0xD356) & 0b10):              # wObtainedBadges bit 1 = Cascade Badge
+            why = "using Cut outside battle needs the Cascade Badge"
+        if why is None:
+            ok, said = party_menu.use_field_move(emu, slot, "Cut")
+            coll = _rcm(emu)
+            gone = bool(coll) and coll["terrain"].get((tree["x"], tree["y"])) != "cut_tree"
+            self.on_event("field_move", {"step": self.session.step, "move": "Cut", "at": [tree["x"], tree["y"]],
+                                         "by": party[slot].get("nickname") or party[slot].get("species"),
+                                         "ok": gone, "said": said[:120]})
+            self.episode.record(self.session.step, "action",
+                                text=f"used Cut on the tree at ({tree['x']},{tree['y']}): "
+                                     + ("it's gone" if gone else f"didn't work — {said[:80]}"))
+            if gone:
+                return WaitAction(frames=1)
+            why = f"Cut didn't work: {said[:100]}"
+        self._approach_block = f"can't cut the tree at ({tree['x']},{tree['y']}): {why}"
+        return self._report_unreachable(None, target, directive)
 
     def _interaction_geometry(self, obs) -> dict | None:
         """What ``interaction.plan`` needs about the current map: RAM walkability, who stands where,
@@ -1957,6 +2024,9 @@ class ReasoningLoop:
             route = self._portal_route(player, tmap)
             if route is None:
                 parts.append(f"no known way from this part of {map_name(player.map_id)} to {map_name(tmap)}")
+                trees = [f"({o['x']},{o['y']})" for o in self._objects_here(player.map_id) if o.get("kind") == "cut_tree"]
+                if trees:
+                    parts.append(f"Cut trees on this map at {', '.join(trees)} (Cut removes them)")
                 if self.memory.blocked_portals:
                     parts.append("blocked earlier: " + "; ".join(
                         f"{k.split(':')[0]} ({v.get('why', '')[:80]})" for k, v in list(self.memory.blocked_portals.items())[:3]))
@@ -2787,6 +2857,42 @@ class ReasoningLoop:
         res = battle_actions.switch_to(emu, best)
         self.on_event("train_switch", {"step": self.session.step, "trainee": cur.get("nickname") or cur.get("species"),
                                        "to": party[best].get("nickname") or party[best].get("species"), "result": res})
+        return True
+
+    def _maybe_teach(self) -> bool:
+        """L1 set "teach": {"move", "who", "forget"?}: teach that move from the TM/HM in the bag through the
+        in-game menu, once (the order is consumed either way). The result — learned, or why not — goes into
+        the since-last-review account; a failure arms an L1 review. True when it acted this step."""
+        bg = (self._plan.battle_goals or {}) if self._plan is not None else {}
+        order = bg.get("teach")
+        if not isinstance(order, dict):
+            return False
+        self._plan.battle_goals = {k: v for k, v in bg.items() if k != "teach"}
+        from ..games.pokemon_red import party_menu
+        from ..games.pokemon_red.game_state import read_items
+        from ..games.pokemon_red.tmhm import can_learn, machine_move
+        emu = self.controller.emu
+        move, who = str(order.get("move") or "").strip(), str(order.get("who") or "").strip().lower()
+        party = read_party(emu)
+        slot = next((i for i, m in enumerate(party) if who in (str(m.get("nickname") or "").strip().lower(),
+                                                                str(m.get("species") or "").lower())), None)
+        items = read_items(emu)
+        idx = next((i for i, it in enumerate(items)
+                    if (machine_move(it.get("item")) or "").lower() == move.lower()), None)
+        mon = (party[slot].get("nickname") or party[slot].get("species")) if slot is not None else who
+        if slot is None:
+            ok, detail = False, f"no party member called {who!r}"
+        elif idx is None:
+            ok, detail = False, f"no TM/HM for {move} in the bag"
+        elif not can_learn(party[slot].get("species"), move):
+            ok, detail = False, f"{party[slot].get('species')} can't learn {move}"
+        else:
+            ok, detail = party_menu.teach(emu, idx, slot, machine_move(items[idx]["item"]), order.get("forget"))
+        self.on_event("teach", {"step": self.session.step, "move": move, "who": mon, "ok": ok, "detail": detail})
+        self.episode.record(self.session.step, "action",
+                            text=f"taught {move} to {mon}" if ok else f"couldn't teach {move} to {mon}: {detail}")
+        if not ok:
+            self._l1_event = True
         return True
 
     def _maybe_apply_lead(self) -> bool:

@@ -17,6 +17,7 @@ load-bearing for the happy path.
 from __future__ import annotations
 
 import json
+import re
 import time
 
 from ..games.pokemon_red import needs
@@ -112,7 +113,8 @@ stand, walks there around anyone in the way, faces it and presses A (or steps th
   talk to a person:        {"kind":"approach_npc","sprite":"<name from NPCS>","why":"..."}
   use a thing (PC, sign):  {"kind":"use_object","object":"<name from OBJECTS>","why":"..."}
   go through a door:       {"kind":"enter","map":<dest map id from CANDIDATE_EXITS>,"why":"..."}
-Never pick the tile beside someone to talk to them — name them.
+Never pick the tile beside someone to talk to them — name them. A "Cut tree at (x,y)" in OBJECTS is used
+the same way (use_object): the router stands beside it and uses Cut (a party member must know Cut).
 
 COORDINATES: (x,y); x = column (increases EAST), y = row (increases SOUTH, y=0 is the north edge).
 The MAP_VIEW starts with a LEGEND naming every symbol (path, grass 'G' walkable, '#'/water NOT
@@ -255,6 +257,19 @@ evolutions are in the knowledge base (e.g. search "<species> evolution").
 """
 
 
+FIELD_MOVES_TEXT = """FIELD MOVES — an HM (in ITEMS, e.g. "HM01 Cut") teaches a move that can also be used OUTSIDE battle:
+Cut removes a small tree (T on the map; it grows back when you leave the area), Surf crosses water,
+Strength pushes boulders, Flash lights caves, Fly returns to a visited town. Each needs a party member that
+knows the move AND the right badge (Cut: Cascade Badge). PARTY shows each member's moves and "can_learn_hm"
+(e.g. "none; as Beedrill: Cut" — it can once it evolves). To teach one, set "teach": {"move": "Cut",
+"who": "<nickname>", "forget": "<a move to drop, optional>"} (the harness uses the TM/HM from ITEMS once
+and reports the result in SINCE_LAST_REVIEW). To cut a tree, add a step naming it, e.g.
+{"kind":"action","map":<map>,"talk":true,"who":"Cut tree at (15,18)","done_when":"cut:15,18"} — the router
+walks beside it and uses Cut. Where the trees are, who can learn each HM and where to get them: search the
+knowledge base (e.g. "Cut trees", "Pokemon that can learn Cut", "HMs and field moves").
+"""
+
+
 BRAINSTORM_SYSTEM = """You are the L1 BRAINSTORM step for an agent playing Pokémon Red, working
 toward its own GOALS (primary = the long-term aim, e.g. the next badge). TRIAGE has flagged that the plan may need to
 change. Your job here is OPEN-ENDED assessment, not a final plan: think through the situation —
@@ -298,7 +313,7 @@ it's worth it: catching wild Pokémon is how the team grows. Catching needs Pok�
 at a Poké Mart) and a free party slot; set a standing CATCH goal to have the battle layer catch the
 species you want. SIGNALS.catch shows your current catch goal and whether it can fire right now (ready,
 and why not — e.g. no Poké Balls).
-{TRAINING}
+{TRAINING}{FIELD_MOVES}
 TOOL — knowledge base: you SHOULD look things up in a Pokémon Red guide before concluding —
 especially WHERE things are (which map has the item / NPC / Poké Center) and what a story gate
 requires. To search, reply with ONLY {"search": ["query1", "query2"]} (1-3 queries); results come
@@ -376,6 +391,7 @@ done_when MUST be exactly one of (this is the full grammar — nothing else pars
   "badges>=<N>"               — earned N badges.
   "hp_frac>=<F>"              — party healed to fraction F of max HP.
   "talked"                    — had a conversation (only when nothing more specific fits).
+  "cut:<x>,<y>"               — the Cut tree at (x,y) on the step's map is gone (you used Cut on it).
   "verify:<yes/no question>"  — judged by a verifier from game state; LAST RESORT ONLY, when the
                                  objective genuinely isn't RAM-checkable. Prefer any RAM-checkable
                                  form above over verify: whenever one applies — verify: is
@@ -460,7 +476,7 @@ and why not — e.g. no Poké Balls).
 LEARN FROM LOSSES — SIGNALS.recent_battles lists your last fights and their results. If you LOST (e.g.
 to a gym leader), don't simply heal and retry the same way: change something first — train team members,
 buy Potions, pick a better lead or a counter type — and say in the notepad what you're changing and why.
-{TRAINING}To set or change the CATCH goal add "catch": ["<species>", ...] (or ["any"]); the battle layer then
+{TRAINING}{FIELD_MOVES}To set or change the CATCH goal add "catch": ["<species>", ...] (or ["any"]); the battle layer then
 catches a matching wild Pokémon when it can (weakened into the catch band, then a ball). A goal that
 SIGNALS.catch says isn't ready does nothing until you fix the reason (e.g. add a step to buy Poké Balls:
 {"kind":"action","map":<mart>,"talk":true,"who":"the Mart clerk","done_when":"has_item:Poke Ball>=5"}).
@@ -476,15 +492,16 @@ Return ONLY JSON:
  "catch": [ <species or "any"> ],
  "lead": "<party nickname to put first>",
  "train": ["<party nickname>", ...],
+ "teach": {"move": "<move>", "who": "<party nickname>", "forget": "<optional move>"},
  "interrupt_active": {"why": "<only when replacing the ACTIVE step — the concrete reason it can't wait>"}}
-Omit "goals", "notepad", "catch", "lead", "train" and "interrupt_active" entirely when not needed (the common case). To drop the
+Omit "goals", "notepad", "catch", "lead", "train", "teach" and "interrupt_active" entirely when not needed (the common case). To drop the
 paused focus, add "interrupted": "" (see GOALS above); otherwise never include "interrupted"."""
 
 
 # the TEAM/TRAINING options must be known where the strategy is formed (BRAINSTORM), not only where it's
 # turned into steps (DECIDE) — runs/sleeves-mtmoon: brainstorm never saw them, so training never came up
-BRAINSTORM_SYSTEM = BRAINSTORM_SYSTEM.replace("{TRAINING}", TRAINING_TEXT)
-DECIDE_SYSTEM = DECIDE_SYSTEM.replace("{TRAINING}", TRAINING_TEXT)
+BRAINSTORM_SYSTEM = BRAINSTORM_SYSTEM.replace("{TRAINING}", TRAINING_TEXT).replace("{FIELD_MOVES}", FIELD_MOVES_TEXT)
+DECIDE_SYSTEM = DECIDE_SYSTEM.replace("{TRAINING}", TRAINING_TEXT).replace("{FIELD_MOVES}", FIELD_MOVES_TEXT)
 # runs/sleeves-mtmoon step 1730: one assessment came back in Chinese — state the language outright
 _ENGLISH = "\nWrite every text field (assessment, why, notepad, goals) in English."
 BRAINSTORM_SYSTEM += _ENGLISH
@@ -817,6 +834,8 @@ class Planner:
                 out["train"] = [str(t) for t in tr if str(t).strip()]
             elif isinstance(tr, str) and tr.strip().lower() == "clear":
                 out["train"] = "clear"
+            if isinstance(data.get("teach"), dict):
+                out["teach"] = data["teach"]
             ia = data.get("interrupt_active")
             if isinstance(ia, dict) and str(ia.get("why") or "").strip():
                 out["interrupt_active"] = {"why": str(ia["why"]).strip()[:300]}
@@ -927,6 +946,9 @@ class Planner:
                 return {"hp_frac": f">={float(num)}"}
             except ValueError:
                 return None
+        if low.startswith("cut:"):                          # a cut tree on that map is gone: cut:15,18
+            m = re.match(r"cut:\s*\(?\s*(\d+)\s*,\s*(\d+)", low)
+            return {"tree_cut": [map_id, int(m.group(1)), int(m.group(2))]} if m else None
         if low.startswith("verify:"):
             return {"verify": s[len("verify:"):].strip()}  # judged by the verifier (not RAM)
         return None

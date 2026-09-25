@@ -42,6 +42,10 @@ _LEDGE_WEST = {0x27}          # hop LEFT
 _LEDGE_EAST = {0x0D, 0x1D}    # hop RIGHT
 _WATER = {0x14}
 _OW_DOOR = {0x1B, 0x58}       # walkable tiles that trigger a warp when a warp event sits on them
+GYM = 7
+# a small tree the field move CUT removes (engine/overworld/cut.asm: wTileInFrontOfPlayer $3d in the
+# OVERWORLD tileset, $50 in GYM). Not walkable until cut; it grows back when the map reloads.
+CUT_TREE_TILES = {OVERWORLD: 0x3D, GYM: 0x50}
 
 
 def _classify(t: int, tileset: int, walkable_ids: set[int], grass_tile: int,
@@ -51,6 +55,8 @@ def _classify(t: int, tileset: int, walkable_ids: set[int], grass_tile: int,
     RAM so they work in every tileset (e.g. FOREST grass=0x20)."""
     if t in counter_ids:
         return "counter"
+    if CUT_TREE_TILES.get(tileset) == t:
+        return "cut_tree"
     if grass_tile != 0xFF and t == grass_tile:
         return "grass"
     if tileset == OVERWORLD:
@@ -102,7 +108,7 @@ def read_collision_map(emu) -> dict | None:
         walkable: set[tuple[int, int]] = set()
         counters: set[tuple[int, int]] = set()
         grass: set[tuple[int, int]] = set()
-        terrain: dict[tuple[int, int], str] = {}  # (x,y) -> semantic class (floor/wall/grass/water/ledge_*/door/counter)
+        terrain: dict[tuple[int, int], str] = {}  # (x,y) -> semantic class (floor/wall/grass/water/ledge_*/door/counter/cut_tree)
         block_tiles: dict[int, list[int]] = {}
         for by in range(hb):
             for bx in range(wb):

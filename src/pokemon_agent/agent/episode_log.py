@@ -83,7 +83,7 @@ class EpisodeLog:
         if changes:
             out["plan_changes"] = changes[-10:]
         for typ, key in (("battle", "battles"), ("discovery", "discoveries"),
-                         ("portal_blocked", "blocked"), ("explore_end", "explored")):
+                         ("portal_blocked", "blocked"), ("explore_end", "explored"), ("action", "actions")):
             items = [e.get("text") for e in evs if e["type"] == typ and e.get("text")]
             if items:
                 out[key] = items[-6:]

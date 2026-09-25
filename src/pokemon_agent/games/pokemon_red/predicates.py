@@ -102,6 +102,13 @@ def _clause(key: str, spec, emu: Emulator, memory=None) -> bool:
         return _cmp(read_money(emu), spec)
     if key == "in_battle":
         return _cmp(1 if emu.read_memory(WISINBATTLE) else 0, spec)
+    if key == "tree_cut":
+        # spec = [map, x, y]: on that map, the Cut tree tile at (x, y) is gone (it regrows on reload,
+        # so this is only true while we're on the map having cut it)
+        from .map_reader import read_collision_map
+        mid, x, y = (int(v) for v in spec)
+        coll = read_collision_map(emu) if emu.read_memory(WCURMAP) == mid else None
+        return bool(coll) and coll["terrain"].get((x, y)) not in (None, "cut_tree")
     if key == "has_item":
         # spec = item id (int): true when that item is in the bag (e.g. Oak's Parcel 0x46).
         try:
